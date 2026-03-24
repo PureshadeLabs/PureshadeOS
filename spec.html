@@ -606,6 +606,153 @@
   }
 
   .spec-main { animation: fadeIn 0.4s ease forwards; }
+
+  /* HAMBURGER */
+  .nav-hamburger {
+    display: none;
+    flex-direction: column;
+    justify-content: center;
+    gap: 5px;
+    width: 36px;
+    height: 36px;
+    background: none;
+    border: 1px solid var(--border2);
+    cursor: pointer;
+    padding: 8px;
+    flex-shrink: 0;
+  }
+
+  .nav-hamburger span {
+    display: block;
+    height: 1.5px;
+    background: var(--text2);
+    transition: all 0.25s;
+    transform-origin: center;
+  }
+
+  .nav-hamburger.open span:nth-child(1) { transform: translateY(6.5px) rotate(45deg); }
+  .nav-hamburger.open span:nth-child(2) { opacity: 0; transform: scaleX(0); }
+  .nav-hamburger.open span:nth-child(3) { transform: translateY(-6.5px) rotate(-45deg); }
+
+  /* MOBILE MENU DRAWER */
+  .nav-drawer {
+    display: none;
+    position: fixed;
+    top: 56px;
+    left: 0;
+    right: 0;
+    background: rgba(10, 10, 8, 0.98);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border);
+    z-index: 99;
+    padding: 8px 0 16px;
+    transform: translateY(-8px);
+    opacity: 0;
+    pointer-events: none;
+    transition: transform 0.25s ease, opacity 0.25s ease;
+  }
+
+  .nav-drawer.open {
+    transform: translateY(0);
+    opacity: 1;
+    pointer-events: all;
+  }
+
+  .nav-drawer a {
+    display: block;
+    padding: 13px 24px;
+    color: var(--text2);
+    text-decoration: none;
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+    transition: color 0.15s, background 0.15s;
+  }
+
+  .nav-drawer a:last-child { border-bottom: none; }
+  .nav-drawer a:hover { color: var(--text); background: var(--surface); }
+
+  .nav-drawer .drawer-cta {
+    margin: 12px 24px 0;
+    padding: 12px 24px;
+    background: var(--accent);
+    color: var(--bg);
+    font-weight: 500;
+    text-align: center;
+    border-bottom: none;
+    display: block;
+  }
+
+  .nav-drawer .drawer-cta:hover { background: var(--accent2); }
+
+  /* RESPONSIVE */
+  @media (max-width: 900px) {
+    nav { padding: 0 20px; }
+    .nav-links { display: none; }
+    .nav-hamburger { display: flex; }
+    .nav-drawer { display: block; }
+
+    .spec-layout { grid-template-columns: 1fr; }
+
+    .sidebar {
+      position: static;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      padding: 16px 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0;
+      overflow: visible;
+    }
+
+    .sidebar-section {
+      margin-bottom: 0;
+      min-width: 160px;
+      flex: 1;
+    }
+
+    .sidebar-heading { padding: 8px 16px 4px; }
+    .sidebar-link { padding: 5px 16px; font-size: 11px; }
+    .sidebar-link.sub { padding-left: 24px; }
+
+    .spec-main { padding: 36px 20px 80px; }
+
+    .spec-page-title { font-size: 36px; }
+
+    .daemon-grid { grid-template-columns: 1fr; }
+
+    .syscall-grid { grid-template-columns: 1fr; }
+
+    .ownership-diagram { grid-template-columns: 1fr; }
+
+    .prop-row { grid-template-columns: 140px 1fr; }
+
+    .rf-step { grid-template-columns: 100px 1fr; gap: 12px; }
+
+    .spec-table { font-size: 11px; }
+    .spec-table th, .spec-table td { padding: 9px 12px; }
+    .spec-table td:first-child { white-space: normal; }
+  }
+
+  @media (max-width: 600px) {
+    .sidebar { display: none; }
+
+    .spec-main { padding: 28px 16px 60px; }
+
+    .spec-page-title { font-size: 28px; }
+
+    .prop-row { grid-template-columns: 1fr; gap: 4px; }
+    .prop-key { color: var(--text3); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; }
+
+    .rf-step { grid-template-columns: 1fr; }
+    .rf-label { margin-bottom: 4px; }
+
+    .spec-table { display: block; overflow-x: auto; white-space: nowrap; }
+
+    .spec-meta { flex-wrap: wrap; gap: 12px; }
+  }
 </style>
 </head>
 <body>
@@ -623,7 +770,34 @@
     <li><a href="#rpkg">rpkg</a></li>
     <li><a href="#resilience">Resilience</a></li>
   </ul>
+  <button class="nav-hamburger" id="hamburger" aria-label="Toggle menu">
+    <span></span><span></span><span></span>
+  </button>
 </nav>
+
+<div class="nav-drawer" id="navDrawer">
+  <a href="index.html">← Overview</a>
+  <a href="#kernel">Kernel</a>
+  <a href="#filesystem">Filesystem</a>
+  <a href="#tooling">Tooling</a>
+  <a href="#rpkg">rpkg</a>
+  <a href="#resilience">Resilience</a>
+</div>
+
+<script>
+  const btn = document.getElementById('hamburger');
+  const drawer = document.getElementById('navDrawer');
+  btn.addEventListener('click', () => {
+    btn.classList.toggle('open');
+    drawer.classList.toggle('open');
+  });
+  drawer.querySelectorAll('a').forEach(a => {
+    a.addEventListener('click', () => {
+      btn.classList.remove('open');
+      drawer.classList.remove('open');
+    });
+  });
+</script>
 
 <div class="spec-layout">
 
