@@ -1,0 +1,10 @@
+[build]
+target = "x86_64-raptoros.json"
+
+[target.x86_64-raptoros]
+rustflags = ["-C", "link-arg=-Tuserspace.ld"]
+
+[unstable]
+build-std = ["core"]
+build-std-features = ["compiler-builtins-mem"]
+json-target-spec = true
