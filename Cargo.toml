@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "lythos-std",
+    "lythd",
+]
+resolver = "2"
