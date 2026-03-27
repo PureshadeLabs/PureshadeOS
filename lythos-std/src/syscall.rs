@@ -44,34 +44,34 @@ pub const ERR_MIN: u64 = EINVAL;
 #[inline]
 pub unsafe fn syscall0(nr: u64) -> u64 {
     let ret: u64;
-    core::arch::asm!(
+    unsafe { core::arch::asm!(
         "syscall",
         inlateout("rax") nr => ret,
         out("rcx") _,
         out("r11") _,
         options(nostack, preserves_flags),
-    );
+    ); }
     ret
 }
 
 #[inline]
 pub unsafe fn syscall1(nr: u64, a1: u64) -> u64 {
     let ret: u64;
-    core::arch::asm!(
+    unsafe { core::arch::asm!(
         "syscall",
         inlateout("rax") nr => ret,
         in("rdi") a1,
         out("rcx") _,
         out("r11") _,
         options(nostack, preserves_flags),
-    );
+    ); }
     ret
 }
 
 #[inline]
 pub unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> u64 {
     let ret: u64;
-    core::arch::asm!(
+    unsafe { core::arch::asm!(
         "syscall",
         inlateout("rax") nr => ret,
         in("rdi") a1,
@@ -79,14 +79,14 @@ pub unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> u64 {
         out("rcx") _,
         out("r11") _,
         options(nostack, preserves_flags),
-    );
+    ); }
     ret
 }
 
 #[inline]
 pub unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> u64 {
     let ret: u64;
-    core::arch::asm!(
+    unsafe { core::arch::asm!(
         "syscall",
         inlateout("rax") nr => ret,
         in("rdi") a1,
@@ -95,14 +95,14 @@ pub unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> u64 {
         out("rcx") _,
         out("r11") _,
         options(nostack, preserves_flags),
-    );
+    ); }
     ret
 }
 
 #[inline]
 pub unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     let ret: u64;
-    core::arch::asm!(
+    unsafe { core::arch::asm!(
         "syscall",
         inlateout("rax") nr => ret,
         in("rdi") a1,
@@ -112,14 +112,14 @@ pub unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
         out("rcx") _,
         out("r11") _,
         options(nostack, preserves_flags),
-    );
+    ); }
     ret
 }
 
 #[inline]
 pub unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64 {
     let ret: u64;
-    core::arch::asm!(
+    unsafe { core::arch::asm!(
         "syscall",
         inlateout("rax") nr => ret,
         in("rdi") a1,
@@ -131,6 +131,6 @@ pub unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6:
         out("rcx") _,
         out("r11") _,
         options(nostack, preserves_flags),
-    );
+    ); }
     ret
 }
