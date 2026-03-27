@@ -1,2 +1,4 @@
 .DS_Store
-/target
+debug
+target
+**/*.rs.bk
