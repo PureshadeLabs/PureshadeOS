@@ -31,6 +31,11 @@ use lythos_std::{
     task::yield_now,
 };
 
+// ── Embedded service binaries ─────────────────────────────────────────────────
+
+/// lythdist ELF — compiled by build.rs before lythd is built.
+static LYTHDIST_ELF: &[u8] = include_bytes!(env!("LYTHDIST_ELF"));
+
 // ── Capability handle constants ───────────────────────────────────────────────
 
 const _MEM_CAP:      u64 = 0;
@@ -88,13 +93,21 @@ pub extern "C" fn _start() -> ! {
     let registry = Endpoint::create().expect("lythd: registry endpoint alloc failed");
     println!("[lythd] service registry online (cap {})", registry.as_raw());
 
-    // ── 3. Spawn core services (ELF blobs embedded once built) ───────────
+    // ── 3. Spawn core services ────────────────────────────────────────────
     //
-    // Example (when lythdist is ready):
-    //   let lythdist_id = lythos_std::task::spawn(LYTHDIST_ELF, &[_MEM_CAP])
-    //       .expect("lythd: lythdist spawn failed");
-    //
-    println!("[lythd] core services pending (lythdist, lythmsg not yet built)");
+    // lythdist — capability distributor:
+    //   caps[0] = Memory cap    (lythdist will sub-grant it to future services)
+    //   caps[1] = dist_req_ep   (lythd sends CapGrantReq here)
+    //   caps[2] = dist_rsp_ep   (lythdist sends CapGrantAck/Nack here)
+
+    let _dist_req_ep = Endpoint::create().expect("lythd: dist req endpoint alloc failed");
+    let _dist_rsp_ep = Endpoint::create().expect("lythd: dist rsp endpoint alloc failed");
+
+    let lythdist_task = lythos_std::task::spawn(
+        LYTHDIST_ELF,
+        &[_MEM_CAP, _dist_req_ep.as_raw(), _dist_rsp_ep.as_raw()],
+    ).expect("lythd: lythdist spawn failed");
+    println!("[lythd] lythdist spawned (task {})", lythdist_task);
 
     // ── 4. Supervisor loop ────────────────────────────────────────────────
     println!("[lythd] entering supervisor loop");

@@ -10,5 +10,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "lythdist"
+version = "0.1.0"
+dependencies = [
+ "lythos-std",
+]
+
+[[package]]
 name = "lythos-std"
 version = "0.1.0"

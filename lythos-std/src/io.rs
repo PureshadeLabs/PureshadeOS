@@ -304,35 +304,6 @@ impl core::fmt::Write for Stdout {
     }
 }
 
-/// Internal helper called by the `print!` macro.
-#[doc(hidden)]
-pub fn _print(args: core::fmt::Arguments<'_>) {
-    use core::fmt::Write;
-    let mut w = LogWriter::new();
-    let _ = w.write_fmt(args);
-    w.flush();
-}
-
-// ── Public macros ─────────────────────────────────────────────────────────────
-
-#[macro_export]
-macro_rules! print {
-    ($($arg:tt)*) => {
-        $crate::io::_print(core::format_args!($($arg)*))
-    };
-}
-
-#[macro_export]
-macro_rules! println {
-    ()              => { $crate::print!("\n") };
-    ($($arg:tt)*)   => { $crate::print!("{}\n", core::format_args!($($arg)*)) };
-}
-
-/// Identical to `println!` — lythos has no separate stderr.
-#[macro_export]
-macro_rules! eprintln {
-    ()              => { $crate::print!("\n") };
-    ($($arg:tt)*)   => { $crate::print!("{}\n", core::format_args!($($arg)*)) };
 impl Write for Stderr {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         if let Ok(s) = core::str::from_utf8(buf) {
