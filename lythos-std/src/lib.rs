@@ -86,7 +86,14 @@ pub const SYS_IPC_CREATE: u64 = 8;
 pub const SYS_ROLLBACK:   u64 = 9;
 pub const SYS_EXEC:       u64 = 10;
 /// Write a UTF-8 string to the kernel serial console (debug aid).
-pub const SYS_LOG:        u64 = 11;
+pub const SYS_LOG:           u64 = 11;
+/// Send a 64-byte message **and** transfer a capability over an IPC endpoint.
+/// a1=ipc_cap, a2=msg_ptr, a3=msg_len, a4=cap_handle_to_send (moved from caller).
+pub const SYS_IPC_SEND_CAP:  u64 = 12;
+/// Receive a 64-byte message **and** accept any in-flight capability.
+/// a1=ipc_cap, a2=buf_ptr, a3=buf_len, a4=out_handle_ptr (*mut u64; 0=ignore).
+/// Returns bytes received; writes new handle (or u64::MAX if none) to *out_handle_ptr.
+pub const SYS_IPC_RECV_CAP:  u64 = 13;
 
 // ── Capability rights constants ───────────────────────────────────────────────
 
@@ -176,6 +183,27 @@ unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     unsafe { syscall4(nr, 0, 0, 0, 0) }
 }
 
+#[inline]
+unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            in("r10") a4,
+            in("r8")  a5,
+            in("r9")  a6,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
 // ── Public raw syscall API ────────────────────────────────────────────────────
 
 /// Yield the current task's CPU slice. See also `task::yield_now`.
@@ -240,6 +268,42 @@ pub fn sys_ipc_create() -> Result<u64, SysError> {
     if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(r) }
 }
 
+/// Send a message **and** transfer a capability over an IPC endpoint.
+///
+/// `cap_to_send` is moved out of the caller's capability table.
+/// Blocks if the endpoint ring buffer is full.
+pub fn sys_ipc_send_cap(ipc_cap: u64, msg: &[u8], cap_to_send: u64) -> Result<(), SysError> {
+    let r = unsafe {
+        syscall4(SYS_IPC_SEND_CAP,
+                 ipc_cap,
+                 msg.as_ptr() as u64,
+                 msg.len() as u64,
+                 cap_to_send)
+    };
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(()) }
+}
+
+/// Receive a message and accept any in-flight capability from an IPC endpoint.
+///
+/// Returns `(bytes_received, Some(handle))` if a capability was attached to the
+/// message, or `(bytes_received, None)` if no capability was in flight.
+/// Blocks if the endpoint ring buffer is empty.
+pub fn sys_ipc_recv_cap(ipc_cap: u64, buf: &mut [u8]) -> Result<(usize, Option<u64>), SysError> {
+    let mut out_handle: u64 = u64::MAX;
+    let r = unsafe {
+        syscall4(SYS_IPC_RECV_CAP,
+                 ipc_cap,
+                 buf.as_mut_ptr() as u64,
+                 buf.len() as u64,
+                 &mut out_handle as *mut u64 as u64)
+    };
+    if SysError::is_err_raw(r) {
+        return Err(SysError::from_raw(r));
+    }
+    let cap = if out_handle == u64::MAX { None } else { Some(out_handle) };
+    Ok((r as usize, cap))
+}
+
 /// Trigger a system rollback (requires Rollback capability).
 /// Returns an error if the cap check fails; never returns on success.
 pub fn sys_rollback() -> SysError {
@@ -249,8 +313,9 @@ pub fn sys_rollback() -> SysError {
 /// Load and execute a static ELF64 binary. Returns the new `TaskId`.
 pub fn sys_exec(elf: &[u8], caps: &[u64]) -> Result<u64, SysError> {
     let r = unsafe {
-        syscall4(SYS_EXEC, elf.as_ptr() as u64, elf.len() as u64,
-                 caps.as_ptr() as u64, caps.len() as u64)
+        syscall6(SYS_EXEC, elf.as_ptr() as u64, elf.len() as u64,
+                 caps.as_ptr() as u64, caps.len() as u64,
+                 0, 0)
     };
     if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(r) }
 }

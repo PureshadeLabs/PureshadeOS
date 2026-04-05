@@ -99,13 +99,14 @@ pub extern "C" fn _start() -> ! {
     //   caps[0] = Memory cap    (lythdist will sub-grant it to future services)
     //   caps[1] = dist_req_ep   (lythd sends CapGrantReq here)
     //   caps[2] = dist_rsp_ep   (lythdist sends CapGrantAck/Nack here)
+    //   caps[3] = registry      (lythdist registers itself on startup)
 
-    let _dist_req_ep = Endpoint::create().expect("lythd: dist req endpoint alloc failed");
-    let _dist_rsp_ep = Endpoint::create().expect("lythd: dist rsp endpoint alloc failed");
+    let dist_req_ep = Endpoint::create().expect("lythd: dist req endpoint alloc failed");
+    let dist_rsp_ep = Endpoint::create().expect("lythd: dist rsp endpoint alloc failed");
 
     let lythdist_task = lythos_std::task::spawn(
         LYTHDIST_ELF,
-        &[_MEM_CAP, _dist_req_ep.as_raw(), _dist_rsp_ep.as_raw()],
+        &[_MEM_CAP, dist_req_ep.as_raw(), dist_rsp_ep.as_raw(), registry.as_raw()],
     ).expect("lythd: lythdist spawn failed");
     println!("[lythd] lythdist spawned (task {})", lythdist_task);
 
@@ -176,9 +177,24 @@ pub extern "C" fn _start() -> ! {
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     lythos_std::sys_log("[lythd] PANIC");
+    if let Some(msg) = info.message().as_str() {
+        lythos_std::sys_log(": ");
+        lythos_std::sys_log(msg);
+    }
     if let Some(loc) = info.location() {
         lythos_std::sys_log(" at ");
         lythos_std::sys_log(loc.file());
+        lythos_std::sys_log(":");
+        // print line number manually
+        let line = loc.line();
+        let mut buf = [0u8; 10];
+        let mut n = 0usize;
+        let mut v = line;
+        if v == 0 { buf[0] = b'0'; n = 1; } else {
+            while v > 0 { buf[n] = b'0' + (v % 10) as u8; n += 1; v /= 10; }
+            buf[..n].reverse();
+        }
+        if let Ok(s) = core::str::from_utf8(&buf[..n]) { lythos_std::sys_log(s); }
         lythos_std::sys_log("\n");
     } else {
         lythos_std::sys_log("\n");

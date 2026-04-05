@@ -61,6 +61,30 @@ impl Endpoint {
         self.recv(&mut buf)?;
         Ok(buf)
     }
+
+    /// Send bytes **and** transfer a capability handle in one atomic operation.
+    ///
+    /// `cap` is moved out of the caller's capability table and delivered to the
+    /// receiver alongside the message.  Blocks if the ring is full.
+    pub fn send_with_cap(&self, msg: &[u8], cap: u64) -> io::Result<()> {
+        crate::sys_ipc_send_cap(self.cap, msg, cap).map_err(io::Error::from_kernel)
+    }
+
+    /// Receive bytes and accept any in-flight capability, blocking until a
+    /// message arrives.
+    ///
+    /// Returns `(bytes_written, Some(handle))` when a capability was attached,
+    /// or `(bytes_written, None)` when the message carried no capability.
+    pub fn recv_with_cap(&self, buf: &mut [u8]) -> io::Result<(usize, Option<u64>)> {
+        crate::sys_ipc_recv_cap(self.cap, buf).map_err(io::Error::from_kernel)
+    }
+
+    /// Receive a fixed 64-byte frame and accept any in-flight capability.
+    pub fn recv_frame_with_cap(&self) -> io::Result<([u8; MSG_SIZE], Option<u64>)> {
+        let mut buf = [0u8; MSG_SIZE];
+        let (_, cap) = self.recv_with_cap(&mut buf)?;
+        Ok((buf, cap))
+    }
 }
 
 // ── Message ───────────────────────────────────────────────────────────────────

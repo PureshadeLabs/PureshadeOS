@@ -1,6 +1,12 @@
-   0.052175542s  INFO prepare_target{force=false package_id=lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd) target="lythd"}: cargo::core::compiler::fingerprint: dependency on `compiler_builtins` is newer than we are 1774585817.630441282s > 1774585136.625727292s "/Users/lyon/Documents/GitHub/RaptorOS/lythos-std"
-   0.052371333s  INFO prepare_target{force=false package_id=lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd) target="lythd"}: cargo::core::compiler::fingerprint: fingerprint error for lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd)/Check { test: false }/TargetInner { name: "lythd", doc: true, ..: with_path("/Users/lyon/Documents/GitHub/RaptorOS/lythd/src/main.rs", Edition2024) }
-   0.052378917s  INFO prepare_target{force=false package_id=lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd) target="lythd"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lyon/Documents/GitHub/RaptorOS/target/x86_64-raptoros/debug/.fingerprint/lythd-174dd99584265049/bin-lythd`
+   0.081608333s  INFO prepare_target{force=false package_id=lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd) target="lythd"}: cargo::core::compiler::fingerprint: stale: changed "/Users/lyon/Documents/GitHub/RaptorOS/lythos-std/src/lib.rs"
+   0.081766542s  INFO prepare_target{force=false package_id=lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd) target="lythd"}: cargo::core::compiler::fingerprint:           (vs) "/Users/lyon/Documents/GitHub/RaptorOS/target/x86_64-raptoros/debug/.fingerprint/lythos-std-89dcd29dd4e8bb92/dep-lib-lythos_std"
+   0.081769542s  INFO prepare_target{force=false package_id=lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd) target="lythd"}: cargo::core::compiler::fingerprint:                FileTime { seconds: 1774733772, nanos: 577114093 } < FileTime { seconds: 1775241333, nanos: 867427585 }
+   0.082058292s  INFO prepare_target{force=false package_id=lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd) target="lythd"}: cargo::core::compiler::fingerprint: fingerprint dirty for lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd)/Check { test: false }/TargetInner { name: "lythd", doc: true, ..: with_path("/Users/lyon/Documents/GitHub/RaptorOS/lythd/src/main.rs", Edition2024) }
+   0.082064125s  INFO prepare_target{force=false package_id=lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd) target="lythd"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { unit: UnitIndex(11) })
+   0.084264208s  INFO prepare_target{force=false package_id=lythos-std v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythos-std) target="lythos_std"}: cargo::core::compiler::fingerprint: fingerprint dirty for lythos-std v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythos-std)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("lythos_std", ["lib"], "/Users/lyon/Documents/GitHub/RaptorOS/lythos-std/src/lib.rs", Edition2024) }
+   0.084361958s  INFO prepare_target{force=false package_id=lythos-std v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythos-std) target="lythos_std"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: "/Users/lyon/Documents/GitHub/RaptorOS/target/x86_64-raptoros/debug/.fingerprint/lythos-std-89dcd29dd4e8bb92/dep-lib-lythos_std", reference_mtime: FileTime { seconds: 1774733772, nanos: 577114093 }, stale: "/Users/lyon/Documents/GitHub/RaptorOS/lythos-std/src/lib.rs", stale_mtime: FileTime { seconds: 1775241333, nanos: 867427585 } }))
+   0.084578583s  INFO prepare_target{force=false package_id=lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd) target="lythd"}: cargo::core::compiler::fingerprint: fingerprint error for lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd)/Check { test: true }/TargetInner { name: "lythd", doc: true, ..: with_path("/Users/lyon/Documents/GitHub/RaptorOS/lythd/src/main.rs", Edition2024) }
+   0.084582875s  INFO prepare_target{force=false package_id=lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd) target="lythd"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lyon/Documents/GitHub/RaptorOS/target/x86_64-raptoros/debug/.fingerprint/lythd-73eb70bbd05a9e39/test-bin-lythd`
 
 Caused by:
     No such file or directory (os error 2)
@@ -23,10 +29,10 @@ Stack backtrace:
   14: std::rt::lang_start::<()>::{closure#0}
   15: std::rt::lang_start_internal
   16: _main
-   0.070192958s  INFO prepare_target{force=false package_id=lythos-std v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythos-std) target="lythos_std"}: cargo::core::compiler::fingerprint: fingerprint dirty for lythos-std v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythos-std)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("lythos_std", ["lib"], "/Users/lyon/Documents/GitHub/RaptorOS/lythos-std/src/lib.rs", Edition2024) }
-   0.070216792s  INFO prepare_target{force=false package_id=lythos-std v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythos-std) target="lythos_std"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDependency { unit: UnitIndex(1), dep_mtime: FileTime { seconds: 1774585817, nanos: 630441282 }, max_mtime: FileTime { seconds: 1774585136, nanos: 625727292 } })
-   0.071092125s  INFO prepare_target{force=false package_id=lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd) target="lythd"}: cargo::core::compiler::fingerprint: fingerprint error for lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd)/Check { test: true }/TargetInner { name: "lythd", doc: true, ..: with_path("/Users/lyon/Documents/GitHub/RaptorOS/lythd/src/main.rs", Edition2024) }
-   0.071097625s  INFO prepare_target{force=false package_id=lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd) target="lythd"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lyon/Documents/GitHub/RaptorOS/target/x86_64-raptoros/debug/.fingerprint/lythd-73eb70bbd05a9e39/test-bin-lythd`
+   0.099287500s  INFO prepare_target{force=false package_id=lythdist v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythdist) target="lythdist"}: cargo::core::compiler::fingerprint: fingerprint dirty for lythdist v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythdist)/Check { test: false }/TargetInner { name: "lythdist", doc: true, ..: with_path("/Users/lyon/Documents/GitHub/RaptorOS/lythdist/src/main.rs", Edition2024) }
+   0.099299208s  INFO prepare_target{force=false package_id=lythdist v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythdist) target="lythdist"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { unit: UnitIndex(11) })
+   0.099552333s  INFO prepare_target{force=false package_id=lythdist v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythdist) target="lythdist"}: cargo::core::compiler::fingerprint: fingerprint error for lythdist v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythdist)/Check { test: true }/TargetInner { name: "lythdist", doc: true, ..: with_path("/Users/lyon/Documents/GitHub/RaptorOS/lythdist/src/main.rs", Edition2024) }
+   0.099558083s  INFO prepare_target{force=false package_id=lythdist v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythdist) target="lythdist"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lyon/Documents/GitHub/RaptorOS/target/x86_64-raptoros/debug/.fingerprint/lythdist-6185bd2ffd0de2fb/test-bin-lythdist`
 
 Caused by:
     No such file or directory (os error 2)
@@ -49,56 +55,8 @@ Stack backtrace:
   14: std::rt::lang_start::<()>::{closure#0}
   15: std::rt::lang_start_internal
   16: _main
-   0.071332292s  INFO prepare_target{force=false package_id=lythdist v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythdist) target="lythdist"}: cargo::core::compiler::fingerprint: fingerprint error for lythdist v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythdist)/Check { test: false }/TargetInner { name: "lythdist", doc: true, ..: with_path("/Users/lyon/Documents/GitHub/RaptorOS/lythdist/src/main.rs", Edition2024) }
-   0.071336042s  INFO prepare_target{force=false package_id=lythdist v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythdist) target="lythdist"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lyon/Documents/GitHub/RaptorOS/target/x86_64-raptoros/debug/.fingerprint/lythdist-e678efce5631718b/bin-lythdist`
-
-Caused by:
-    No such file or directory (os error 2)
-
-Stack backtrace:
-   0: <std::backtrace::Backtrace>::create
-   1: cargo_util::paths::read_bytes
-   2: cargo_util::paths::read
-   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
-   4: cargo::core::compiler::fingerprint::prepare_target
-   5: cargo::core::compiler::compile
-   6: <cargo::core::compiler::build_runner::BuildRunner>::compile
-   7: cargo::ops::cargo_compile::compile_ws
-   8: cargo::ops::cargo_compile::compile_with_exec
-   9: cargo::ops::cargo_compile::compile
-  10: cargo::commands::check::exec
-  11: <cargo::cli::Exec>::exec
-  12: cargo::main
-  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
-  14: std::rt::lang_start::<()>::{closure#0}
-  15: std::rt::lang_start_internal
-  16: _main
-   0.071546583s  INFO prepare_target{force=false package_id=lythdist v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythdist) target="lythdist"}: cargo::core::compiler::fingerprint: fingerprint error for lythdist v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythdist)/Check { test: true }/TargetInner { name: "lythdist", doc: true, ..: with_path("/Users/lyon/Documents/GitHub/RaptorOS/lythdist/src/main.rs", Edition2024) }
-   0.071550083s  INFO prepare_target{force=false package_id=lythdist v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythdist) target="lythdist"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lyon/Documents/GitHub/RaptorOS/target/x86_64-raptoros/debug/.fingerprint/lythdist-6185bd2ffd0de2fb/test-bin-lythdist`
-
-Caused by:
-    No such file or directory (os error 2)
-
-Stack backtrace:
-   0: <std::backtrace::Backtrace>::create
-   1: cargo_util::paths::read_bytes
-   2: cargo_util::paths::read
-   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
-   4: cargo::core::compiler::fingerprint::prepare_target
-   5: cargo::core::compiler::compile
-   6: <cargo::core::compiler::build_runner::BuildRunner>::compile
-   7: cargo::ops::cargo_compile::compile_ws
-   8: cargo::ops::cargo_compile::compile_with_exec
-   9: cargo::ops::cargo_compile::compile
-  10: cargo::commands::check::exec
-  11: <cargo::cli::Exec>::exec
-  12: cargo::main
-  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
-  14: std::rt::lang_start::<()>::{closure#0}
-  15: std::rt::lang_start_internal
-  16: _main
-   0.071716125s  INFO prepare_target{force=false package_id=lythos-std v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythos-std) target="lythos_std"}: cargo::core::compiler::fingerprint: fingerprint error for lythos-std v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythos-std)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("lythos_std", ["lib"], "/Users/lyon/Documents/GitHub/RaptorOS/lythos-std/src/lib.rs", Edition2024) }
-   0.071720333s  INFO prepare_target{force=false package_id=lythos-std v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythos-std) target="lythos_std"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lyon/Documents/GitHub/RaptorOS/target/x86_64-raptoros/debug/.fingerprint/lythos-std-bbb995d8149a0195/test-lib-lythos_std`
+   0.100073458s  INFO prepare_target{force=false package_id=lythos-std v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythos-std) target="lythos_std"}: cargo::core::compiler::fingerprint: fingerprint error for lythos-std v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythos-std)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("lythos_std", ["lib"], "/Users/lyon/Documents/GitHub/RaptorOS/lythos-std/src/lib.rs", Edition2024) }
+   0.100079292s  INFO prepare_target{force=false package_id=lythos-std v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythos-std) target="lythos_std"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/lyon/Documents/GitHub/RaptorOS/target/x86_64-raptoros/debug/.fingerprint/lythos-std-bbb995d8149a0195/test-lib-lythos_std`
 
 Caused by:
     No such file or directory (os error 2)
@@ -124,7 +82,7 @@ Stack backtrace:
     Checking lythos-std v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythos-std)
     Checking lythd v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythd)
     Checking lythdist v0.1.0 (/Users/lyon/Documents/GitHub/RaptorOS/lythdist)
-error: could not compile `lythdist` (bin "lythdist" test) due to 1 previous error
-warning: build failed, waiting for other jobs to finish...
-error: could not compile `lythd` (bin "lythd" test) due to 1 previous error
 error: could not compile `lythos-std` (lib test) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `lythdist` (bin "lythdist" test) due to 1 previous error
+error: could not compile `lythd` (bin "lythd" test) due to 1 previous error

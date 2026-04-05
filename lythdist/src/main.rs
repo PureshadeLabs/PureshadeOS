@@ -48,15 +48,30 @@ use lythos_std::{cap_rights, ipc::Endpoint, println, eprintln, sys_cap_grant, sy
 
 // ── Capability handles at entry ───────────────────────────────────────────────
 
-const MEM_CAP: u64 = 0;
-const REQ_EP:  u64 = 1;   // request  endpoint: lythd sends,    lythdist receives
-const RSP_EP:  u64 = 2;   // response endpoint: lythdist sends, lythd receives
+const MEM_CAP:      u64 = 0;
+const REQ_EP:       u64 = 1;   // request  endpoint: lythd sends,    lythdist receives
+const RSP_EP:       u64 = 2;   // response endpoint: lythdist sends, lythd receives
+const REGISTRY_CAP: u64 = 3;   // lythd service registry — used once at startup
 
-// ── Protocol message kinds ────────────────────────────────────────────────────
+// ── CapGrant protocol message kinds ──────────────────────────────────────────
 
 const KIND_GRANT_REQ:  u8 = 0;
 const KIND_GRANT_ACK:  u8 = 1;
 const KIND_GRANT_NACK: u8 = 2;
+
+// ── Service registry protocol (shared with lythd) ────────────────────────────
+//
+// | Byte(s) | Field    | Meaning                             |
+// |---------|----------|-------------------------------------|
+// | 0       | kind     | 0=Register  1=Lookup  2=Ack  3=Nack |
+// | 1       | name_len | length of service name (≤32)        |
+// | 2..34   | name     | service name, ASCII, null-padded    |
+// | 34..42  | task_id  | spawned TaskId  (Register only)     |
+// | 42..50  | cap      | IPC cap handle for the service      |
+// | 50..64  | _pad     | reserved, zero                      |
+
+const REG_KIND_REGISTER: u8 = 0;
+const REG_KIND_ACK:      u8 = 2;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -64,6 +79,25 @@ const KIND_GRANT_NACK: u8 = 2;
 pub extern "C" fn _start() -> ! {
     println!("[lythdist] capability distributor online (mem_cap={} req={} rsp={})",
              MEM_CAP, REQ_EP, RSP_EP);
+
+    // ── Register with the lythd service registry ──────────────────────────
+    {
+        let reg_ep = Endpoint::from_raw(REGISTRY_CAP);
+        let name   = b"lythdist";
+        let mut frame = [0u8; 64];
+        frame[0] = REG_KIND_REGISTER;
+        frame[1] = name.len() as u8;
+        frame[2..2 + name.len()].copy_from_slice(name);
+        // task_id bytes 34..42 — left as zero (lythdist has no SYS_GETPID yet)
+        // cap bytes 42..50 — advertise REQ_EP as the service endpoint
+        frame[42..50].copy_from_slice(&REQ_EP.to_le_bytes());
+        reg_ep.send_frame(&frame).expect("lythdist: registry register send failed");
+        let ack = reg_ep.recv_frame().expect("lythdist: registry register ack failed");
+        if ack[0] != REG_KIND_ACK {
+            panic!("lythdist: registry registration rejected (kind={})", ack[0]);
+        }
+        println!("[lythdist] registered with service registry");
+    }
 
     let req_ep = Endpoint::from_raw(REQ_EP);
     let rsp_ep = Endpoint::from_raw(RSP_EP);
