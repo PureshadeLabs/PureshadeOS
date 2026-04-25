@@ -157,9 +157,23 @@ fn send_nack(ep: &Endpoint) {
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     cask_std::sys_log("[lythdist] PANIC");
+    if let Some(msg) = info.message().as_str() {
+        cask_std::sys_log(": ");
+        cask_std::sys_log(msg);
+    }
     if let Some(loc) = info.location() {
         cask_std::sys_log(" at ");
         cask_std::sys_log(loc.file());
+        cask_std::sys_log(":");
+        let line = loc.line();
+        let mut buf = [0u8; 10];
+        let mut n = 0usize;
+        let mut v = line;
+        if v == 0 { buf[0] = b'0'; n = 1; } else {
+            while v > 0 { buf[n] = b'0' + (v % 10) as u8; n += 1; v /= 10; }
+            buf[..n].reverse();
+        }
+        if let Ok(s) = core::str::from_utf8(&buf[..n]) { cask_std::sys_log(s); }
         cask_std::sys_log("\n");
     } else {
         cask_std::sys_log("\n");
