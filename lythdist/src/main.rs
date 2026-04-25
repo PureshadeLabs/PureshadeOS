@@ -71,7 +71,6 @@ const KIND_GRANT_NACK: u8 = 2;
 // | 50..64  | _pad     | reserved, zero                      |
 
 const REG_KIND_REGISTER: u8 = 0;
-const REG_KIND_ACK:      u8 = 2;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -81,6 +80,12 @@ pub extern "C" fn _start() -> ! {
              MEM_CAP, REQ_EP, RSP_EP);
 
     // ── Register with the lythd service registry ──────────────────────────
+    //
+    // The registry endpoint is a one-way channel (services → lythd only).
+    // We send the Register message and do NOT wait for an ACK: lythd reads
+    // the message and processes it asynchronously.  Waiting for an ACK on
+    // the same bidirectional ring would race with lythd reading the Register
+    // from that ring before lythdist can receive the ACK.
     {
         let reg_ep = Endpoint::from_raw(REGISTRY_CAP);
         let name   = b"lythdist";
@@ -92,11 +97,7 @@ pub extern "C" fn _start() -> ! {
         // cap bytes 42..50 — advertise REQ_EP as the service endpoint
         frame[42..50].copy_from_slice(&REQ_EP.to_le_bytes());
         reg_ep.send_frame(&frame).expect("lythdist: registry register send failed");
-        let ack = reg_ep.recv_frame().expect("lythdist: registry register ack failed");
-        if ack[0] != REG_KIND_ACK {
-            panic!("lythdist: registry registration rejected (kind={})", ack[0]);
-        }
-        println!("[lythdist] registered with service registry");
+        println!("[lythdist] registered with service registry (async)");
     }
 
     let req_ep = Endpoint::from_raw(REQ_EP);

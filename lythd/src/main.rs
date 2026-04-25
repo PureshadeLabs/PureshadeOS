@@ -248,11 +248,7 @@ pub extern "C" fn _start() -> ! {
                 let svc = Service { name, task_id, cap };
                 println!("[lythd] registered '{}' task={} cap={}", svc.name_str(), task_id, cap);
                 services.push(svc);
-
-                // ACK
-                let mut ack = [0u8; 64];
-                ack[0] = KIND_ACK;
-                let _ = registry.send(&ack);
+                // No ACK — registry registration is one-way (fire-and-forget).
             }
 
             KIND_LOOKUP => {
