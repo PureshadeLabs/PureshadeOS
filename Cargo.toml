@@ -2,6 +2,7 @@
 members = [
     "cask-std",
     "lythdist",
+    "userspace/lysh",
     "lythd",
 ]
 resolver = "2"

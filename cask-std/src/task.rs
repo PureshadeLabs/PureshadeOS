@@ -3,6 +3,28 @@
 /// Opaque identifier for a cask task (each task = one process).
 pub type TaskId = u64;
 
+/// Liveness state of a task as reported by `SYS_TASK_STATUS`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskStatus {
+    /// Task is running or ready to run.
+    Running,
+    /// Task is blocked waiting on an IPC endpoint.
+    Blocked,
+    /// Task has exited or was never created.
+    Dead,
+}
+
+/// Query the kernel for the liveness of `task_id`.
+///
+/// Returns `TaskStatus::Dead` for any unknown task ID.
+pub fn task_status(task_id: TaskId) -> TaskStatus {
+    match crate::sys_task_status(task_id) {
+        1 => TaskStatus::Running,
+        2 => TaskStatus::Blocked,
+        _ => TaskStatus::Dead,
+    }
+}
+
 /// Spawn a new userspace process from a static ELF64 binary blob.
 ///
 /// `caps` is the ordered list of capability handles (from the calling task's

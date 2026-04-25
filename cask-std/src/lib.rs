@@ -94,6 +94,16 @@ pub const SYS_IPC_SEND_CAP:  u64 = 12;
 /// a1=ipc_cap, a2=buf_ptr, a3=buf_len, a4=out_handle_ptr (*mut u64; 0=ignore).
 /// Returns bytes received; writes new handle (or u64::MAX if none) to *out_handle_ptr.
 pub const SYS_IPC_RECV_CAP:  u64 = 13;
+/// Read bytes from the COM1 serial port into a user buffer.
+/// a1=buf_ptr (user VA), a2=buf_len.
+/// Blocks until at least one byte is available.  Returns bytes read.
+pub const SYS_SERIAL_READ:   u64 = 14;
+/// Return milliseconds elapsed since kernel boot.  No arguments.
+/// Return value is always a valid u64 millisecond count (never an error sentinel).
+pub const SYS_TIME:          u64 = 15;
+/// Return liveness of a task by ID.
+/// a1=TaskId.  Returns: 0=dead/missing, 1=running/ready, 2=blocked.
+pub const SYS_TASK_STATUS:   u64 = 16;
 
 // ── Capability rights constants ───────────────────────────────────────────────
 
@@ -332,6 +342,35 @@ pub fn sys_log(s: &str) {
         unsafe { syscall2(SYS_LOG, b[off..end].as_ptr() as u64, (end - off) as u64) };
         off = end;
     }
+}
+
+/// Read bytes from the COM1 serial port into `buf`.
+///
+/// Blocks (yielding the CPU) until at least one byte is available, then
+/// reads as many bytes as are ready (up to `buf.len()`).  Returns the number
+/// of bytes written into `buf`.
+pub fn sys_serial_read(buf: &mut [u8]) -> Result<usize, SysError> {
+    if buf.is_empty() { return Ok(0); }
+    let r = unsafe { syscall2(SYS_SERIAL_READ, buf.as_mut_ptr() as u64, buf.len() as u64) };
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(r as usize) }
+}
+
+/// Return milliseconds elapsed since kernel boot.
+///
+/// Backed by the calibrated APIC tick counter (~1 ms resolution).
+/// Use `time::Instant::now()` for ergonomic access.
+#[inline]
+pub fn sys_time() -> u64 {
+    unsafe { syscall0(SYS_TIME) }
+}
+
+/// Return the liveness status of a task by `task_id`.
+///
+/// Returns the raw kernel value: 0 = dead/missing, 1 = running/ready, 2 = blocked.
+/// Use `task::task_status()` for the typed wrapper.
+#[inline]
+pub fn sys_task_status(task_id: u64) -> u64 {
+    unsafe { syscall1(SYS_TASK_STATUS, task_id) }
 }
 
 // ── print! / println! / eprint! / eprintln! ───────────────────────────────────

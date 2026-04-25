@@ -6,8 +6,9 @@
 //!    the kernel before `exec`).
 //! 2. Print system info.
 //! 3. Create the **service registry** IPC endpoint.
-//! 4. Spawn core services (lythdist, lythmsg) once their ELF blobs exist.
-//! 5. Enter the **supervisor loop**: handle `Register` / `Lookup` requests.
+//! 4. Spawn core services (lythdist, lysh).
+//! 5. Enter the **supervisor loop**: handle `Register` / `Lookup` requests
+//!    and check service health on each iteration.
 //!
 //! ## Capability handles at entry
 //!
@@ -16,6 +17,17 @@
 //! | 0      | Memory   | Root memory cap — all free physical frames |
 //! | 1      | Rollback | `SYS_ROLLBACK` gate                        |
 //! | 2      | Ipc      | Boot-info endpoint — one pre-queued msg    |
+//!
+//! ## Health monitoring
+//!
+//! lythd tracks every spawned service as a `ManagedSvc`.  After each registry
+//! message it calls `check_and_restart` on all services.  If a service has
+//! exited unexpectedly it is restarted with the same capability set (up to 3
+//! times) before being marked `Failed`.
+//!
+//! **Limitation (MVP):** health checks only fire when a registry message
+//! arrives.  A future improvement would use a non-blocking IPC poll or a
+//! dedicated watchdog task so silent crashes are caught promptly.
 
 #![no_std]
 #![no_main]
@@ -28,7 +40,7 @@ use cask_std::{
     ipc::Endpoint,
     println, eprintln,
     sys_rollback, sys_task_exit,
-    task::yield_now,
+    task::{yield_now, TaskId, TaskStatus},
 };
 
 // ── Embedded service binaries ─────────────────────────────────────────────────
@@ -36,9 +48,12 @@ use cask_std::{
 /// lythdist ELF — compiled by build.rs before lythd is built.
 static LYTHDIST_ELF: &[u8] = include_bytes!(env!("LYTHDIST_ELF"));
 
+/// lysh ELF — compiled by build.rs before lythd is built.
+static LYSH_ELF: &[u8] = include_bytes!(env!("LYSH_ELF"));
+
 // ── Capability handle constants ───────────────────────────────────────────────
 
-const _MEM_CAP:      u64 = 0;
+const MEM_CAP:       u64 = 0;
 const _ROLLBACK_CAP: u64 = 1;
 const BOOT_INFO_CAP: u64 = 2;
 
@@ -60,7 +75,7 @@ const KIND_LOOKUP:   u8 = 1;
 const KIND_ACK:      u8 = 2;
 const KIND_NACK:     u8 = 3;
 
-// ── Service table ─────────────────────────────────────────────────────────────
+// ── Service registry table entry ──────────────────────────────────────────────
 
 struct Service {
     name:    [u8; 32],
@@ -72,6 +87,83 @@ impl Service {
     fn name_str(&self) -> &str {
         let n = self.name.iter().position(|&b| b == 0).unwrap_or(32);
         core::str::from_utf8(&self.name[..n]).unwrap_or("<invalid>")
+    }
+}
+
+// ── Health monitoring ─────────────────────────────────────────────────────────
+
+/// Lifecycle state of a managed service.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServiceState {
+    /// Service is running normally (may have previously been restarted).
+    Running,
+    /// Service has died and been restarted `n` times (1..=3).
+    Restarting(u8),
+    /// Service has exceeded the restart limit and is no longer managed.
+    Failed,
+}
+
+/// A service spawned and supervised by lythd.
+struct ManagedSvc {
+    name:      &'static str,
+    task_id:   TaskId,
+    state:     ServiceState,
+    /// ELF blob used to respawn this service.
+    elf:       &'static [u8],
+    /// Capability handles passed at spawn time (up to 8).
+    caps:      [u64; 8],
+    cap_count: usize,
+}
+
+impl ManagedSvc {
+    fn new(
+        name:    &'static str,
+        task_id: TaskId,
+        elf:     &'static [u8],
+        caps:    &[u64],
+    ) -> Self {
+        let mut caps_buf = [0u64; 8];
+        let cap_count = caps.len().min(8);
+        caps_buf[..cap_count].copy_from_slice(&caps[..cap_count]);
+        ManagedSvc { name, task_id, state: ServiceState::Running, elf, caps: caps_buf, cap_count }
+    }
+
+    /// Check whether this service is still alive; restart it if it has died.
+    ///
+    /// Called from the supervisor loop after each registry message.
+    fn check_and_restart(&mut self) {
+        // Already permanently failed — nothing to do.
+        if self.state == ServiceState::Failed { return; }
+
+        // Query the kernel for the task's current status.
+        if cask_std::task::task_status(self.task_id) != TaskStatus::Dead { return; }
+
+        // Task is dead.  Determine how many restart attempts have been made.
+        let attempts = match self.state {
+            ServiceState::Running        => 0,
+            ServiceState::Restarting(n) => n,
+            ServiceState::Failed         => return,
+        };
+
+        if attempts >= 3 {
+            eprintln!("[lythd] {} failed permanently after {} restart(s)", self.name, attempts);
+            self.state = ServiceState::Failed;
+            return;
+        }
+
+        eprintln!("[lythd] {} died — restart {}/3", self.name, attempts + 1);
+
+        match cask_std::task::spawn(self.elf, &self.caps[..self.cap_count]) {
+            Ok(new_id) => {
+                self.task_id = new_id;
+                self.state   = ServiceState::Restarting(attempts + 1);
+                println!("[lythd] {} restarted as task {}", self.name, new_id);
+            }
+            Err(e) => {
+                eprintln!("[lythd] {} respawn failed: {:?}", self.name, e);
+                self.state = ServiceState::Failed;
+            }
+        }
     }
 }
 
@@ -93,29 +185,48 @@ pub extern "C" fn _start() -> ! {
     let registry = Endpoint::create().expect("lythd: registry endpoint alloc failed");
     println!("[lythd] service registry online (cap {})", registry.as_raw());
 
-    // ── 3. Spawn core services ────────────────────────────────────────────
+    // ── 3. Spawn lythdist (capability distributor) ────────────────────────
     //
-    // lythdist — capability distributor:
-    //   caps[0] = Memory cap    (lythdist will sub-grant it to future services)
+    //   caps[0] = Memory cap    (lythdist sub-grants it to future services)
     //   caps[1] = dist_req_ep   (lythd sends CapGrantReq here)
     //   caps[2] = dist_rsp_ep   (lythdist sends CapGrantAck/Nack here)
     //   caps[3] = registry      (lythdist registers itself on startup)
 
     let dist_req_ep = Endpoint::create().expect("lythd: dist req endpoint alloc failed");
     let dist_rsp_ep = Endpoint::create().expect("lythd: dist rsp endpoint alloc failed");
+    let lythdist_caps = [MEM_CAP, dist_req_ep.as_raw(), dist_rsp_ep.as_raw(), registry.as_raw()];
 
-    let lythdist_task = cask_std::task::spawn(
-        LYTHDIST_ELF,
-        &[_MEM_CAP, dist_req_ep.as_raw(), dist_rsp_ep.as_raw(), registry.as_raw()],
-    ).expect("lythd: lythdist spawn failed");
+    let lythdist_task = cask_std::task::spawn(LYTHDIST_ELF, &lythdist_caps)
+        .expect("lythd: lythdist spawn failed");
     println!("[lythd] lythdist spawned (task {})", lythdist_task);
 
-    // ── 4. Supervisor loop ────────────────────────────────────────────────
+    // ── 4. Spawn lysh (interactive shell) ────────────────────────────────
+    //
+    // lysh requires no special capabilities — it reads serial and calls
+    // SYS_LOG/SYS_TASK_EXIT directly.  It also exits when the user types
+    // "exit", so we restart it to keep a shell always available.
+
+    let lysh_task = cask_std::task::spawn(LYSH_ELF, &[])
+        .expect("lythd: lysh spawn failed");
+    println!("[lythd] lysh spawned (task {})", lysh_task);
+
+    // ── 5. Supervisor loop ────────────────────────────────────────────────
+
     println!("[lythd] entering supervisor loop");
 
     let mut services: Vec<Service> = Vec::new();
+    let mut managed: [ManagedSvc; 2] = [
+        ManagedSvc::new("lythdist", lythdist_task, LYTHDIST_ELF, &lythdist_caps),
+        ManagedSvc::new("lysh",     lysh_task,     LYSH_ELF,     &[]),
+    ];
 
     loop {
+        // ── Health check: inspect each managed service ────────────────
+        for svc in managed.iter_mut() {
+            svc.check_and_restart();
+        }
+
+        // ── Process one registry message ──────────────────────────────
         let frame = match registry.recv_frame() {
             Ok(f)  => f,
             Err(e) => {
@@ -185,7 +296,6 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
         cask_std::sys_log(" at ");
         cask_std::sys_log(loc.file());
         cask_std::sys_log(":");
-        // print line number manually
         let line = loc.line();
         let mut buf = [0u8; 10];
         let mut n = 0usize;

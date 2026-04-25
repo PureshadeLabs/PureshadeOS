@@ -1,7 +1,7 @@
 //! Time types for cask userspace.
 //!
 //! `Duration` is fully implemented with arithmetic and conversions.
-//! `Instant` is a stub — cask has no wall-clock syscall yet.
+//! `Instant` wraps `SYS_TIME`, which returns milliseconds since kernel boot.
 
 use core::{
     fmt,
@@ -242,5 +242,61 @@ impl fmt::Display for Duration {
         } else {
             write!(f, "{}ns", self.nanos)
         }
+    }
+}
+
+// ── Instant ───────────────────────────────────────────────────────────────────
+
+/// A measurement of a monotonically non-decreasing clock.
+///
+/// Backed by `SYS_TIME`, which returns the number of milliseconds elapsed
+/// since kernel boot (APIC tick counter, ~1 ms resolution).
+///
+/// Instants are always greater than or equal to any prior `Instant::now()` on
+/// the same boot.  They are not wall-clock time; they reset on reboot.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Instant {
+    /// Milliseconds since kernel boot at the moment this `Instant` was created.
+    millis: u64,
+}
+
+impl Instant {
+    /// Capture the current time.
+    #[inline]
+    pub fn now() -> Self {
+        Instant { millis: crate::sys_time() }
+    }
+
+    /// Return the `Duration` elapsed since `earlier`.
+    ///
+    /// Saturates to `Duration::ZERO` if `self` is earlier than `earlier`
+    /// (e.g. due to clock skew or incorrect argument order).
+    #[inline]
+    pub fn duration_since(&self, earlier: Instant) -> Duration {
+        Duration::from_millis(self.millis.saturating_sub(earlier.millis))
+    }
+
+    /// Return `Some(duration)` if `self >= earlier`, else `None`.
+    #[inline]
+    pub fn checked_duration_since(&self, earlier: Instant) -> Option<Duration> {
+        self.millis.checked_sub(earlier.millis).map(Duration::from_millis)
+    }
+
+    /// Return the `Duration` elapsed since `earlier`, saturating to zero.
+    #[inline]
+    pub fn saturating_duration_since(&self, earlier: Instant) -> Duration {
+        self.duration_since(earlier)
+    }
+
+    /// Return the `Duration` elapsed since this `Instant` was created.
+    #[inline]
+    pub fn elapsed(&self) -> Duration {
+        Instant::now().duration_since(*self)
+    }
+
+    /// Raw millisecond count since boot.  Prefer `duration_since` / `elapsed`.
+    #[inline]
+    pub fn as_millis_since_boot(&self) -> u64 {
+        self.millis
     }
 }

@@ -7,6 +7,13 @@ name = "cask-std"
 version = "0.1.0"
 
 [[package]]
+name = "lysh"
+version = "0.1.0"
+dependencies = [
+ "cask-std",
+]
+
+[[package]]
 name = "lythd"
 version = "0.1.0"
 dependencies = [
