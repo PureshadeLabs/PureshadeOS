@@ -1,4 +1,4 @@
-//! lythd — PID 1 init process for RaptorOS.
+//! lythd — PID 1 init process for OROS (Open Runtime Operating System).
 //!
 //! ## Boot sequence
 //!
@@ -23,7 +23,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use lythos_std::{
+use cask_std::{
     BootInfo,
     ipc::Endpoint,
     println, eprintln,
@@ -86,7 +86,7 @@ pub extern "C" fn _start() -> ! {
 
     let mem_mib = { info.mem_bytes   } / (1024 * 1024);
     let frames  = { info.free_frames };
-    println!("[lythd] lythos init — {} MiB free ({} frames), cpu: {}",
+    println!("[lythd] cask init — {} MiB free ({} frames), cpu: {}",
              mem_mib, frames, info.vendor_str());
 
     // ── 2. Create the service registry endpoint ───────────────────────────
@@ -104,7 +104,7 @@ pub extern "C" fn _start() -> ! {
     let dist_req_ep = Endpoint::create().expect("lythd: dist req endpoint alloc failed");
     let dist_rsp_ep = Endpoint::create().expect("lythd: dist rsp endpoint alloc failed");
 
-    let lythdist_task = lythos_std::task::spawn(
+    let lythdist_task = cask_std::task::spawn(
         LYTHDIST_ELF,
         &[_MEM_CAP, dist_req_ep.as_raw(), dist_rsp_ep.as_raw(), registry.as_raw()],
     ).expect("lythd: lythdist spawn failed");
@@ -176,15 +176,15 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    lythos_std::sys_log("[lythd] PANIC");
+    cask_std::sys_log("[lythd] PANIC");
     if let Some(msg) = info.message().as_str() {
-        lythos_std::sys_log(": ");
-        lythos_std::sys_log(msg);
+        cask_std::sys_log(": ");
+        cask_std::sys_log(msg);
     }
     if let Some(loc) = info.location() {
-        lythos_std::sys_log(" at ");
-        lythos_std::sys_log(loc.file());
-        lythos_std::sys_log(":");
+        cask_std::sys_log(" at ");
+        cask_std::sys_log(loc.file());
+        cask_std::sys_log(":");
         // print line number manually
         let line = loc.line();
         let mut buf = [0u8; 10];
@@ -194,10 +194,10 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
             while v > 0 { buf[n] = b'0' + (v % 10) as u8; n += 1; v /= 10; }
             buf[..n].reverse();
         }
-        if let Ok(s) = core::str::from_utf8(&buf[..n]) { lythos_std::sys_log(s); }
-        lythos_std::sys_log("\n");
+        if let Ok(s) = core::str::from_utf8(&buf[..n]) { cask_std::sys_log(s); }
+        cask_std::sys_log("\n");
     } else {
-        lythos_std::sys_log("\n");
+        cask_std::sys_log("\n");
     }
     // Attempt rollback — handle 1 is the Rollback cap.
     let _ = sys_rollback();

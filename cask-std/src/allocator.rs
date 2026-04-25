@@ -1,11 +1,11 @@
 //! Kernel heap allocator — free-list with address-ordered coalescing.
 //!
-//! Backed by a 4 MiB static buffer in BSS (zeroed by the lythos ELF loader).
+//! Backed by a 4 MiB static buffer in BSS (zeroed by the cask ELF loader).
 //! All blocks and payloads are 16-byte aligned.  Supports full alloc/dealloc
 //! with both forward and backward coalescing to prevent fragmentation.
 //!
 //! This module registers itself as the `#[global_allocator]`, so any crate
-//! that links `lythos-std` automatically gets heap allocation.
+//! that links `cask-std` automatically gets heap allocation.
 
 #![allow(static_mut_refs)]
 
@@ -78,13 +78,13 @@ fn round_up(x: usize, align: usize) -> usize {
 
 // ── GlobalAlloc ───────────────────────────────────────────────────────────────
 
-pub struct LythosAllocator;
+pub struct CaskAllocator;
 
-// SAFETY: lythos userspace is single-threaded; no true concurrent access.
-unsafe impl Sync for LythosAllocator {}
-unsafe impl Send for LythosAllocator {}
+// SAFETY: cask userspace is single-threaded; no true concurrent access.
+unsafe impl Sync for CaskAllocator {}
+unsafe impl Send for CaskAllocator {}
 
-unsafe impl GlobalAlloc for LythosAllocator {
+unsafe impl GlobalAlloc for CaskAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // Lazy init on first allocation.
         if !INITED.swap(true, Ordering::Acquire) {
@@ -177,4 +177,4 @@ unsafe impl GlobalAlloc for LythosAllocator {
 }
 
 #[global_allocator]
-pub static ALLOCATOR: LythosAllocator = LythosAllocator;
+pub static ALLOCATOR: CaskAllocator = CaskAllocator;

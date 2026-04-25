@@ -1,26 +1,26 @@
-# RaptorOS — userspace development reference
+# OROS (Open Runtime Operating System) — userspace development reference
 
-RaptorOS is the userspace layer that runs on the lythos microkernel. This file is the guide for building RaptorOS components. For kernel internals, see `lythos/CLAUDE.md`.
+OROS is the userspace layer that runs on the CASK (Capability-Aware System Kernel) microkernel. This file is the guide for building OROS components. For kernel internals, see `cask/CLAUDE.md`.
 
 ---
 
 ## Repository layout
 
 ```
-RaptorOS/
+OROS/
   lythd/          — PID 1 init process and service supervisor
   lythdist/       — capability distributor daemon
   lythmsg/        — IPC bus daemon
-  lythos-std/     — native runtime (thin syscall wrappers)
+  cask-std/     — native runtime (thin syscall wrappers)
   lysh/           — system shell
   rpkg/           — package manager
 ```
 
-Each crate targets `x86_64-unknown-linux-musl` (for the compat layer) or a native lythos target (TBD). Start with musl for bootstrapping — `lythos-linux-compat` provides the translation layer.
+Each crate targets `x86_64-unknown-linux-musl` (for the compat layer) or a native cask target (TBD). Start with musl for bootstrapping — `cask-linux-compat` provides the translation layer.
 
 ---
 
-## Lythos syscall ABI
+## CASK syscall ABI
 
 Entry: `syscall` instruction. Return value in RAX.
 
@@ -196,9 +196,9 @@ The first 1 GiB (`0x0000_0000`–`0x4000_0000`) is identity-mapped by the kernel
 
 ---
 
-## lythos-std — native syscall wrappers
+## cask-std — native syscall wrappers
 
-The `lythos-std` crate provides thin safe wrappers around the syscall ABI. Use it as the foundation for all RaptorOS programs instead of raw `syscall` instructions.
+The `cask-std` crate provides thin safe wrappers around the syscall ABI. Use it as the foundation for all OROS programs instead of raw `syscall` instructions.
 
 Suggested API shape:
 

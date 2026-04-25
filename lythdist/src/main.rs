@@ -1,4 +1,4 @@
-//! lythdist — capability distributor daemon for RaptorOS.
+//! lythdist — capability distributor daemon for OROS (Open Runtime Operating System).
 //!
 //! lythdist is the long-lived holder of the root Memory capability.  After
 //! lythd bootstraps the system, services that need a derived Memory cap send a
@@ -44,7 +44,7 @@
 
 extern crate alloc;
 
-use lythos_std::{cap_rights, ipc::Endpoint, println, eprintln, sys_cap_grant, sys_task_exit};
+use cask_std::{cap_rights, ipc::Endpoint, println, eprintln, sys_cap_grant, sys_task_exit};
 
 // ── Capability handles at entry ───────────────────────────────────────────────
 
@@ -155,13 +155,13 @@ fn send_nack(ep: &Endpoint) {
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    lythos_std::sys_log("[lythdist] PANIC");
+    cask_std::sys_log("[lythdist] PANIC");
     if let Some(loc) = info.location() {
-        lythos_std::sys_log(" at ");
-        lythos_std::sys_log(loc.file());
-        lythos_std::sys_log("\n");
+        cask_std::sys_log(" at ");
+        cask_std::sys_log(loc.file());
+        cask_std::sys_log("\n");
     } else {
-        lythos_std::sys_log("\n");
+        cask_std::sys_log("\n");
     }
     sys_task_exit()
 }

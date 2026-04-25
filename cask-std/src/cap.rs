@@ -1,4 +1,4 @@
-//! Capability handles and rights for lythos userspace.
+//! Capability handles and rights for cask userspace.
 //!
 //! Capabilities are opaque handles into the kernel's capability table for the
 //! current task.  Pass a `CapHandle` to `ipc::Endpoint` constructors, task

@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "lythos-std",
+    "cask-std",
     "lythdist",
     "lythd",
 ]

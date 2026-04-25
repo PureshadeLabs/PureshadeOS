@@ -3,19 +3,19 @@
 version = 4
 
 [[package]]
+name = "cask-std"
+version = "0.1.0"
+
+[[package]]
 name = "lythd"
 version = "0.1.0"
 dependencies = [
- "lythos-std",
+ "cask-std",
 ]
 
 [[package]]
 name = "lythdist"
 version = "0.1.0"
 dependencies = [
- "lythos-std",
+ "cask-std",
 ]
-
-[[package]]
-name = "lythos-std"
-version = "0.1.0"

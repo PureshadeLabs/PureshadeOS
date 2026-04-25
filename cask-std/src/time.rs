@@ -1,7 +1,7 @@
-//! Time types for lythos userspace.
+//! Time types for cask userspace.
 //!
 //! `Duration` is fully implemented with arithmetic and conversions.
-//! `Instant` is a stub — lythos has no wall-clock syscall yet.
+//! `Instant` is a stub — cask has no wall-clock syscall yet.
 
 use core::{
     fmt,

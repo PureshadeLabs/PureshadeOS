@@ -1,7 +1,7 @@
 [build]
-target = "x86_64-raptoros.json"
+target = "x86_64-oros.json"
 
-[target.x86_64-raptoros]
+[target.x86_64-oros]
 rustflags = ["-C", "link-arg=-Tuserspace.ld"]
 
 [unstable]

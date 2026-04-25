@@ -15,7 +15,7 @@ fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let workspace    = PathBuf::from(&manifest_dir).parent().unwrap().to_path_buf();
 
-    let elf = workspace.join("target/x86_64-raptoros/release/lythdist");
+    let elf = workspace.join("target/x86_64-oros/release/lythdist");
 
     if !elf.exists() {
         eprintln!();

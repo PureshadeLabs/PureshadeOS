@@ -1,6 +1,6 @@
-//! The lythos standard prelude.
+//! The cask standard prelude.
 //!
-//! Add `use lythos_std::prelude::*;` to import the most commonly needed items
+//! Add `use cask_std::prelude::*;` to import the most commonly needed items
 //! without spelling out full paths.
 //!
 //! Mirrors the items in `std::prelude::rust_2021`.
@@ -34,7 +34,7 @@ pub use alloc::{
     vec::Vec,
 };
 
-// ── From lythos-std ───────────────────────────────────────────────────────────
+// ── From cask-std ───────────────────────────────────────────────────────────
 
 pub use crate::{
     // Macros

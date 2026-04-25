@@ -1,10 +1,10 @@
-/// Raw lythos syscall wrappers.
+/// Raw cask syscall wrappers.
 ///
 /// Each `syscallN` function places arguments in the correct registers and
 /// issues the `syscall` instruction.  The return value (RAX) is returned
 /// as a raw `u64`; callers convert to `Result` via `SysError::from_raw`.
 ///
-/// Register convention (matches lythos kernel ABI):
+/// Register convention (matches cask kernel ABI):
 ///   RAX = syscall number / return value
 ///   RDI = a1,  RSI = a2,  RDX = a3,  R10 = a4,  R8 = a5,  R9 = a6
 ///
