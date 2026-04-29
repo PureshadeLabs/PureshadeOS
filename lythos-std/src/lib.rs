@@ -1,6 +1,6 @@
-//! **cask-std** — the standard library for CASK (Capability-Aware System Kernel) userspace.
+//! **lythos-std** — the standard library for Lythos (Capability-Aware System Kernel) userspace.
 //!
-//! Mirrors the structure of Rust's `std` for programs targeting the CASK
+//! Mirrors the structure of Rust's `std` for programs targeting the Lythos
 //! microkernel ABI.  Link this crate to get:
 //!
 //! - A 4 MiB heap (`Vec`, `String`, `Box`, `Arc`, …).
@@ -11,7 +11,7 @@
 //! - `task::{spawn, yield_now, exit}`
 //! - `ipc::{Endpoint, Channel<T>}`
 //! - `cap::{CapHandle, Rights}`
-//! - Raw `sys_*` wrappers for every cask syscall.
+//! - Raw `sys_*` wrappers for every lythos syscall.
 //!
 //! # Quick start
 //!
@@ -20,12 +20,12 @@
 //! #![no_main]
 //! extern crate alloc;
 //!
-//! use cask_std::prelude::*;
+//! use lythos_std::prelude::*;
 //!
 //! #[unsafe(no_mangle)]
 //! pub extern "C" fn _start() -> ! {
-//!     println!("hello from cask!");
-//!     cask_std::task::exit()
+//!     println!("hello from lythos!");
+//!     lythos_std::task::exit()
 //! }
 //!
 //! #[panic_handler]
@@ -46,7 +46,7 @@ pub mod time;          // Duration
 pub mod task;          // spawn, yield_now, exit
 pub mod ipc;           // Endpoint, Channel<T>, Message
 pub mod cap;           // CapHandle, Rights
-pub mod prelude;       // common re-exports (use cask_std::prelude::*)
+pub mod prelude;       // common re-exports (use lythos_std::prelude::*)
 
 // ── Collections re-exports ────────────────────────────────────────────────────
 //
@@ -117,7 +117,7 @@ pub mod cap_rights {
 
 // ── Kernel error codes ────────────────────────────────────────────────────────
 
-/// Error codes returned by the cask kernel (raw syscall layer).
+/// Error codes returned by the lythos kernel (raw syscall layer).
 ///
 /// For idiomatic error handling use `io::Error` or module-specific `Result`
 /// types.  These raw variants are returned by the `sys_*` functions.
@@ -156,7 +156,7 @@ impl core::fmt::Display for SysError {
     }
 }
 
-// Backward-compat alias so existing code using `cask_std::Error` still works.
+// Backward-compat alias so existing code using `lythos_std::Error` still works.
 pub use SysError as Error;
 
 // ── Raw syscall helpers (private) ─────────────────────────────────────────────

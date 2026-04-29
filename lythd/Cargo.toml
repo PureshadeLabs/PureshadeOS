@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-cask-std = { path = "../cask-std" }
+lythos-std = { path = "../lythos-std" }

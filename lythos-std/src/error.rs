@@ -1,6 +1,6 @@
 use crate::syscall::{ERR_MIN, ENOSYS, ENOCAP, ENOPERM, EINVAL};
 
-/// A cask syscall error — a raw `u64` sentinel in the range
+/// A lythos syscall error — a raw `u64` sentinel in the range
 /// `[EINVAL, ENOSYS]` (i.e. `[0xFFFF_FFFF_FFFF_FFFC, 0xFFFF_FFFF_FFFF_FFFF]`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct SysError(pub u64);

@@ -1,6 +1,6 @@
 //! Inter-process communication — IPC endpoints and typed channels.
 //!
-//! cask IPC uses fixed 64-byte message slots in a per-endpoint ring buffer.
+//! lythos IPC uses fixed 64-byte message slots in a per-endpoint ring buffer.
 //! Both `send` and `recv` block when the ring is full/empty respectively.
 
 use crate::io;
@@ -10,7 +10,7 @@ pub const MSG_SIZE: usize = 64;
 
 // ── Endpoint ──────────────────────────────────────────────────────────────────
 
-/// A raw IPC endpoint backed by a cask capability.
+/// A raw IPC endpoint backed by a lythos capability.
 ///
 /// The underlying ring buffer holds up to 63 message slots.
 ///

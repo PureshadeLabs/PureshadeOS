@@ -1,12 +1,12 @@
 /* Linker script for OROS userspace ELF64 programs.
  *
  * Load address: 0x0000_0001_0000_0000
- *   - Sits above the cask kernel's 0→1 GiB identity-mapped region.
- *   - Matches the user VA convention used by cask's ELF loader.
+ *   - Sits above the lythos kernel's 0→1 GiB identity-mapped region.
+ *   - Matches the user VA convention used by lythos's ELF loader.
  *   - Each process runs in its own address space, so all programs may share
  *     this VA without conflict.
  *
- * BSS is zero-filled by the cask ELF loader (p_memsz vs p_filesz), so no
+ * BSS is zero-filled by the lythos ELF loader (p_memsz vs p_filesz), so no
  * runtime zero-init is required.
  */
 

@@ -1,6 +1,6 @@
-//! Task management — spawn, yield, and exit for cask userspace processes.
+//! Task management — spawn, yield, and exit for lythos userspace processes.
 
-/// Opaque identifier for a cask task (each task = one process).
+/// Opaque identifier for a lythos task (each task = one process).
 pub type TaskId = u64;
 
 /// Liveness state of a task as reported by `SYS_TASK_STATUS`.

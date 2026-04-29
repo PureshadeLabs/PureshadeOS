@@ -21,7 +21,7 @@
 extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
-use cask_std::{print, println, sys_serial_read, sys_task_exit};
+use lythos_std::{print, println, sys_serial_read, sys_task_exit};
 
 // ── Terminal constants ────────────────────────────────────────────────────────
 
@@ -137,17 +137,17 @@ fn cmd_echo(args: &[&str]) {
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    cask_std::sys_log("[lysh] PANIC");
+    lythos_std::sys_log("[lysh] PANIC");
     if let Some(msg) = info.message().as_str() {
-        cask_std::sys_log(": ");
-        cask_std::sys_log(msg);
+        lythos_std::sys_log(": ");
+        lythos_std::sys_log(msg);
     }
     if let Some(loc) = info.location() {
-        cask_std::sys_log(" at ");
-        cask_std::sys_log(loc.file());
-        cask_std::sys_log("\n");
+        lythos_std::sys_log(" at ");
+        lythos_std::sys_log(loc.file());
+        lythos_std::sys_log("\n");
     } else {
-        cask_std::sys_log("\n");
+        lythos_std::sys_log("\n");
     }
     sys_task_exit()
 }

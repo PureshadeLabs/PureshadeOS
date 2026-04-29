@@ -8,4 +8,4 @@ name = "lysh"
 path = "src/main.rs"
 
 [dependencies]
-cask-std = { path = "../../cask-std" }
+lythos-std = { path = "../../lythos-std" }

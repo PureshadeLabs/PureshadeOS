@@ -35,7 +35,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use cask_std::{
+use lythos_std::{
     BootInfo,
     ipc::Endpoint,
     println, eprintln,
@@ -136,7 +136,7 @@ impl ManagedSvc {
         if self.state == ServiceState::Failed { return; }
 
         // Query the kernel for the task's current status.
-        if cask_std::task::task_status(self.task_id) != TaskStatus::Dead { return; }
+        if lythos_std::task::task_status(self.task_id) != TaskStatus::Dead { return; }
 
         // Task is dead.  Determine how many restart attempts have been made.
         let attempts = match self.state {
@@ -153,7 +153,7 @@ impl ManagedSvc {
 
         eprintln!("[lythd] {} died — restart {}/3", self.name, attempts + 1);
 
-        match cask_std::task::spawn(self.elf, &self.caps[..self.cap_count]) {
+        match lythos_std::task::spawn(self.elf, &self.caps[..self.cap_count]) {
             Ok(new_id) => {
                 self.task_id = new_id;
                 self.state   = ServiceState::Restarting(attempts + 1);
@@ -178,7 +178,7 @@ pub extern "C" fn _start() -> ! {
 
     let mem_mib = { info.mem_bytes   } / (1024 * 1024);
     let frames  = { info.free_frames };
-    println!("[lythd] cask init — {} MiB free ({} frames), cpu: {}",
+    println!("[lythd] lythos init — {} MiB free ({} frames), cpu: {}",
              mem_mib, frames, info.vendor_str());
 
     // ── 2. Create the service registry endpoint ───────────────────────────
@@ -196,7 +196,7 @@ pub extern "C" fn _start() -> ! {
     let dist_rsp_ep = Endpoint::create().expect("lythd: dist rsp endpoint alloc failed");
     let lythdist_caps = [MEM_CAP, dist_req_ep.as_raw(), dist_rsp_ep.as_raw(), registry.as_raw()];
 
-    let lythdist_task = cask_std::task::spawn(LYTHDIST_ELF, &lythdist_caps)
+    let lythdist_task = lythos_std::task::spawn(LYTHDIST_ELF, &lythdist_caps)
         .expect("lythd: lythdist spawn failed");
     println!("[lythd] lythdist spawned (task {})", lythdist_task);
 
@@ -206,7 +206,7 @@ pub extern "C" fn _start() -> ! {
     // SYS_LOG/SYS_TASK_EXIT directly.  It also exits when the user types
     // "exit", so we restart it to keep a shell always available.
 
-    let lysh_task = cask_std::task::spawn(LYSH_ELF, &[])
+    let lysh_task = lythos_std::task::spawn(LYSH_ELF, &[])
         .expect("lythd: lysh spawn failed");
     println!("[lythd] lysh spawned (task {})", lysh_task);
 
@@ -283,15 +283,15 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    cask_std::sys_log("[lythd] PANIC");
+    lythos_std::sys_log("[lythd] PANIC");
     if let Some(msg) = info.message().as_str() {
-        cask_std::sys_log(": ");
-        cask_std::sys_log(msg);
+        lythos_std::sys_log(": ");
+        lythos_std::sys_log(msg);
     }
     if let Some(loc) = info.location() {
-        cask_std::sys_log(" at ");
-        cask_std::sys_log(loc.file());
-        cask_std::sys_log(":");
+        lythos_std::sys_log(" at ");
+        lythos_std::sys_log(loc.file());
+        lythos_std::sys_log(":");
         let line = loc.line();
         let mut buf = [0u8; 10];
         let mut n = 0usize;
@@ -300,10 +300,10 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
             while v > 0 { buf[n] = b'0' + (v % 10) as u8; n += 1; v /= 10; }
             buf[..n].reverse();
         }
-        if let Ok(s) = core::str::from_utf8(&buf[..n]) { cask_std::sys_log(s); }
-        cask_std::sys_log("\n");
+        if let Ok(s) = core::str::from_utf8(&buf[..n]) { lythos_std::sys_log(s); }
+        lythos_std::sys_log("\n");
     } else {
-        cask_std::sys_log("\n");
+        lythos_std::sys_log("\n");
     }
     // Attempt rollback — handle 1 is the Rollback cap.
     let _ = sys_rollback();

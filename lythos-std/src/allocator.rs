@@ -1,11 +1,11 @@
 //! Kernel heap allocator — free-list with address-ordered coalescing.
 //!
-//! Backed by a 4 MiB static buffer in BSS (zeroed by the cask ELF loader).
+//! Backed by a 4 MiB static buffer in BSS (zeroed by the lythos ELF loader).
 //! All blocks and payloads are 16-byte aligned.  Supports full alloc/dealloc
 //! with both forward and backward coalescing to prevent fragmentation.
 //!
 //! This module registers itself as the `#[global_allocator]`, so any crate
-//! that links `cask-std` automatically gets heap allocation.
+//! that links `lythos-std` automatically gets heap allocation.
 
 #![allow(static_mut_refs)]
 
@@ -80,7 +80,7 @@ fn round_up(x: usize, align: usize) -> usize {
 
 pub struct CaskAllocator;
 
-// SAFETY: cask userspace is single-threaded; no true concurrent access.
+// SAFETY: lythos userspace is single-threaded; no true concurrent access.
 unsafe impl Sync for CaskAllocator {}
 unsafe impl Send for CaskAllocator {}
 

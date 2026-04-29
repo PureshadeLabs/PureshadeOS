@@ -1,4 +1,4 @@
-//! Time types for cask userspace.
+//! Time types for lythos userspace.
 //!
 //! `Duration` is fully implemented with arithmetic and conversions.
 //! `Instant` wraps `SYS_TIME`, which returns milliseconds since kernel boot.

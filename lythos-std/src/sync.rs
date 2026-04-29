@@ -1,6 +1,6 @@
-//! Synchronisation primitives for cask userspace.
+//! Synchronisation primitives for lythos userspace.
 //!
-//! All locks are spinlock-based — cask tasks are single-threaded processes
+//! All locks are spinlock-based — lythos tasks are single-threaded processes
 //! that don't share memory, so there is no OS-backed blocking needed.
 //!
 //! Re-exports `Arc` and `Weak` from `alloc::sync`.

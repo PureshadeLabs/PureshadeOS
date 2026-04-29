@@ -1,6 +1,6 @@
 //! I/O abstractions — `Read`, `Write`, standard streams, and buffered wrappers.
 //!
-//! Mirrors `std::io` for cask userspace.  Output goes through `SYS_LOG` to
+//! Mirrors `std::io` for lythos userspace.  Output goes through `SYS_LOG` to
 //! the kernel serial console; there is no stdin or file I/O yet.
 
 use alloc::{string::String, vec::Vec};
@@ -46,7 +46,7 @@ impl Error {
 
     pub fn kind(&self) -> ErrorKind { self.kind }
 
-    /// Convert a cask kernel `SysError` into an `io::Error`.
+    /// Convert a lythos kernel `SysError` into an `io::Error`.
     pub fn from_kernel(e: crate::SysError) -> Self {
         match e {
             crate::SysError::NoPerm  => Error::new(ErrorKind::PermissionDenied),
