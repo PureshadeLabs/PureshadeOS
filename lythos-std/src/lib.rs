@@ -104,6 +104,16 @@ pub const SYS_TIME:          u64 = 15;
 /// Return liveness of a task by ID.
 /// a1=TaskId.  Returns: 0=dead/missing, 1=running/ready, 2=blocked.
 pub const SYS_TASK_STATUS:   u64 = 16;
+/// Fill a user buffer with TaskInfo structs for all live tasks.
+/// a1=buf_ptr (*mut TaskInfo), a2=buf_capacity (max entries).
+/// Returns number of entries written.
+pub const SYS_TASK_LIST:     u64 = 17;
+/// Return physical memory statistics.  No arguments.
+/// Returns free 4 KiB frame count as a u64.
+pub const SYS_MEM_STAT:      u64 = 18;
+/// Terminate a task by ID.
+/// a1=TaskId.  Returns 0 on success, EINVAL if not found/dead/protected.
+pub const SYS_TASK_KILL:     u64 = 19;
 
 // ── Capability rights constants ───────────────────────────────────────────────
 
@@ -371,6 +381,39 @@ pub fn sys_time() -> u64 {
 #[inline]
 pub fn sys_task_status(task_id: u64) -> u64 {
     unsafe { syscall1(SYS_TASK_STATUS, task_id) }
+}
+
+/// Filled by `sys_task_list` for each live task.
+#[repr(C)]
+pub struct TaskInfo {
+    pub id:    u64,
+    /// 1 = running/ready, 2 = blocked
+    pub state: u64,
+    /// 0 = kernel task, 1 = userspace task
+    pub kind:  u8,
+    pub _pad:  [u8; 7],
+}
+
+/// Fill `buf` with info on every live task.  Returns the number of entries written.
+pub fn sys_task_list(buf: &mut [TaskInfo]) -> usize {
+    if buf.is_empty() { return 0; }
+    let n = unsafe {
+        syscall2(SYS_TASK_LIST, buf.as_mut_ptr() as u64, buf.len() as u64)
+    };
+    n as usize
+}
+
+/// Return the number of free 4 KiB physical frames.
+#[inline]
+pub fn sys_mem_stat() -> u64 {
+    unsafe { syscall0(SYS_MEM_STAT) }
+}
+
+/// Terminate a task by ID.  Returns `true` on success.
+#[inline]
+pub fn sys_task_kill(task_id: u64) -> bool {
+    let r = unsafe { syscall1(SYS_TASK_KILL, task_id) };
+    r == 0
 }
 
 // ── print! / println! / eprint! / eprintln! ───────────────────────────────────
