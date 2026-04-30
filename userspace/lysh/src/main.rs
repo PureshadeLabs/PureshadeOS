@@ -40,6 +40,10 @@ use lythos_std::{
 const PROMPT:       &str = "lysh> ";
 const CLEAR_SCREEN: &str = "\x1b[2J\x1b[H";
 
+const BUILTINS: &[&str] = &[
+    "clear", "echo", "exit", "free", "help", "kill", "ps", "uptime",
+];
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
@@ -71,6 +75,7 @@ pub extern "C" fn _start() -> ! {
 /// Handles:
 /// - Enter (`\r`/`\n`) — submit line.
 /// - Backspace (DEL 0x7F / BS 0x08) — erase last character.
+/// - Tab (0x09) — complete against builtin names.
 /// - Up arrow (`ESC [ A`) — load previous history entry.
 /// - Down arrow (`ESC [ B`) — load next history entry (or clear).
 /// - Other control characters are silently ignored.
@@ -134,6 +139,34 @@ fn read_line(history: &[String]) -> String {
                         buf = String::from(new);
                     }
                     _ => {} // ignore other sequences (F-keys, etc.)
+                }
+            }
+
+            // Tab — complete against builtin names
+            b'\t' => {
+                let matches: Vec<&str> = BUILTINS
+                    .iter()
+                    .copied()
+                    .filter(|b| b.starts_with(buf.as_str()))
+                    .collect();
+                match matches.len() {
+                    0 => {} // no match — ignore
+                    1 => {
+                        // Unique match: append the rest.
+                        let suffix = &matches[0][buf.len()..];
+                        print!("{}", suffix);
+                        buf.push_str(suffix);
+                    }
+                    _ => {
+                        // Ambiguous: show all candidates, then redraw prompt+buf.
+                        println!();
+                        for (i, m) in matches.iter().enumerate() {
+                            if i > 0 { print!("  "); }
+                            print!("{}", m);
+                        }
+                        println!();
+                        print!("{}{}", PROMPT, buf);
+                    }
                 }
             }
 
@@ -210,6 +243,7 @@ fn cmd_help() {
     println!("  exit           exit the shell (lythd will restart it)");
     println!();
     println!("Up/down arrow keys scroll through command history.");
+    println!("Tab completes builtin command names.");
     println!("Note: external program execution is not yet available.");
 }
 
