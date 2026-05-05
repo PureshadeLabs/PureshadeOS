@@ -114,6 +114,16 @@ pub const SYS_MEM_STAT:      u64 = 18;
 /// Terminate a task by ID.
 /// a1=TaskId.  Returns 0 on success, EINVAL if not found/dead/protected.
 pub const SYS_TASK_KILL:     u64 = 19;
+/// Open a file by path. a1=path_ptr, a2=path_len. Returns fd (≥ 0) or error.
+pub const SYS_OPEN:          u64 = 22;
+/// Read from an open fd. a1=fd, a2=buf_ptr, a3=len. Returns bytes read or error.
+pub const SYS_READ:          u64 = 23;
+/// Close an fd. a1=fd. Returns 0 or error.
+pub const SYS_CLOSE:         u64 = 25;
+/// Stat a path. a1=path_ptr, a2=path_len, a3=stat_ptr (48 bytes). Returns 0 or error.
+pub const SYS_STAT:          u64 = 26;
+/// Readdir. a1=path_ptr, a2=path_len, a3=buf_ptr, a4=buf_len. Returns entry count or error.
+pub const SYS_READDIR:       u64 = 27;
 
 // ── Capability rights constants ───────────────────────────────────────────────
 
@@ -414,6 +424,143 @@ pub fn sys_mem_stat() -> u64 {
 pub fn sys_task_kill(task_id: u64) -> bool {
     let r = unsafe { syscall1(SYS_TASK_KILL, task_id) };
     r == 0
+}
+
+// ── VFS types ─────────────────────────────────────────────────────────────────
+
+/// File stat info returned by [`sys_stat`].
+///
+/// Wire layout (48 bytes, all LE):
+/// `[0..8]=size [8..12]=flags [12..14]=mode [14..18]=uid [18..22]=gid
+///  [22..26]=nlink [26..34]=mtime [34..42]=ctime [42..48]=_pad`
+#[derive(Clone, Copy, Default, Debug)]
+pub struct FileStat {
+    pub size:  u64,
+    pub flags: u32,
+    /// Unix permission bits (low 12 bits of st_mode).
+    pub mode:  u16,
+    pub uid:   u32,
+    pub gid:   u32,
+    pub nlink: u32,
+    pub mtime: u64,
+    pub ctime: u64,
+}
+
+impl FileStat {
+    fn from_bytes(b: &[u8; 48]) -> Self {
+        FileStat {
+            size:  u64::from_le_bytes(b[ 0.. 8].try_into().unwrap()),
+            flags: u32::from_le_bytes(b[ 8..12].try_into().unwrap()),
+            mode:  u16::from_le_bytes(b[12..14].try_into().unwrap()),
+            uid:   u32::from_le_bytes(b[14..18].try_into().unwrap()),
+            gid:   u32::from_le_bytes(b[18..22].try_into().unwrap()),
+            nlink: u32::from_le_bytes(b[22..26].try_into().unwrap()),
+            mtime: u64::from_le_bytes(b[26..34].try_into().unwrap()),
+            ctime: u64::from_le_bytes(b[34..42].try_into().unwrap()),
+        }
+    }
+
+    /// True if this inode is a directory.
+    #[inline] pub fn is_dir(&self)     -> bool { self.flags & 0x2 != 0 }
+    /// True if this inode is a symlink.
+    #[inline] pub fn is_symlink(&self) -> bool { self.flags & 0x4 != 0 }
+}
+
+/// RFS inode flag constants (matches kernel `rfs::INODE_*`).
+pub mod inode_flags {
+    pub const USED:     u32 = 1 << 0;
+    pub const DIR:      u32 = 1 << 1;
+    pub const SYMLINK:  u32 = 1 << 2;
+    pub const FAST_SYM: u32 = 1 << 3;
+}
+
+/// RFS directory-entry file_type constants.
+pub mod file_type {
+    pub const REG:     u8 = 1;
+    pub const DIR:     u8 = 2;
+    pub const SYMLINK: u8 = 3;
+}
+
+/// Wire size of one readdir entry buffer slot (264 bytes).
+pub const DIR_ENTRY_SIZE: usize = 264;
+
+/// One directory entry returned by [`sys_readdir`].
+#[derive(Clone, Debug)]
+pub struct DirEntry {
+    pub ino:       u32,
+    pub file_type: u8,
+    name_len:      u8,
+    name_buf:      [u8; 256],
+}
+
+impl DirEntry {
+    fn from_wire(b: &[u8; DIR_ENTRY_SIZE]) -> Self {
+        let mut name_buf = [0u8; 256];
+        name_buf.copy_from_slice(&b[8..264]);
+        DirEntry {
+            ino:       u32::from_le_bytes(b[0..4].try_into().unwrap()),
+            file_type: b[4],
+            name_len:  b[5],
+            name_buf,
+        }
+    }
+
+    /// Entry name as `&str` (UTF-8, empty string on decode failure).
+    pub fn name(&self) -> &str {
+        let len = self.name_len as usize;
+        core::str::from_utf8(&self.name_buf[..len]).unwrap_or("")
+    }
+}
+
+// ── VFS syscall wrappers ──────────────────────────────────────────────────────
+
+/// Open a file by path. Returns fd (≥ 0) on success.
+pub fn sys_open(path: &str) -> Result<u64, ()> {
+    let r = unsafe { syscall2(SYS_OPEN, path.as_ptr() as u64, path.len() as u64) };
+    if (r as i64) < 0 { Err(()) } else { Ok(r) }
+}
+
+/// Read up to `buf.len()` bytes from `fd`. Returns bytes read.
+pub fn sys_read_fd(fd: u64, buf: &mut [u8]) -> Result<usize, ()> {
+    let r = unsafe { syscall3(SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) };
+    if (r as i64) < 0 { Err(()) } else { Ok(r as usize) }
+}
+
+/// Close `fd`.
+pub fn sys_close(fd: u64) {
+    unsafe { syscall1(SYS_CLOSE, fd) };
+}
+
+/// Stat `path`. Returns `None` if not found.
+pub fn sys_stat(path: &str) -> Option<FileStat> {
+    let mut buf = [0u8; 48];
+    let r = unsafe {
+        syscall3(SYS_STAT, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64)
+    };
+    if (r as i64) < 0 { None } else { Some(FileStat::from_bytes(&buf)) }
+}
+
+/// Read directory entries for `path`. Returns `None` if not a directory or not found.
+pub fn sys_readdir(path: &str) -> Option<alloc::vec::Vec<DirEntry>> {
+    const MAX_ENTRIES: usize = 512;
+    let buf_len = MAX_ENTRIES * DIR_ENTRY_SIZE;
+    let mut buf = alloc::vec![0u8; buf_len];
+    let count = unsafe {
+        syscall4(SYS_READDIR,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            buf.as_mut_ptr() as u64,
+            buf_len as u64)
+    };
+    if (count as i64) < 0 { return None; }
+    let count = count as usize;
+    let mut entries = alloc::vec::Vec::with_capacity(count);
+    for i in 0..count {
+        let off = i * DIR_ENTRY_SIZE;
+        let chunk: &[u8; DIR_ENTRY_SIZE] = buf[off..off + DIR_ENTRY_SIZE].try_into().unwrap();
+        entries.push(DirEntry::from_wire(chunk));
+    }
+    Some(entries)
 }
 
 // ── print! / println! / eprint! / eprintln! ───────────────────────────────────

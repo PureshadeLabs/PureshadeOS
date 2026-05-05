@@ -2,22 +2,23 @@
 //!
 //! Reads lines from COM1 serial (stdin under QEMU `-serial stdio`), parses
 //! them into a command and space-separated arguments, and dispatches to a
-//! small set of built-in commands.  Exec of external programs is not yet
-//! available because there is no filesystem; attempting an unknown command
-//! prints a clear error.
+//! small set of built-in commands.
 //!
 //! ## Built-in commands
 //!
-//! | Command         | Effect                                     |
-//! |-----------------|--------------------------------------------|
-//! | `help`          | List all built-in commands                 |
-//! | `echo [args…]`  | Print arguments                            |
-//! | `ps`            | List running tasks                         |
-//! | `uptime`        | Print milliseconds since boot              |
-//! | `free`          | Print free physical memory                 |
-//! | `kill <tid>`    | Terminate a task by ID                     |
-//! | `clear`         | Clear the terminal (ANSI)                  |
-//! | `exit`          | Terminate the shell task                   |
+//! | Command           | Effect                                     |
+//! |-------------------|--------------------------------------------|
+//! | `help`            | List all built-in commands                 |
+//! | `echo [args…]`    | Print arguments                            |
+//! | `ps`              | List running tasks                         |
+//! | `uptime`          | Print milliseconds since boot              |
+//! | `free`            | Print free physical memory                 |
+//! | `kill <tid>`      | Terminate a task by ID                     |
+//! | `ls [path]`       | List directory contents (default: /)       |
+//! | `cat <path>`      | Print file contents                        |
+//! | `exec <path>`     | Load and run an ELF from the filesystem    |
+//! | `clear`           | Clear the terminal (ANSI)                  |
+//! | `exit`            | Terminate the shell task                   |
 //!
 //! ## Command history
 //!
@@ -31,8 +32,9 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use lythos_std::{
     print, println,
-    sys_mem_stat, sys_serial_read, sys_task_exit, sys_task_kill, sys_task_list, sys_time,
-    TaskInfo,
+    sys_close, sys_exec, sys_mem_stat, sys_open, sys_read_fd, sys_readdir, sys_serial_read,
+    sys_stat, sys_task_exit, sys_task_kill, sys_task_list, sys_time,
+    file_type, TaskInfo,
 };
 
 // ── Terminal constants ────────────────────────────────────────────────────────
@@ -41,7 +43,7 @@ const PROMPT:       &str = "lysh> ";
 const CLEAR_SCREEN: &str = "\x1b[2J\x1b[H";
 
 const BUILTINS: &[&str] = &[
-    "clear", "echo", "exit", "free", "help", "kill", "ps", "uptime",
+    "cat", "clear", "echo", "exec", "exit", "free", "help", "kill", "ls", "ps", "uptime",
 ];
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -49,7 +51,7 @@ const BUILTINS: &[&str] = &[
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     println!();
-    println!("lysh 0.2 — OROS interactive shell");
+    println!("lysh 0.3 — OROS interactive shell");
     println!("Type 'help' for available commands.");
     println!();
 
@@ -219,32 +221,35 @@ fn dispatch(line: &str) {
         "uptime" => cmd_uptime(),
         "free"   => cmd_free(),
         "kill"   => cmd_kill(&args),
+        "ls"     => cmd_ls(&args),
+        "cat"    => cmd_cat(&args),
+        "exec"   => cmd_exec(&args),
         "clear"  => print!("{}", CLEAR_SCREEN),
         "exit"   => {
             println!("Goodbye.");
             sys_task_exit()
         }
         other => {
-            println!("lysh: {}: command not found", other);
-            println!("      (exec unavailable — no filesystem yet; use 'help' to list builtins)");
+            println!("lysh: {}: command not found (try 'help')", other);
         }
     }
 }
 
 fn cmd_help() {
     println!("Built-in commands:");
-    println!("  help           display this help message");
-    println!("  echo [args]    print arguments to the terminal");
-    println!("  ps             list running tasks");
-    println!("  uptime         print time since boot");
-    println!("  free           print free physical memory");
-    println!("  kill <tid>     terminate a task by ID");
-    println!("  clear          clear the terminal screen");
-    println!("  exit           exit the shell (lythd will restart it)");
+    println!("  help             display this help message");
+    println!("  echo [args]      print arguments to the terminal");
+    println!("  ps               list running tasks");
+    println!("  uptime           print time since boot");
+    println!("  free             print free physical memory");
+    println!("  kill <tid>       terminate a task by ID");
+    println!("  ls [path]        list directory (default: /)");
+    println!("  cat <path>       print file contents");
+    println!("  exec <path>      load and run an ELF from disk");
+    println!("  clear            clear the terminal screen");
+    println!("  exit             exit the shell");
     println!();
-    println!("Up/down arrow keys scroll through command history.");
-    println!("Tab completes builtin command names.");
-    println!("Note: external program execution is not yet available.");
+    println!("Up/down arrow: scroll history.  Tab: complete command names.");
 }
 
 fn cmd_ps() {
@@ -326,6 +331,103 @@ fn cmd_echo(args: &[&str]) {
         print!("{}", arg);
     }
     println!();
+}
+
+fn cmd_ls(args: &[&str]) {
+    let path = args.first().copied().unwrap_or("/");
+    match sys_readdir(path) {
+        Some(entries) => {
+            for e in &entries {
+                let t = match e.file_type {
+                    file_type::DIR     => 'd',
+                    file_type::SYMLINK => 'l',
+                    _                  => '-',
+                };
+                println!("{} {}", t, e.name());
+            }
+            println!("{} entries", entries.len());
+        }
+        None => {
+            // Maybe a regular file — stat it.
+            match sys_stat(path) {
+                Some(_) => println!("- {}", path),
+                None    => println!("ls: {}: no such file or directory", path),
+            }
+        }
+    }
+}
+
+fn cmd_cat(args: &[&str]) {
+    let Some(path) = args.first() else {
+        println!("usage: cat <path>");
+        return;
+    };
+    let fd = match sys_open(path) {
+        Ok(fd)  => fd,
+        Err(()) => { println!("cat: {}: no such file or directory", path); return; }
+    };
+    let mut buf = [0u8; 512];
+    loop {
+        match sys_read_fd(fd, &mut buf) {
+            Ok(0) | Err(()) => break,
+            Ok(n) => match core::str::from_utf8(&buf[..n]) {
+                Ok(s)  => print!("{}", s),
+                Err(_) => { println!("\n[binary data]"); break; }
+            }
+        }
+    }
+    sys_close(fd);
+}
+
+fn cmd_exec(args: &[&str]) {
+    let Some(path) = args.first() else {
+        println!("usage: exec <path>");
+        return;
+    };
+
+    let stat = match sys_stat(path) {
+        Some(s) => s,
+        None    => { println!("exec: {}: not found", path); return; }
+    };
+    if stat.is_dir() {
+        println!("exec: {}: is a directory", path);
+        return;
+    }
+    if stat.size == 0 || stat.size > 64 * 1024 * 1024 {
+        println!("exec: {}: file too large or empty", path);
+        return;
+    }
+
+    let fd = match sys_open(path) {
+        Ok(fd)  => fd,
+        Err(()) => { println!("exec: {}: cannot open", path); return; }
+    };
+
+    let mut elf = alloc::vec![0u8; stat.size as usize];
+    let mut off = 0usize;
+    let mut chunk = [0u8; 4096];
+    loop {
+        match sys_read_fd(fd, &mut chunk) {
+            Ok(0) | Err(()) => break,
+            Ok(n) => {
+                let copy_n = n.min(elf.len() - off);
+                elf[off..off + copy_n].copy_from_slice(&chunk[..copy_n]);
+                off += copy_n;
+                if off >= elf.len() { break; }
+            }
+        }
+    }
+    sys_close(fd);
+
+    if off < elf.len() {
+        println!("exec: {}: short read ({} of {} bytes)", path, off, elf.len());
+        return;
+    }
+
+    match sys_exec(&elf, &[]) {
+        Ok(tid) => println!("exec: spawned task {}", tid),
+        Err(_)  => println!("exec: {}: exec failed (bad ELF?)", path),
+    }
 }
 
 // ── Panic handler ─────────────────────────────────────────────────────────────
