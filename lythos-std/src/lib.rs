@@ -118,12 +118,18 @@ pub const SYS_TASK_KILL:     u64 = 19;
 pub const SYS_OPEN:          u64 = 22;
 /// Read from an open fd. a1=fd, a2=buf_ptr, a3=len. Returns bytes read or error.
 pub const SYS_READ:          u64 = 23;
+/// Write to a writable fd. a1=fd, a2=buf_ptr, a3=len. Returns bytes written or error.
+pub const SYS_WRITE:         u64 = 24;
 /// Close an fd. a1=fd. Returns 0 or error.
 pub const SYS_CLOSE:         u64 = 25;
 /// Stat a path. a1=path_ptr, a2=path_len, a3=stat_ptr (48 bytes). Returns 0 or error.
 pub const SYS_STAT:          u64 = 26;
 /// Readdir. a1=path_ptr, a2=path_len, a3=buf_ptr, a4=buf_len. Returns entry count or error.
 pub const SYS_READDIR:       u64 = 27;
+/// Create a new empty file. a1=path_ptr, a2=path_len. Returns writable fd or error.
+pub const SYS_CREATE:        u64 = 28;
+/// Delete a file. a1=path_ptr, a2=path_len. Returns 0 or error.
+pub const SYS_UNLINK:        u64 = 29;
 
 // ── Capability rights constants ───────────────────────────────────────────────
 
@@ -538,6 +544,24 @@ pub fn sys_stat(path: &str) -> Option<FileStat> {
         syscall3(SYS_STAT, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64)
     };
     if (r as i64) < 0 { None } else { Some(FileStat::from_bytes(&buf)) }
+}
+
+/// Write `buf` to an open writable `fd`. Returns bytes written.
+pub fn sys_write_fd(fd: u64, buf: &[u8]) -> Result<usize, ()> {
+    let r = unsafe { syscall3(SYS_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64) };
+    if (r as i64) < 0 { Err(()) } else { Ok(r as usize) }
+}
+
+/// Create a new empty regular file. Returns a writable fd on success.
+pub fn sys_create(path: &str) -> Result<u64, ()> {
+    let r = unsafe { syscall2(SYS_CREATE, path.as_ptr() as u64, path.len() as u64) };
+    if (r as i64) < 0 { Err(()) } else { Ok(r) }
+}
+
+/// Delete a regular file.
+pub fn sys_unlink(path: &str) -> Result<(), ()> {
+    let r = unsafe { syscall2(SYS_UNLINK, path.as_ptr() as u64, path.len() as u64) };
+    if (r as i64) < 0 { Err(()) } else { Ok(()) }
 }
 
 /// Read directory entries for `path`. Returns `None` if not a directory or not found.

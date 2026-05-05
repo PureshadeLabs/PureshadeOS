@@ -16,6 +16,8 @@
 //! | `kill <tid>`      | Terminate a task by ID                     |
 //! | `ls [path]`       | List directory contents (default: /)       |
 //! | `cat <path>`      | Print file contents                        |
+//! | `cp <src> <dst>`  | Copy a file                                |
+//! | `rm <path>`       | Delete a file                              |
 //! | `exec <path>`     | Load and run an ELF from the filesystem    |
 //! | `clear`           | Clear the terminal (ANSI)                  |
 //! | `exit`            | Terminate the shell task                   |
@@ -32,8 +34,9 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use lythos_std::{
     print, println,
-    sys_close, sys_exec, sys_mem_stat, sys_open, sys_read_fd, sys_readdir, sys_serial_read,
-    sys_stat, sys_task_exit, sys_task_kill, sys_task_list, sys_time,
+    sys_close, sys_create, sys_exec, sys_mem_stat, sys_open, sys_read_fd, sys_readdir,
+    sys_serial_read, sys_stat, sys_task_exit, sys_task_kill, sys_task_list, sys_time,
+    sys_unlink, sys_write_fd,
     file_type, TaskInfo,
 };
 
@@ -43,7 +46,8 @@ const PROMPT:       &str = "lysh> ";
 const CLEAR_SCREEN: &str = "\x1b[2J\x1b[H";
 
 const BUILTINS: &[&str] = &[
-    "cat", "clear", "echo", "exec", "exit", "free", "help", "kill", "ls", "ps", "uptime",
+    "cat", "clear", "cp", "echo", "exec", "exit", "free", "help", "kill", "ls", "ps", "rm",
+    "uptime",
 ];
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -223,6 +227,8 @@ fn dispatch(line: &str) {
         "kill"   => cmd_kill(&args),
         "ls"     => cmd_ls(&args),
         "cat"    => cmd_cat(&args),
+        "cp"     => cmd_cp(&args),
+        "rm"     => cmd_rm(&args),
         "exec"   => cmd_exec(&args),
         "clear"  => print!("{}", CLEAR_SCREEN),
         "exit"   => {
@@ -245,6 +251,8 @@ fn cmd_help() {
     println!("  kill <tid>       terminate a task by ID");
     println!("  ls [path]        list directory (default: /)");
     println!("  cat <path>       print file contents");
+    println!("  cp <src> <dst>   copy a file");
+    println!("  rm <path>        delete a file");
     println!("  exec <path>      load and run an ELF from disk");
     println!("  clear            clear the terminal screen");
     println!("  exit             exit the shell");
@@ -427,6 +435,60 @@ fn cmd_exec(args: &[&str]) {
     match sys_exec(&elf, &[]) {
         Ok(tid) => println!("exec: spawned task {}", tid),
         Err(_)  => println!("exec: {}: exec failed (bad ELF?)", path),
+    }
+}
+
+fn cmd_cp(args: &[&str]) {
+    if args.len() < 2 {
+        println!("usage: cp <src> <dst>");
+        return;
+    }
+    let (src, dst) = (args[0], args[1]);
+
+    let stat = match sys_stat(src) {
+        Some(s) => s,
+        None    => { println!("cp: {}: not found", src); return; }
+    };
+    if stat.is_dir() { println!("cp: {}: is a directory", src); return; }
+    if stat.size > 64 * 1024 * 1024 { println!("cp: {}: file too large", src); return; }
+
+    let src_fd = match sys_open(src) {
+        Ok(fd)  => fd,
+        Err(()) => { println!("cp: {}: cannot open", src); return; }
+    };
+    let dst_fd = match sys_create(dst) {
+        Ok(fd)  => fd,
+        Err(()) => {
+            sys_close(src_fd);
+            println!("cp: {}: cannot create", dst);
+            return;
+        }
+    };
+
+    let mut buf = [0u8; 4096];
+    let mut ok = true;
+    loop {
+        match sys_read_fd(src_fd, &mut buf) {
+            Ok(0) | Err(()) => break,
+            Ok(n) => if sys_write_fd(dst_fd, &buf[..n]).is_err() {
+                println!("cp: write error");
+                ok = false;
+                break;
+            }
+        }
+    }
+    sys_close(src_fd);
+    sys_close(dst_fd);
+    if !ok { let _ = sys_unlink(dst); }
+}
+
+fn cmd_rm(args: &[&str]) {
+    let Some(path) = args.first() else {
+        println!("usage: rm <path>");
+        return;
+    };
+    if let Err(()) = sys_unlink(path) {
+        println!("rm: {}: cannot remove", path);
     }
 }
 
