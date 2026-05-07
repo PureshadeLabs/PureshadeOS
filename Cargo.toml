@@ -3,6 +3,7 @@ members = [
     "lythos-std",
     "lythdist",
     "userspace/lysh",
+    "userspace/rutils",
     "lythd",
 ]
 resolver = "2"

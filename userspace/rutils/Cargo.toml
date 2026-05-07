@@ -1,12 +1,15 @@
 [package]
-name = "lysh"
+name = "rutils"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "rutils"
+path = "src/lib.rs"
+
 [[bin]]
-name = "lysh"
+name = "rutils"
 path = "src/main.rs"
 
 [dependencies]
 lythos-std = { path = "../../lythos-std" }
-rutils     = { path = "../rutils" }
