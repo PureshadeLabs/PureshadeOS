@@ -29,14 +29,19 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use lythos_std::{
     print, println,
-    sys_serial_read, sys_stat, sys_task_exit,
+    sys_serial_avail, sys_serial_read, sys_stat, sys_task_exit, sys_yield,
 };
+
+const RESET:     &str = "\x1b[0m";
+const BOLD_GRN:  &str = "\x1b[1;32m";
+const BOLD_BLU:  &str = "\x1b[1;34m";
 
 const CLEAR_SCREEN: &str = "\x1b[2J\x1b[H";
 
 const BUILTINS: &[&str] = &[
-    "cat", "cd", "clear", "cp", "echo", "exec", "exit", "free", "help",
-    "kill", "ls", "ps", "rm", "uptime",
+    "cat", "cd", "clear", "cp", "echo", "exec", "exit", "free", "groupadd",
+    "groupdel", "groups", "help", "id", "kill", "ls", "mkdir", "ps", "rm",
+    "uptime", "useradd", "userdel", "whoami",
 ];
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -52,7 +57,7 @@ pub extern "C" fn _start() -> ! {
     let mut cwd = String::from("/");
 
     loop {
-        print!("lysh:{} $ ", cwd);
+        print!("{}lysh{}:{}{}{} $ ", BOLD_GRN, RESET, BOLD_BLU, cwd, RESET);
         let line = read_line(&history, &cwd);
         if !line.is_empty() {
             if history.last().map(|s| s.as_str()) != Some(line.as_str()) {
@@ -120,6 +125,13 @@ fn dispatch(line: &str, cwd: &mut String) {
         "uptime" => rutils::cmd_uptime(),
         "free"   => rutils::cmd_free(),
         "kill"   => rutils::cmd_kill(&args),
+        "whoami"   => rutils::cmd_whoami(),
+        "id"       => rutils::cmd_id(),
+        "groups"   => rutils::cmd_groups(&args),
+        "useradd"  => rutils::cmd_useradd(&args),
+        "userdel"  => rutils::cmd_userdel(&args),
+        "groupadd" => rutils::cmd_groupadd(&args),
+        "groupdel" => rutils::cmd_groupdel(&args),
 
         "ls" => {
             let path = resolve(cwd, args.first().copied().unwrap_or("."));
@@ -140,12 +152,30 @@ fn dispatch(line: &str, cwd: &mut String) {
             Some(p) => rutils::cmd_rm(&resolve(cwd, p)),
             None    => println!("usage: rm <path>"),
         },
+        "mkdir" => match args.first() {
+            Some(p) => rutils::cmd_mkdir(&resolve(cwd, p)),
+            None    => println!("usage: mkdir <path>"),
+        },
         "exec" => match args.first() {
             Some(p) => rutils::cmd_exec(&resolve(cwd, p)),
             None    => println!("usage: exec <path>"),
         },
 
-        other => println!("lysh: {}: command not found (try 'help')", other),
+        other => {
+            // Search PATH directories for an executable matching the command.
+            let mut found = false;
+            for dir in &["/bin"] {
+                let path = alloc::format!("{}/{}", dir, other);
+                if lythos_std::sys_stat(&path).map(|s| !s.is_dir()).unwrap_or(false) {
+                    rutils::cmd_exec(&path);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                println!("lysh: {}: command not found", other);
+            }
+        }
     }
 }
 
@@ -196,6 +226,10 @@ fn read_line(history: &[String], cwd: &str) -> String {
             }
 
             0x1B => {
+                // Yield once so the ~87µs-later '[' byte has time to arrive at
+                // 115200 baud, then check. Bare ESC still has nothing → ignore.
+                sys_yield();
+                if !sys_serial_avail() { continue; }
                 match sys_serial_read(&mut byte) {
                     Ok(1) if byte[0] == b'[' => {}
                     _ => continue,
@@ -246,7 +280,7 @@ fn read_line(history: &[String], cwd: &str) -> String {
                             print!("{}", m);
                         }
                         println!();
-                        print!("lysh:{} $ {}", cwd, buf);
+                        print!("{}lysh{}:{}{}{} $ {}", BOLD_GRN, RESET, BOLD_BLU, cwd, RESET, buf);
                     }
                 }
             }

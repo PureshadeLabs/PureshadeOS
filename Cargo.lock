@@ -29,6 +29,13 @@ name = "lythos-std"
 version = "0.1.0"
 
 [[package]]
+name = "rkilo"
+version = "0.1.0"
+dependencies = [
+ "lythos-std",
+]
+
+[[package]]
 name = "rutils"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,3 @@
+# Host-native tool — override the workspace x86_64-oros default target.
+[build]
+target = "aarch64-apple-darwin"

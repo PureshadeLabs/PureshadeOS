@@ -1,4 +1,4 @@
-//! **lythos-std** — the standard library for Lythos (Capability-Aware System Kernel) userspace.
+//! **lythos-std** — the standard library for Lythos userspace.
 //!
 //! Mirrors the structure of Rust's `std` for programs targeting the Lythos
 //! microkernel ABI.  Link this crate to get:
@@ -47,6 +47,7 @@ pub mod task;          // spawn, yield_now, exit
 pub mod ipc;           // Endpoint, Channel<T>, Message
 pub mod cap;           // CapHandle, Rights
 pub mod prelude;       // common re-exports (use lythos_std::prelude::*)
+pub mod orox;          // OROX binary manifest format
 
 // ── Collections re-exports ────────────────────────────────────────────────────
 //
@@ -98,6 +99,13 @@ pub const SYS_IPC_RECV_CAP:  u64 = 13;
 /// a1=buf_ptr (user VA), a2=buf_len.
 /// Blocks until at least one byte is available.  Returns bytes read.
 pub const SYS_SERIAL_READ:   u64 = 14;
+/// Non-blocking serial poll.  No arguments.
+/// Returns 1 if at least one byte is waiting in the COM1 FIFO, 0 otherwise.
+/// Does NOT consume any bytes (reads LSR bit 0 only, never RBR).
+pub const SYS_SERIAL_AVAIL:  u64 = 30;
+/// Block the calling task until task `a1` (TaskId) exits.
+/// Returns 0 immediately if the target is not found or already Dead.
+pub const SYS_TASK_WAIT:     u64 = 31;
 /// Return milliseconds elapsed since kernel boot.  No arguments.
 /// Return value is always a valid u64 millisecond count (never an error sentinel).
 pub const SYS_TIME:          u64 = 15;
@@ -130,6 +138,8 @@ pub const SYS_READDIR:       u64 = 27;
 pub const SYS_CREATE:        u64 = 28;
 /// Delete a file. a1=path_ptr, a2=path_len. Returns 0 or error.
 pub const SYS_UNLINK:        u64 = 29;
+/// Create a directory. a1=path_ptr, a2=path_len. Returns 0 or error.
+pub const SYS_MKDIR:         u64 = 32;
 
 // ── Capability rights constants ───────────────────────────────────────────────
 
@@ -370,6 +380,27 @@ pub fn sys_log(s: &str) {
     }
 }
 
+/// Return `true` if at least one byte is waiting in the COM1 FIFO.
+///
+/// Non-blocking and non-destructive — only reads LSR bit 0, never RBR.
+/// Use immediately after receiving `0x1B` (ESC) to distinguish a plain ESC
+/// keypress from the start of a VT100 escape sequence: if `sys_serial_avail()`
+/// returns `false` the escape sequence bytes haven't arrived yet, so it was a
+/// bare ESC; if `true`, read the remaining sequence bytes with `sys_serial_read`.
+#[inline]
+pub fn sys_serial_avail() -> bool {
+    unsafe { syscall0(SYS_SERIAL_AVAIL) != 0 }
+}
+
+/// Block the calling task until task `tid` has exited.
+///
+/// Returns immediately if the task is already dead. Returns `Err` only if
+/// the kernel rejects the call (e.g. invalid tid format).
+pub fn sys_task_wait(tid: u64) -> Result<(), SysError> {
+    let r = unsafe { syscall1(SYS_TASK_WAIT, tid) };
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(()) }
+}
+
 /// Read bytes from the COM1 serial port into `buf`.
 ///
 /// Blocks (yielding the CPU) until at least one byte is available, then
@@ -561,6 +592,12 @@ pub fn sys_create(path: &str) -> Result<u64, ()> {
 /// Delete a regular file.
 pub fn sys_unlink(path: &str) -> Result<(), ()> {
     let r = unsafe { syscall2(SYS_UNLINK, path.as_ptr() as u64, path.len() as u64) };
+    if (r as i64) < 0 { Err(()) } else { Ok(()) }
+}
+
+/// Create a directory at `path`. Parent directory must already exist.
+pub fn sys_mkdir(path: &str) -> Result<(), ()> {
+    let r = unsafe { syscall2(SYS_MKDIR, path.as_ptr() as u64, path.len() as u64) };
     if (r as i64) < 0 { Err(()) } else { Ok(()) }
 }
 
