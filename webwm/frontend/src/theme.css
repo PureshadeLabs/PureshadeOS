@@ -1,108 +1,129 @@
 /**
- * theme.css — Material Design 3 design tokens as CSS custom properties.
+ * theme.css — Caelestia-style design tokens.
  *
- * The JS theme engine (src/lib/theme.js) overwrites the --md-sys-color-*
- * tokens at runtime using the wallpaper's dominant color fed through the
- * M3 tonal palette generator.
- *
- * Override --font-family here or in a local user stylesheet to change the
- * global font without touching any component code.
- *
- * The * { transition } block at the bottom animates all theme changes when
- * the wallpaper swaps — no JS animation needed.
+ * Color palette: Catppuccin Mocha (the default Caelestia palette).
+ * The JS theme engine (src/lib/theme.js) can still overwrite --md-sys-color-*
+ * tokens at runtime from the wallpaper dominant color — these are fallbacks.
  */
 
 /* -------------------------------------------------------------------------
-   Typography
+   Typography — Inter preferred, Roboto fallback
    ------------------------------------------------------------------------- */
 :root {
-  --font-family:         'Roboto Flex', 'Roboto', sans-serif;
+  --font-family:         'Inter', 'Roboto', sans-serif;
   --font-size-label-sm:  11px;
   --font-size-label:     12px;
-  --font-size-label-lg:  14px;
+  --font-size-label-lg:  13px;
   --font-size-body-sm:   12px;
-  --font-size-body:      14px;
-  --font-size-body-lg:   16px;
-  --font-size-title-sm:  14px;
-  --font-size-title:     16px;
-  --font-size-title-lg:  22px;
-  --font-size-headline:  28px;
-  --font-size-display:   36px;
+  --font-size-body:      13px;
+  --font-size-body-lg:   15px;
+  --font-size-title-sm:  13px;
+  --font-size-title:     15px;
+  --font-size-title-lg:  20px;
+  --font-size-headline:  26px;
+  --font-size-display:   34px;
 
   --font-weight-regular: 400;
   --font-weight-medium:  500;
   --font-weight-semibold:600;
   --font-weight-bold:    700;
 
-  /* Material Symbols — icon font helper class */
   --icon-font: 'Material Symbols Rounded';
 }
 
 /* -------------------------------------------------------------------------
-   M3 Color tokens (dark scheme default — overwritten by theme.js at runtime)
-   Seed: #1a0a2e (deep purple-black fallback wallpaper)
+   Catppuccin Mocha raw palette
    ------------------------------------------------------------------------- */
 :root {
-  /* Primary */
-  --md-sys-color-primary:              #d0bcff;
-  --md-sys-color-on-primary:           #381e72;
-  --md-sys-color-primary-container:    #4f378b;
-  --md-sys-color-on-primary-container: #eaddff;
-
-  /* Secondary */
-  --md-sys-color-secondary:              #ccc2dc;
-  --md-sys-color-on-secondary:           #332d41;
-  --md-sys-color-secondary-container:    #4a4458;
-  --md-sys-color-on-secondary-container: #e8def8;
-
-  /* Tertiary */
-  --md-sys-color-tertiary:              #efb8c8;
-  --md-sys-color-on-tertiary:           #492532;
-  --md-sys-color-tertiary-container:    #633b48;
-  --md-sys-color-on-tertiary-container: #ffd8e4;
-
-  /* Error */
-  --md-sys-color-error:              #f2b8b5;
-  --md-sys-color-on-error:           #601410;
-  --md-sys-color-error-container:    #8c1d18;
-  --md-sys-color-on-error-container: #f9dedc;
-
-  /* Surface tiers (M3 2021 updated system) */
-  --md-sys-color-surface-dim:                  #141218;
-  --md-sys-color-surface:                      #141218;
-  --md-sys-color-surface-bright:               #3b383e;
-  --md-sys-color-surface-container-lowest:     #0f0d13;
-  --md-sys-color-surface-container-low:        #1d1b20;
-  --md-sys-color-surface-container:            #211f26;
-  --md-sys-color-surface-container-high:       #2b2930;
-  --md-sys-color-surface-container-highest:    #36343b;
-
-  --md-sys-color-on-surface:         #e6e1e5;
-  --md-sys-color-on-surface-variant: #cac4d0;
-  --md-sys-color-outline:            #938f99;
-  --md-sys-color-outline-variant:    #49454f;
-
-  /* Background */
-  --md-sys-color-background:    #141218;
-  --md-sys-color-on-background: #e6e1e5;
-
-  /* Inverse */
-  --md-sys-color-inverse-surface:    #e6e1e5;
-  --md-sys-color-inverse-on-surface: #313033;
-  --md-sys-color-inverse-primary:    #6750a4;
-
-  /* Scrim */
-  --md-sys-color-scrim:       #000000;
-  --md-sys-color-shadow:      #000000;
+  --ctp-rosewater: #f5e0dc;
+  --ctp-flamingo:  #f2cdcd;
+  --ctp-pink:      #f5c2e7;
+  --ctp-mauve:     #cba6f7;
+  --ctp-red:       #f38ba8;
+  --ctp-maroon:    #eba0ac;
+  --ctp-peach:     #fab387;
+  --ctp-yellow:    #f9e2af;
+  --ctp-green:     #a6e3a1;
+  --ctp-teal:      #94e2d5;
+  --ctp-sky:       #89dceb;
+  --ctp-sapphire:  #74c7ec;
+  --ctp-blue:      #89b4fa;
+  --ctp-lavender:  #b4befe;
+  --ctp-text:      #cdd6f4;
+  --ctp-subtext1:  #bac2de;
+  --ctp-subtext0:  #a6adc8;
+  --ctp-overlay2:  #9399b2;
+  --ctp-overlay1:  #7f849c;
+  --ctp-overlay0:  #6c7086;
+  --ctp-surface2:  #585b70;
+  --ctp-surface1:  #45475a;
+  --ctp-surface0:  #313244;
+  --ctp-base:      #1e1e2e;
+  --ctp-mantle:    #181825;
+  --ctp-crust:     #11111b;
 }
 
 /* -------------------------------------------------------------------------
-   M3 Elevation — surface tint overlays (primary color blended into surface)
-   Use as: background: color-mix(in srgb, var(--md-sys-color-primary) 8%, var(--md-sys-color-surface))
-   or apply box-shadow directly with the shadow tokens below.
+   Semantic color tokens mapped to Catppuccin Mocha
    ------------------------------------------------------------------------- */
 :root {
-  /* Surface tint percentages */
+  /* Primary — mauve */
+  --md-sys-color-primary:              var(--ctp-mauve);
+  --md-sys-color-on-primary:           var(--ctp-crust);
+  --md-sys-color-primary-container:    #3d2c5e;
+  --md-sys-color-on-primary-container: var(--ctp-mauve);
+
+  /* Secondary — lavender */
+  --md-sys-color-secondary:              var(--ctp-lavender);
+  --md-sys-color-on-secondary:           var(--ctp-crust);
+  --md-sys-color-secondary-container:    #2a2a4a;
+  --md-sys-color-on-secondary-container: var(--ctp-lavender);
+
+  /* Tertiary — pink */
+  --md-sys-color-tertiary:              var(--ctp-pink);
+  --md-sys-color-on-tertiary:           var(--ctp-crust);
+  --md-sys-color-tertiary-container:    #4a1f3c;
+  --md-sys-color-on-tertiary-container: var(--ctp-pink);
+
+  /* Error — red */
+  --md-sys-color-error:              var(--ctp-red);
+  --md-sys-color-on-error:           var(--ctp-crust);
+  --md-sys-color-error-container:    #5c1a2a;
+  --md-sys-color-on-error-container: var(--ctp-red);
+
+  /* Surface tiers — Catppuccin base/mantle/crust + surfaces */
+  --md-sys-color-surface-dim:               var(--ctp-crust);
+  --md-sys-color-surface:                   var(--ctp-base);
+  --md-sys-color-surface-bright:            var(--ctp-surface0);
+  --md-sys-color-surface-container-lowest:  var(--ctp-crust);
+  --md-sys-color-surface-container-low:     var(--ctp-mantle);
+  --md-sys-color-surface-container:         var(--ctp-base);
+  --md-sys-color-surface-container-high:    var(--ctp-surface0);
+  --md-sys-color-surface-container-highest: var(--ctp-surface1);
+
+  --md-sys-color-on-surface:         var(--ctp-text);
+  --md-sys-color-on-surface-variant: var(--ctp-subtext0);
+  --md-sys-color-outline:            var(--ctp-overlay1);
+  --md-sys-color-outline-variant:    var(--ctp-surface2);
+
+  /* Background */
+  --md-sys-color-background:    var(--ctp-base);
+  --md-sys-color-on-background: var(--ctp-text);
+
+  /* Inverse */
+  --md-sys-color-inverse-surface:    var(--ctp-text);
+  --md-sys-color-inverse-on-surface: var(--ctp-base);
+  --md-sys-color-inverse-primary:    var(--ctp-surface0);
+
+  /* Scrim */
+  --md-sys-color-scrim:  #000000;
+  --md-sys-color-shadow: #000000;
+}
+
+/* -------------------------------------------------------------------------
+   Elevation
+   ------------------------------------------------------------------------- */
+:root {
   --md-elevation-0-tint:  0%;
   --md-elevation-1-tint:  5%;
   --md-elevation-2-tint:  8%;
@@ -110,40 +131,39 @@
   --md-elevation-4-tint:  12%;
   --md-elevation-5-tint:  14%;
 
-  /* Box shadows (Material 3 spec) */
   --md-sys-elevation-0: none;
   --md-sys-elevation-1:
-    0px 1px 2px  rgba(0,0,0,0.30),
-    0px 1px 3px  1px rgba(0,0,0,0.15);
+    0px 1px 3px  rgba(0,0,0,0.45),
+    0px 1px 2px  rgba(0,0,0,0.30);
   --md-sys-elevation-2:
-    0px 1px 2px  rgba(0,0,0,0.30),
-    0px 2px 6px  2px rgba(0,0,0,0.15);
+    0px 2px 6px  rgba(0,0,0,0.45),
+    0px 1px 2px  rgba(0,0,0,0.30);
   --md-sys-elevation-3:
-    0px 4px 8px  3px rgba(0,0,0,0.15),
-    0px 1px 3px  rgba(0,0,0,0.30);
+    0px 4px 12px rgba(0,0,0,0.40),
+    0px 2px 4px  rgba(0,0,0,0.30);
   --md-sys-elevation-4:
-    0px 6px 10px 4px rgba(0,0,0,0.15),
-    0px 2px 3px  rgba(0,0,0,0.30);
+    0px 6px 16px rgba(0,0,0,0.40),
+    0px 2px 6px  rgba(0,0,0,0.30);
   --md-sys-elevation-5:
-    0px 8px 12px 6px rgba(0,0,0,0.15),
-    0px 4px 4px  rgba(0,0,0,0.30);
+    0px 8px 24px rgba(0,0,0,0.40),
+    0px 4px 8px  rgba(0,0,0,0.30);
 }
 
 /* -------------------------------------------------------------------------
-   M3 Shape tokens
+   Shape tokens — more rounded than stock M3 (Caelestia-style)
    ------------------------------------------------------------------------- */
 :root {
   --md-sys-shape-corner-none:        0px;
-  --md-sys-shape-corner-extra-small: 4px;
-  --md-sys-shape-corner-small:       8px;
-  --md-sys-shape-corner-medium:      12px;
-  --md-sys-shape-corner-large:       16px;
+  --md-sys-shape-corner-extra-small: 6px;
+  --md-sys-shape-corner-small:       10px;
+  --md-sys-shape-corner-medium:      14px;
+  --md-sys-shape-corner-large:       20px;
   --md-sys-shape-corner-extra-large: 28px;
   --md-sys-shape-corner-full:        9999px;
 }
 
 /* -------------------------------------------------------------------------
-   M3 Motion tokens
+   Motion
    ------------------------------------------------------------------------- */
 :root {
   --md-sys-motion-duration-short1:  50ms;
@@ -157,33 +177,31 @@
   --md-sys-motion-duration-long1:   450ms;
   --md-sys-motion-duration-long2:   500ms;
 
-  --md-sys-motion-easing-standard:       cubic-bezier(0.2, 0.0, 0.0, 1.0);
-  --md-sys-motion-easing-standard-accel: cubic-bezier(0.3, 0.0, 1.0, 1.0);
-  --md-sys-motion-easing-standard-decel: cubic-bezier(0.0, 0.0, 0.0, 1.0);
-  --md-sys-motion-easing-emphasized:     cubic-bezier(0.2, 0.0, 0.0, 1.0);
+  --md-sys-motion-easing-standard:         cubic-bezier(0.2, 0.0, 0.0, 1.0);
+  --md-sys-motion-easing-standard-accel:   cubic-bezier(0.3, 0.0, 1.0, 1.0);
+  --md-sys-motion-easing-standard-decel:   cubic-bezier(0.0, 0.0, 0.0, 1.0);
+  --md-sys-motion-easing-emphasized:       cubic-bezier(0.2, 0.0, 0.0, 1.0);
   --md-sys-motion-easing-emphasized-decel: cubic-bezier(0.05, 0.7, 0.1, 1.0);
 }
 
 /* -------------------------------------------------------------------------
-   @material/web theming bridge — map our tokens to MWC's expected vars
+   @material/web bridge
    ------------------------------------------------------------------------- */
 :root {
   --md-ref-palette-primary40:         var(--md-sys-color-primary);
   --md-sys-color-primary-fixed:       var(--md-sys-color-primary-container);
 
-  /* Icon button */
   --md-icon-button-icon-color:        var(--md-sys-color-on-surface-variant);
   --md-icon-button-hover-icon-color:  var(--md-sys-color-on-surface);
-  --md-icon-button-icon-size:         20px;
+  --md-icon-button-icon-size:         18px;
   --md-icon-button-state-layer-color: var(--md-sys-color-on-surface-variant);
 
-  /* Filter chip */
   --md-filter-chip-container-color:          var(--md-sys-color-surface-container-high);
   --md-filter-chip-label-text-color:         var(--md-sys-color-on-surface-variant);
-  --md-filter-chip-outline-color:            var(--md-sys-color-outline-variant);
+  --md-filter-chip-outline-color:            transparent;
   --md-filter-chip-hover-label-text-color:   var(--md-sys-color-on-surface);
-  --md-filter-chip-selected-container-color: var(--md-sys-color-secondary-container);
-  --md-filter-chip-selected-label-text-color:var(--md-sys-color-on-secondary-container);
+  --md-filter-chip-selected-container-color: color-mix(in srgb, var(--ctp-mauve) 20%, var(--ctp-surface0));
+  --md-filter-chip-selected-label-text-color:var(--ctp-mauve);
   --md-filter-chip-label-text-font:          var(--font-family);
   --md-filter-chip-label-text-size:          var(--font-size-label-lg);
 }
@@ -193,22 +211,22 @@
    ------------------------------------------------------------------------- */
 .icon {
   font-family: var(--icon-font);
-  font-weight:               400;
-  font-style:                normal;
-  font-size:                 24px;
-  line-height:               1;
-  letter-spacing:            normal;
-  text-transform:            none;
-  display:                   inline-block;
-  white-space:               nowrap;
-  word-wrap:                 normal;
-  direction:                 ltr;
-  -webkit-font-smoothing:    antialiased;
-  text-rendering:            optimizeLegibility;
-  -moz-osx-font-smoothing:   grayscale;
-  font-feature-settings:     'liga';
-  font-variation-settings:   'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
-  user-select:               none;
+  font-weight:             400;
+  font-style:              normal;
+  font-size:               24px;
+  line-height:             1;
+  letter-spacing:          normal;
+  text-transform:          none;
+  display:                 inline-block;
+  white-space:             nowrap;
+  word-wrap:               normal;
+  direction:               ltr;
+  -webkit-font-smoothing:  antialiased;
+  text-rendering:          optimizeLegibility;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings:   'liga';
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  user-select:             none;
 }
 
 .icon-filled {
@@ -216,29 +234,21 @@
 }
 
 /* -------------------------------------------------------------------------
-   Color scheme transition — animates when theme.js swaps custom properties
+   Color scheme transition
    ------------------------------------------------------------------------- */
 *, *::before, *::after {
-  transition:
-    background-color var(--md-sys-motion-duration-medium2) var(--md-sys-motion-easing-standard),
-    color            var(--md-sys-motion-duration-medium2) var(--md-sys-motion-easing-standard),
-    border-color     var(--md-sys-motion-duration-medium2) var(--md-sys-motion-easing-standard),
-    box-shadow       var(--md-sys-motion-duration-medium2) var(--md-sys-motion-easing-standard),
-    opacity          var(--md-sys-motion-duration-short3)  var(--md-sys-motion-easing-standard);
-}
-
-/* Disable transitions on layout-affecting properties to avoid jank */
-*, *::before, *::after {
   transition-property: background-color, color, border-color, box-shadow, opacity, fill, stroke;
+  transition-duration: var(--md-sys-motion-duration-medium2);
+  transition-timing-function: var(--md-sys-motion-easing-standard);
 }
 
 /* -------------------------------------------------------------------------
-   Scrollbar theming
+   Scrollbar
    ------------------------------------------------------------------------- */
-::-webkit-scrollbar               { width: 6px; height: 6px; }
+::-webkit-scrollbar               { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track         { background: transparent; }
-::-webkit-scrollbar-thumb         { background: var(--md-sys-color-outline-variant); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover   { background: var(--md-sys-color-outline); }
+::-webkit-scrollbar-thumb         { background: var(--ctp-surface2); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover   { background: var(--ctp-overlay1); }
 
 /* -------------------------------------------------------------------------
    Base reset
@@ -246,14 +256,13 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body, #app {
-  width:  100%;
-  height: 100%;
+  width:    100%;
+  height:   100%;
   overflow: hidden;
   font-family: var(--font-family);
-  font-size: var(--font-size-body);
-  /* Dark background before JS theme runs — prevents white flash */
-  background: #141218;
-  color: var(--md-sys-color-on-surface);
+  font-size:   var(--font-size-body);
+  background:  var(--ctp-base);
+  color:       var(--ctp-text);
   -webkit-font-smoothing: antialiased;
 }
 

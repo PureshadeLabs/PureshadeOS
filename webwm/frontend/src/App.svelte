@@ -2,9 +2,9 @@
   App.svelte — root shell.
 
   Layout:
-    layer 0 — wallpaper (CSS gradient or image URL)
-    layer 1 — DwindleLayout (tiled windows, wallpaper visible through gaps)
-    layer 2 — Taskbar (frosted glass, pinned to bottom)
+    layer 0 — wallpaper (Caelestia-style Catppuccin gradient)
+    layer 1 — DwindleLayout (tiled windows, offset for top bar)
+    layer 2 — Taskbar (three floating pills, absolutely positioned at top)
 -->
 <script>
   import { onMount, onDestroy } from 'svelte';
@@ -14,16 +14,12 @@
   import { channels }      from './lib/ws.js';
   import { visibleWindows, openWindow } from './lib/windows.js';
 
-  // Apply dark palette before first render — prevents white flash.
-  applyThemeFromSeed('#1a0a2e');
+  // Catppuccin Mocha seed — deep mauve-black
+  applyThemeFromSeed('#1e1e2e');
 
-  // ── Wallpaper ─────────────────────────────────────────────────────────────
-  const wallpaperUrl            = null; // set to image URL when available
-  const FALLBACK_WALLPAPER_SEED = '#1a0a2e';
+  const wallpaperUrl            = null;
+  const FALLBACK_WALLPAPER_SEED = '#1e1e2e';
 
-  // ── Bridge: sync window list from control channel ─────────────────────────
-  // When the bridge sends an app_list, reconcile it with the local store.
-  // Until bridge is running this is a no-op — local state drives the UI.
   const unsub = channels.control.message.subscribe((msg) => {
     if (!msg) return;
     if (msg.type === 'app_spawned') {
@@ -47,7 +43,7 @@
 </script>
 
 <div class="shell">
-  <!-- Wallpaper layer -->
+  <!-- Wallpaper layer — Caelestia-style dark cosmic gradient -->
   <div
     class="wallpaper"
     role="presentation"
@@ -55,43 +51,47 @@
     style={wallpaperUrl ? `background-image: url('${wallpaperUrl}')` : ''}
   ></div>
 
-  <!-- Workspace -->
+  <!-- Workspace — padded top to clear the floating bar -->
   <div class="workspace">
     <DwindleLayout windows={$visibleWindows} />
   </div>
 
-  <!-- Taskbar -->
+  <!-- Floating top bar (absolutely positioned, z-index 100) -->
   <Taskbar />
 </div>
 
 <style>
   .shell {
-    width:   100%;
-    height:  100%;
-    display: flex;
+    width:     100%;
+    height:    100%;
+    display:   flex;
     flex-direction: column;
-    overflow: hidden;
-    position: relative;
+    overflow:  hidden;
+    position:  relative;
   }
 
+  /* Caelestia-style wallpaper: deep purple-blue Catppuccin gradient */
   .wallpaper {
     position: absolute;
-    inset: 0;
-    z-index: 0;
+    inset:    0;
+    z-index:  0;
     background:
-      radial-gradient(ellipse 80% 60% at 20% 80%, rgba(103,58,183,0.25) 0%, transparent 60%),
-      radial-gradient(ellipse 60% 50% at 80% 20%, rgba(81,45,168,0.20)  0%, transparent 55%),
-      radial-gradient(ellipse 100% 80% at 50% 50%, #130821 0%, #0a0514 100%);
-    background-size: cover;
+      radial-gradient(ellipse 70% 55% at 15% 85%, rgba(203,166,247,0.10) 0%, transparent 60%),
+      radial-gradient(ellipse 55% 45% at 85% 15%, rgba(180,190,254,0.08) 0%, transparent 55%),
+      radial-gradient(ellipse 80% 60% at 50% 50%, rgba(137,180,250,0.05) 0%, transparent 70%),
+      linear-gradient(145deg, #181825 0%, #11111b 50%, #1e1e2e 100%);
+    background-size:     cover;
     background-position: center;
-    background-repeat: no-repeat;
+    background-repeat:   no-repeat;
   }
 
   .workspace {
-    position: relative;
-    z-index: 1;
-    flex: 1;
+    position:   relative;
+    z-index:    1;
+    flex:       1;
     min-height: 0;
-    overflow: hidden;
+    overflow:   hidden;
+    /* Inset top padding so tiled windows don't hide under the bar */
+    padding-top: 58px;
   }
 </style>
