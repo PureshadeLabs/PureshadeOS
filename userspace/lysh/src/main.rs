@@ -29,7 +29,10 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use lythos_std::{
     print, println,
+    pipe_capture_start, pipe_capture_end, pipe_stdin_set, pipe_stdin_clear,
+    pipe_stdin_active, pipe_stdin_read_all,
     sys_serial_avail, sys_serial_read, sys_stat, sys_task_exit, sys_yield,
+    sys_open, sys_read_fd, sys_close, sys_create, sys_write_fd, sys_unlink,
 };
 
 const RESET:     &str = "\x1b[0m";
@@ -105,11 +108,119 @@ fn normalize(path: &str) -> String {
 
 // ── Command dispatch ──────────────────────────────────────────────────────────
 
+/// Parse `>` and `<` redirection operators out of a command line.
+///
+/// Returns `(cleaned_cmd, stdin_file, stdout_file)` where `cleaned_cmd` has
+/// the redirect tokens removed.  Both file names are path strings; `None`
+/// means no redirect for that direction.
+fn parse_redirects(line: &str) -> (String, Option<String>, Option<String>) {
+    let mut cmd_parts: Vec<&str> = Vec::new();
+    let mut stdin_file:  Option<String> = None;
+    let mut stdout_file: Option<String> = None;
+
+    let mut tokens = line.split_ascii_whitespace().peekable();
+    while let Some(tok) = tokens.next() {
+        if tok == ">" {
+            stdout_file = tokens.next().map(String::from);
+        } else if tok == "<" {
+            stdin_file = tokens.next().map(String::from);
+        } else if let Some(path) = tok.strip_prefix('>') {
+            if path.is_empty() {
+                stdout_file = tokens.next().map(String::from);
+            } else {
+                stdout_file = Some(String::from(path));
+            }
+        } else if let Some(path) = tok.strip_prefix('<') {
+            if path.is_empty() {
+                stdin_file = tokens.next().map(String::from);
+            } else {
+                stdin_file = Some(String::from(path));
+            }
+        } else {
+            cmd_parts.push(tok);
+        }
+    }
+
+    let mut cleaned = String::new();
+    for (i, p) in cmd_parts.iter().enumerate() {
+        if i > 0 { cleaned.push(' '); }
+        cleaned.push_str(p);
+    }
+    (cleaned, stdin_file, stdout_file)
+}
+
+/// Run a (possibly piped) command line.
+///
+/// Splits on `|`, runs each stage left-to-right: every stage except the last
+/// has its stdout captured; the captured bytes become the next stage's piped
+/// stdin.  The final stage runs normally (output goes to serial).
 fn dispatch(line: &str, cwd: &mut String) {
+    let stages: Vec<&str> = line.split('|').collect();
+    if stages.len() == 1 {
+        dispatch_single(line.trim(), cwd);
+        return;
+    }
+    let mut piped: Option<alloc::vec::Vec<u8>> = None;
+    for (i, stage) in stages.iter().enumerate() {
+        let is_last = i + 1 == stages.len();
+        if let Some(ref data) = piped {
+            pipe_stdin_set(data);
+        }
+        if is_last {
+            dispatch_single(stage.trim(), cwd);
+            pipe_stdin_clear();
+        } else {
+            pipe_capture_start();
+            dispatch_single(stage.trim(), cwd);
+            pipe_stdin_clear();
+            piped = Some(pipe_capture_end());
+        }
+    }
+}
+
+fn dispatch_single(line: &str, cwd: &mut String) {
+    // Parse I/O redirections first.
+    let (cleaned, stdin_redir, stdout_redir) = parse_redirects(line);
+    let line = cleaned.as_str();
+
+    // Set up stdin redirect: read file into pipe buffer.
+    let mut stdin_from_file = false;
+    if let Some(ref path) = stdin_redir {
+        let resolved = resolve(cwd, path);
+        match sys_open(&resolved) {
+            Ok(fd) => {
+                let mut data: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+                let mut tmp = [0u8; 512];
+                loop {
+                    match sys_read_fd(fd, &mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n)          => data.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                sys_close(fd);
+                pipe_stdin_set(&data);
+                stdin_from_file = true;
+            }
+            Err(_) => {
+                println!("lysh: {}: no such file", path);
+                return;
+            }
+        }
+    }
+
+    // Capture stdout if output redirect requested.
+    let capture_stdout = stdout_redir.is_some();
+    if capture_stdout { pipe_capture_start(); }
+
+    // Dispatch the command.
     let mut parts = line.split_ascii_whitespace();
     let cmd = match parts.next() {
         Some(c) => c,
-        None    => return,
+        None    => {
+            if capture_stdout { let _ = pipe_capture_end(); }
+            if stdin_from_file { pipe_stdin_clear(); }
+            return;
+        }
     };
     let args: Vec<&str> = parts.collect();
 
@@ -137,10 +248,16 @@ fn dispatch(line: &str, cwd: &mut String) {
             let path = resolve(cwd, args.first().copied().unwrap_or("."));
             rutils::cmd_ls(&path);
         }
-        "cat" => match args.first() {
-            Some(p) => rutils::cmd_cat(&resolve(cwd, p)),
-            None    => println!("usage: cat <path>"),
-        },
+        "cat" => {
+            if pipe_stdin_active() {
+                print!("{}", pipe_stdin_read_all());
+            } else {
+                match args.first() {
+                    Some(p) => rutils::cmd_cat(&resolve(cwd, p)),
+                    None    => println!("usage: cat <path>"),
+                }
+            }
+        }
         "cp" => {
             if args.len() < 2 {
                 println!("usage: cp <src> <dst>");
@@ -177,6 +294,25 @@ fn dispatch(line: &str, cwd: &mut String) {
             }
         }
     }
+
+    // Flush captured output to file if `>` was specified.
+    if capture_stdout {
+        let data = pipe_capture_end();
+        if let Some(ref path) = stdout_redir {
+            let resolved = resolve(cwd, path);
+            let _ = sys_unlink(&resolved); // truncate if exists
+            match sys_create(&resolved) {
+                Ok(fd) => {
+                    let _ = sys_write_fd(fd, &data);
+                    sys_close(fd);
+                }
+                Err(_) => println!("lysh: {}: cannot create", path),
+            }
+        }
+    }
+
+    // Clear stdin redirect if we set it.
+    if stdin_from_file { pipe_stdin_clear(); }
 }
 
 fn cmd_help() {

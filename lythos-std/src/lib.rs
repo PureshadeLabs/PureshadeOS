@@ -139,7 +139,26 @@ pub const SYS_CREATE:        u64 = 28;
 /// Delete a file. a1=path_ptr, a2=path_len. Returns 0 or error.
 pub const SYS_UNLINK:        u64 = 29;
 /// Create a directory. a1=path_ptr, a2=path_len. Returns 0 or error.
-pub const SYS_MKDIR:         u64 = 32;
+pub const SYS_MKDIR:              u64 = 32;
+/// Receive from IPC endpoint with a millisecond timeout.
+/// a1=cap, a2=buf_ptr, a3=buf_len, a4=timeout_ms. Returns bytes or EAGAIN.
+pub const SYS_IPC_RECV_TIMEOUT:  u64 = 42;
+/// Send to IPC endpoint with a millisecond timeout.
+/// a1=cap, a2=msg_ptr, a3=msg_len, a4=timeout_ms. Returns 0 or EAGAIN.
+pub const SYS_IPC_SEND_TIMEOUT:  u64 = 43;
+/// Create a UDP socket. Returns socket fd (≥ 0) or error (ENOSYS if no net device).
+pub const SYS_SOCKET:            u64 = 50;
+/// Bind a UDP socket to a local port. a1=fd, a2=port. Returns 0 or error.
+pub const SYS_BIND:              u64 = 51;
+/// Send a UDP datagram. a1=fd, a2=buf_ptr, a3=len, a4=dst_ip (u32), a5=dst_port (u16).
+/// Returns 0 on success, EAGAIN if ARP not yet resolved.
+pub const SYS_SENDTO:            u64 = 52;
+/// Receive a UDP datagram (blocking). a1=fd, a2=buf_ptr, a3=len,
+/// a4=src_ip_out (*mut u32, 0=ignore), a5=src_port_out (*mut u16, 0=ignore).
+/// Returns bytes received.
+pub const SYS_RECVFROM:          u64 = 53;
+/// Close a socket. a1=fd. Returns 0.
+pub const SYS_NET_CLOSE:         u64 = 54;
 
 // ── Capability rights constants ───────────────────────────────────────────────
 
@@ -366,11 +385,120 @@ pub fn sys_exec(elf: &[u8], caps: &[u64]) -> Result<u64, SysError> {
     if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(r) }
 }
 
+// ── Pipe capture ─────────────────────────────────────────────────────────────
+//
+// lysh implements shell pipes by capturing one stage's output (via sys_log
+// interception) then feeding it as stdin to the next stage.  No IPC or
+// separate process needed — the scheduler is cooperative and commands are
+// library calls inside the shell process.
+//
+// PIPE_BUF_SIZE must be a power-of-two multiple of 4096 and fit in BSS.
+// 64 KiB covers virtually all command outputs; the buffer silently truncates
+// anything larger (only a problem for `cat bigfile | …` which is unusual).
+
+const PIPE_BUF_SIZE: usize = 64 * 1024;
+
+struct PipeBuf {
+    buf: core::cell::UnsafeCell<[u8; PIPE_BUF_SIZE]>,
+    len: core::cell::UnsafeCell<usize>,
+    pos: core::cell::UnsafeCell<usize>,
+}
+// SAFETY: single-threaded userspace process; no concurrent access.
+unsafe impl Sync for PipeBuf {}
+impl PipeBuf {
+    const fn new() -> Self {
+        Self {
+            buf: core::cell::UnsafeCell::new([0; PIPE_BUF_SIZE]),
+            len: core::cell::UnsafeCell::new(0),
+            pos: core::cell::UnsafeCell::new(0),
+        }
+    }
+}
+
+static CAPTURE_ACTIVE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+static CAPTURE: PipeBuf = PipeBuf::new();
+
+static STDIN_ACTIVE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+static STDIN: PipeBuf = PipeBuf::new();
+
+/// Begin capturing all `print!` / `sys_log` output into an internal buffer.
+///
+/// Output is silently truncated at `PIPE_BUF_SIZE` (64 KiB).
+/// Call [`pipe_capture_end`] to stop capturing and retrieve the buffer.
+pub fn pipe_capture_start() {
+    unsafe { *CAPTURE.len.get() = 0; }
+    CAPTURE_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Stop capturing and return the bytes written since [`pipe_capture_start`].
+pub fn pipe_capture_end() -> alloc::vec::Vec<u8> {
+    CAPTURE_ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
+    let len = unsafe { *CAPTURE.len.get() };
+    let buf = unsafe { &(&*CAPTURE.buf.get())[..len] };
+    alloc::vec::Vec::from(buf)
+}
+
+/// Feed `data` as the stdin source for the next pipeline stage.
+///
+/// While stdin is active, [`pipe_stdin_active`] returns `true` and
+/// [`pipe_stdin_read_all`] drains the buffer.  Call [`pipe_stdin_clear`]
+/// after the stage finishes to reset state.
+pub fn pipe_stdin_set(data: &[u8]) {
+    let n = data.len().min(PIPE_BUF_SIZE);
+    unsafe {
+        (&mut *STDIN.buf.get())[..n].copy_from_slice(&data[..n]);
+        *STDIN.len.get() = n;
+        *STDIN.pos.get() = 0;
+    }
+    STDIN_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Return `true` if piped stdin data is available.
+#[inline]
+pub fn pipe_stdin_active() -> bool {
+    STDIN_ACTIVE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Consume and return all remaining piped stdin as a UTF-8 string.
+///
+/// Resets the stdin state; subsequent calls return an empty string.
+pub fn pipe_stdin_read_all() -> alloc::string::String {
+    STDIN_ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
+    let len = unsafe { *STDIN.len.get() };
+    let pos = unsafe { *STDIN.pos.get() };
+    unsafe { *STDIN.pos.get() = len; }
+    let buf = unsafe { &(&*STDIN.buf.get())[pos..len] };
+    alloc::string::String::from(core::str::from_utf8(buf).unwrap_or(""))
+}
+
+/// Reset piped stdin state without consuming the data.
+pub fn pipe_stdin_clear() {
+    STDIN_ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// Write a UTF-8 string to the kernel serial console.
 ///
-/// Automatically chunks strings longer than 4096 bytes.
-/// Prefer `print!` / `println!` unless you need raw access.
+/// When pipe capture is active (between [`pipe_capture_start`] and
+/// [`pipe_capture_end`]), output is diverted into the capture buffer
+/// instead of the serial port.  Automatically chunks strings longer
+/// than 4096 bytes.  Prefer `print!` / `println!` unless you need raw access.
 pub fn sys_log(s: &str) {
+    if CAPTURE_ACTIVE.load(core::sync::atomic::Ordering::Relaxed) {
+        let b       = s.as_bytes();
+        let cur_len = unsafe { *CAPTURE.len.get() };
+        let space   = PIPE_BUF_SIZE - cur_len;
+        let copy_n  = b.len().min(space);
+        if copy_n > 0 {
+            unsafe {
+                (&mut *CAPTURE.buf.get())[cur_len..cur_len + copy_n]
+                    .copy_from_slice(&b[..copy_n]);
+                *CAPTURE.len.get() = cur_len + copy_n;
+            }
+        }
+        return;
+    }
     let b = s.as_bytes();
     let mut off = 0;
     while off < b.len() {
@@ -593,6 +721,76 @@ pub fn sys_create(path: &str) -> Result<u64, ()> {
 pub fn sys_unlink(path: &str) -> Result<(), ()> {
     let r = unsafe { syscall2(SYS_UNLINK, path.as_ptr() as u64, path.len() as u64) };
     if (r as i64) < 0 { Err(()) } else { Ok(()) }
+}
+
+/// Receive from an IPC endpoint with a timeout.
+///
+/// Returns `Ok(bytes)` on success, or `Err(EAGAIN)` if no message arrived
+/// within `timeout_ms` milliseconds.
+pub fn sys_ipc_recv_timeout(cap: u64, buf: &mut [u8], timeout_ms: u64) -> Result<usize, SysError> {
+    let r = unsafe {
+        syscall4(SYS_IPC_RECV_TIMEOUT, cap, buf.as_mut_ptr() as u64, buf.len() as u64, timeout_ms)
+    };
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(r as usize) }
+}
+
+/// Send to an IPC endpoint with a timeout.
+///
+/// Returns `Ok(())` on success, or `Err(EAGAIN)` if the ring stayed full for
+/// `timeout_ms` milliseconds.
+pub fn sys_ipc_send_timeout(cap: u64, msg: &[u8], timeout_ms: u64) -> Result<(), SysError> {
+    let r = unsafe {
+        syscall4(SYS_IPC_SEND_TIMEOUT, cap, msg.as_ptr() as u64, msg.len() as u64, timeout_ms)
+    };
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(()) }
+}
+
+/// Create a UDP socket. Returns the socket fd on success.
+pub fn sys_socket() -> Result<u64, SysError> {
+    let r = unsafe { syscall0(SYS_SOCKET) };
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(r) }
+}
+
+/// Bind a UDP socket to a local port.
+pub fn sys_bind(fd: u64, port: u16) -> Result<(), SysError> {
+    let r = unsafe { syscall2(SYS_BIND, fd, port as u64) };
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(()) }
+}
+
+/// Send a UDP datagram.
+///
+/// `dst_ip` is an IPv4 address in host byte order (e.g. `0x0A00_0202` = 10.0.2.2).
+/// Returns `Err(EAGAIN)` if the ARP entry for `dst_ip` is not yet resolved.
+pub fn sys_sendto(fd: u64, buf: &[u8], dst_ip: u32, dst_port: u16) -> Result<(), SysError> {
+    let r = unsafe {
+        syscall6(SYS_SENDTO, fd, buf.as_ptr() as u64, buf.len() as u64,
+                 dst_ip as u64, dst_port as u64, 0)
+    };
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(()) }
+}
+
+/// Receive a UDP datagram (blocking).
+///
+/// Returns `(bytes_received, src_ip, src_port)`.
+pub fn sys_recvfrom(fd: u64, buf: &mut [u8]) -> Result<(usize, u32, u16), SysError> {
+    let mut src_ip:   u32 = 0;
+    let mut src_port: u16 = 0;
+    let r = unsafe {
+        syscall6(SYS_RECVFROM, fd, buf.as_mut_ptr() as u64, buf.len() as u64,
+                 &mut src_ip   as *mut u32 as u64,
+                 &mut src_port as *mut u16 as u64,
+                 0)
+    };
+    if SysError::is_err_raw(r) {
+        Err(SysError::from_raw(r))
+    } else {
+        Ok((r as usize, src_ip, src_port))
+    }
+}
+
+/// Close a socket.
+pub fn sys_net_close(fd: u64) {
+    unsafe { syscall1(SYS_NET_CLOSE, fd) };
 }
 
 /// Create a directory at `path`. Parent directory must already exist.
