@@ -1,11 +1,9 @@
 <!--
-  DwindleLayout.svelte — Dwindle tiling layout.
+  DwindleLayout.svelte — Dwindle tiling layout (Caelestia-style).
 
   0 windows → empty workspace hint
-  1 window  → fills entire workspace
-  2+ windows → primary (golden-ratio left) + secondary stack (right)
-
-  Click on any tile to focus it.
+  1 window  → fills workspace
+  2+ windows → primary (left, golden ratio) + secondary stack (right)
 -->
 <script>
   import Titlebar from './Titlebar.svelte';
@@ -20,9 +18,9 @@
 
   {#if windows.length === 0}
     <div class="empty-workspace">
-      <span class="empty-icon" aria-hidden="true">dashboard</span>
+      <span class="empty-icon" aria-hidden="true">blur_on</span>
       <span class="empty-label">No open windows</span>
-      <span class="empty-hint">Open an app from the launcher ⊞</span>
+      <span class="empty-hint">Open an app from the launcher</span>
     </div>
 
   {:else if windows.length === 1}
@@ -36,7 +34,7 @@
       <Titlebar title={primary.title} icon={primary.icon ?? 'apps'} appId={primary.id} focused={true} />
       <div class="surface">
         <div class="ph-content">
-          <span class="ph-icon" aria-hidden="true">{primary.icon ?? 'apps'}</span>
+          <span class="ph-icon icon" aria-hidden="true">{primary.icon ?? 'apps'}</span>
           <span class="ph-title">{primary.title}</span>
           <span class="ph-sub">App surface · compositor not yet connected</span>
         </div>
@@ -44,7 +42,6 @@
     </div>
 
   {:else}
-    <!-- Primary tile (left) -->
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
     <div
       class="tile primary"
@@ -56,14 +53,13 @@
       <Titlebar title={primary.title} icon={primary.icon ?? 'apps'} appId={primary.id} focused={primary.focused} />
       <div class="surface">
         <div class="ph-content">
-          <span class="ph-icon" aria-hidden="true">{primary.icon ?? 'apps'}</span>
+          <span class="ph-icon icon" aria-hidden="true">{primary.icon ?? 'apps'}</span>
           <span class="ph-title">{primary.title}</span>
           <span class="ph-sub">App surface · compositor not yet connected</span>
         </div>
       </div>
     </div>
 
-    <!-- Secondary stack (right) -->
     <div class="stack">
       {#each secondary as win (win.id)}
         <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
@@ -77,7 +73,7 @@
           <Titlebar title={win.title} icon={win.icon ?? 'apps'} appId={win.id} focused={win.focused} />
           <div class="surface">
             <div class="ph-content">
-              <span class="ph-icon" aria-hidden="true">{win.icon ?? 'apps'}</span>
+              <span class="ph-icon icon" aria-hidden="true">{win.icon ?? 'apps'}</span>
               <span class="ph-title">{win.title}</span>
               <span class="ph-sub">App surface · compositor not yet connected</span>
             </div>
@@ -92,43 +88,40 @@
 <style>
   .dwindle {
     display: flex;
-    width:  100%;
-    height: 100%;
-    gap: 8px;
-    padding: 8px;
+    width:   100%;
+    height:  100%;
+    gap:     10px;
+    padding: 10px;
   }
 
   /* ── Empty workspace ──────────────────────────────────────────────────── */
   .empty-workspace {
-    flex: 1;
-    display: flex;
+    flex:           1;
+    display:        flex;
     flex-direction: column;
-    align-items: center;
+    align-items:    center;
     justify-content: center;
-    gap: 10px;
+    gap:            12px;
   }
 
   .empty-icon {
     font-family: 'Material Symbols Rounded';
-    font-size: 72px;
-    font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' -25, 'opsz' 48;
-    color: var(--md-sys-color-outline-variant);
-    opacity: 0.35;
+    font-size:   64px;
+    font-variation-settings: 'FILL' 0, 'wght' 200, 'GRAD' -25, 'opsz' 48;
+    color:       var(--ctp-surface2);
     line-height: 1;
     user-select: none;
   }
 
   .empty-label {
-    font-size: var(--font-size-title);
+    font-size:   var(--font-size-title-sm);
     font-weight: var(--font-weight-medium);
-    color: var(--md-sys-color-on-surface-variant);
-    opacity: 0.45;
+    color:       var(--ctp-overlay1);
   }
 
   .empty-hint {
     font-size: var(--font-size-body-sm);
-    color: var(--md-sys-color-outline);
-    opacity: 0.45;
+    color:     var(--ctp-overlay0);
   }
 
   /* ── Tiles ────────────────────────────────────────────────────────────── */
@@ -136,85 +129,87 @@
   .primary { flex: 1.618; }
 
   .stack {
-    display: flex;
+    display:        flex;
     flex-direction: column;
-    flex: 1;
-    gap: 8px;
-    min-width: 0;
+    flex:           1;
+    gap:            10px;
+    min-width:      0;
   }
 
   .stack .tile { flex: 1; }
 
   .tile {
-    display: flex;
+    display:        flex;
     flex-direction: column;
-    background: var(--md-sys-color-surface-container-low);
-    border-radius: var(--md-sys-shape-corner-medium);
-    overflow: hidden;
-    box-shadow: var(--md-sys-elevation-1);
-    border: 1px solid var(--md-sys-color-outline-variant);
-    cursor: default;
+    border-radius:  var(--md-sys-shape-corner-large);
+    overflow:       hidden;
+    cursor:         default;
+
+    /* Glassmorphism tile surface */
+    background: color-mix(in srgb, var(--ctp-mantle) 90%, transparent);
+    backdrop-filter:         blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid color-mix(in srgb, var(--ctp-surface2) 55%, transparent);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.40);
+
     transition:
-      box-shadow   var(--md-sys-motion-duration-short4) var(--md-sys-motion-easing-standard),
-      border-color var(--md-sys-motion-duration-short4) var(--md-sys-motion-easing-standard);
+      border-color var(--md-sys-motion-duration-short4) var(--md-sys-motion-easing-standard),
+      box-shadow   var(--md-sys-motion-duration-short4) var(--md-sys-motion-easing-standard);
   }
 
   .tile.focused {
-    border-color: var(--md-sys-color-primary);
-    box-shadow: var(--md-sys-elevation-3), 0 0 0 1px var(--md-sys-color-primary);
+    border-color: color-mix(in srgb, var(--ctp-mauve) 50%, var(--ctp-surface2));
+    box-shadow:
+      0 4px 24px rgba(0,0,0,0.45),
+      0 0 0 1px color-mix(in srgb, var(--ctp-mauve) 35%, transparent);
   }
 
-  /* ── Window surface (placeholder) ────────────────────────────────────── */
+  /* ── Window surface placeholder ───────────────────────────────────────── */
   .surface {
-    flex: 1;
-    display: flex;
-    align-items: center;
+    flex:            1;
+    display:         flex;
+    align-items:     center;
     justify-content: center;
-    background: var(--md-sys-color-surface-container-lowest);
-    position: relative;
-    overflow: hidden;
+    background:      color-mix(in srgb, var(--ctp-crust) 85%, transparent);
+    position:        relative;
+    overflow:        hidden;
   }
 
+  /* Subtle dot-grid texture */
   .surface::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background-image:
-      linear-gradient(var(--md-sys-color-outline-variant) 1px, transparent 1px),
-      linear-gradient(90deg, var(--md-sys-color-outline-variant) 1px, transparent 1px);
+    content:     '';
+    position:    absolute;
+    inset:       0;
+    background-image: radial-gradient(circle, var(--ctp-surface1) 1px, transparent 1px);
     background-size: 24px 24px;
-    opacity: 0.05;
+    opacity:     0.18;
     pointer-events: none;
   }
 
   .ph-content {
-    display: flex;
+    display:        flex;
     flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    position: relative;
+    align-items:    center;
+    gap:            10px;
+    position:       relative;
   }
 
   .ph-icon {
-    font-family: 'Material Symbols Rounded';
-    font-size: 52px;
-    font-variation-settings: 'FILL' 1, 'wght' 300, 'GRAD' -25, 'opsz' 48;
-    color: var(--md-sys-color-outline-variant);
-    opacity: 0.4;
+    font-size: 48px;
+    font-variation-settings: 'FILL' 1, 'wght' 200, 'GRAD' -25, 'opsz' 48;
+    color:     var(--ctp-surface2);
     line-height: 1;
     user-select: none;
   }
 
   .ph-title {
-    font-size: var(--font-size-body-lg);
+    font-size:   var(--font-size-body);
     font-weight: var(--font-weight-medium);
-    color: var(--md-sys-color-on-surface-variant);
-    opacity: 0.5;
+    color:       var(--ctp-overlay1);
   }
 
   .ph-sub {
     font-size: var(--font-size-body-sm);
-    color: var(--md-sys-color-outline);
-    opacity: 0.4;
+    color:     var(--ctp-overlay0);
   }
 </style>

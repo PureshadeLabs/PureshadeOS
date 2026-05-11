@@ -1,43 +1,53 @@
 <!--
   App.svelte — root shell.
 
-  Layout:
-    layer 0 — wallpaper (CSS gradient or image URL)
-    layer 1 — DwindleLayout (tiled windows, wallpaper visible through gaps)
-    layer 2 — Taskbar (frosted glass, pinned to bottom)
+  Layout (row):
+    Sidebar (44 px) | Workspace container (flex-1, relative)
+                         ├─ wallpaper
+                         ├─ DwindleLayout
+                         ├─ OSD panel (absolute, top, centered)
+                         ├─ AppLauncher (absolute, bottom-center)
+                         └─ Notifications (fixed, top-right)
 -->
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import DwindleLayout from './lib/DwindleLayout.svelte';
-  import Taskbar       from './lib/Taskbar.svelte';
+  import DwindleLayout  from './lib/DwindleLayout.svelte';
+  import Sidebar        from './lib/Sidebar.svelte';
+  import OSD            from './lib/OSD.svelte';
+  import AppLauncher    from './lib/AppLauncher.svelte';
+  import Notifications  from './lib/Notifications.svelte';
   import { applyThemeFromWallpaper, applyThemeFromSeed } from './lib/theme.js';
   import { channels }      from './lib/ws.js';
   import { visibleWindows, openWindow } from './lib/windows.js';
 
-  // Apply dark palette before first render — prevents white flash.
-  applyThemeFromSeed('#1a0a2e');
+  applyThemeFromSeed('#1e1e2e');
 
-  // ── Wallpaper ─────────────────────────────────────────────────────────────
-  const wallpaperUrl            = null; // set to image URL when available
-  const FALLBACK_WALLPAPER_SEED = '#1a0a2e';
+  const wallpaperUrl            = null;
+  const FALLBACK_WALLPAPER_SEED = '#1e1e2e';
 
-  // ── Bridge: sync window list from control channel ─────────────────────────
-  // When the bridge sends an app_list, reconcile it with the local store.
-  // Until bridge is running this is a no-op — local state drives the UI.
+  let osdOpen      = false;
+  let launcherOpen = false;
+  let notifRef;
+
   const unsub = channels.control.message.subscribe((msg) => {
     if (!msg) return;
     if (msg.type === 'app_spawned') {
       openWindow(msg.name ?? 'App', msg.icon ?? 'apps');
+      notifRef?.push({
+        title: msg.name ?? 'App',
+        body:  'App launched successfully.',
+        icon:  msg.icon ?? 'apps',
+      });
     }
   });
 
   onMount(() => {
     if (wallpaperUrl) {
-      const img       = new Image();
+      const img = new Image();
       img.crossOrigin = 'anonymous';
-      img.src         = wallpaperUrl;
-      img.onload      = () => applyThemeFromWallpaper(img);
-      img.onerror     = () => applyThemeFromSeed(FALLBACK_WALLPAPER_SEED);
+      img.src = wallpaperUrl;
+      img.onload  = () => applyThemeFromWallpaper(img);
+      img.onerror = () => applyThemeFromSeed(FALLBACK_WALLPAPER_SEED);
     } else {
       applyThemeFromSeed(FALLBACK_WALLPAPER_SEED);
     }
@@ -47,51 +57,90 @@
 </script>
 
 <div class="shell">
-  <!-- Wallpaper layer -->
-  <div
-    class="wallpaper"
-    role="presentation"
-    aria-hidden="true"
-    style={wallpaperUrl ? `background-image: url('${wallpaperUrl}')` : ''}
-  ></div>
 
-  <!-- Workspace -->
-  <div class="workspace">
-    <DwindleLayout windows={$visibleWindows} />
+  <!-- Left sidebar -->
+  <Sidebar
+    {osdOpen}
+    {launcherOpen}
+    on:toggleOSD={()      => { osdOpen = !osdOpen; if (osdOpen) launcherOpen = false; }}
+    on:toggleLauncher={() => { launcherOpen = !launcherOpen; if (launcherOpen) osdOpen = false; }}
+  />
+
+  <!-- Workspace area (contains wallpaper + windows + floating panels) -->
+  <div class="workspace-area">
+
+    <!-- Wallpaper -->
+    <div
+      class="wallpaper"
+      role="presentation"
+      aria-hidden="true"
+      style={wallpaperUrl ? `background-image: url('${wallpaperUrl}')` : ''}
+    ></div>
+
+    <!-- Tiled windows -->
+    <div class="workspace">
+      <DwindleLayout windows={$visibleWindows} />
+    </div>
+
+    <!-- OSD panel -->
+    <OSD
+      open={osdOpen}
+      on:close={() => osdOpen = false}
+    />
+
+    <!-- App launcher -->
+    <AppLauncher
+      open={launcherOpen}
+      on:close={() => launcherOpen = false}
+    />
+
+    <!-- Notification toasts -->
+    <Notifications bind:this={notifRef} />
+
   </div>
 
-  <!-- Taskbar -->
-  <Taskbar />
 </div>
 
 <style>
   .shell {
-    width:   100%;
-    height:  100%;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    position: relative;
+    width:     100%;
+    height:    100%;
+    display:   flex;
+    flex-direction: row;
+    overflow:  hidden;
+    position:  relative;
+    background: var(--ctp-crust);
   }
 
+  /* Workspace area fills remaining space */
+  .workspace-area {
+    flex:     1;
+    position: relative;
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  /* Wallpaper */
   .wallpaper {
     position: absolute;
-    inset: 0;
-    z-index: 0;
+    inset:    0;
+    z-index:  0;
     background:
-      radial-gradient(ellipse 80% 60% at 20% 80%, rgba(103,58,183,0.25) 0%, transparent 60%),
-      radial-gradient(ellipse 60% 50% at 80% 20%, rgba(81,45,168,0.20)  0%, transparent 55%),
-      radial-gradient(ellipse 100% 80% at 50% 50%, #130821 0%, #0a0514 100%);
-    background-size: cover;
+      radial-gradient(ellipse 70% 55% at 15% 85%, rgba(203,166,247,0.10) 0%, transparent 60%),
+      radial-gradient(ellipse 55% 45% at 85% 15%, rgba(180,190,254,0.08) 0%, transparent 55%),
+      radial-gradient(ellipse 80% 60% at 50% 50%, rgba(137,180,250,0.05) 0%, transparent 70%),
+      linear-gradient(145deg, #181825 0%, #11111b 50%, #1e1e2e 100%);
+    background-size:     cover;
     background-position: center;
-    background-repeat: no-repeat;
+    background-repeat:   no-repeat;
   }
 
+  /* Tiled windows layer */
   .workspace {
     position: relative;
-    z-index: 1;
-    flex: 1;
-    min-height: 0;
+    z-index:  1;
+    width:    100%;
+    height:   100%;
     overflow: hidden;
   }
 </style>

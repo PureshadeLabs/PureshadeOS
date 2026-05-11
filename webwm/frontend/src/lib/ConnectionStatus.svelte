@@ -19,6 +19,8 @@
     { key: 'control', port: '7702', label: 'Control' },
   ];
 
+  export let compact = false;
+
   let expanded = false;
 
   const stateIcon = {
@@ -45,6 +47,39 @@
   $: allOpen  = statuses.every(s => s.status === 'open');
   $: anyError = statuses.some(s => s.status === 'error' || s.status === 'closed');
 </script>
+
+{#if compact}
+  <!-- Sidebar compact: single icon dot only -->
+  <button
+    class="compact-btn"
+    title="Bridge: {allOpen ? 'connected' : anyError ? 'disconnected' : 'connecting'}"
+    aria-label="Bridge connection status"
+    on:click={() => expanded = !expanded}
+  >
+    <span class="icon compact-dot"
+      class:spin={!allOpen && !anyError}
+      style="color:{allOpen ? 'var(--ctp-green)' : anyError ? 'var(--ctp-red)' : 'var(--ctp-yellow)'}; font-size:15px; font-variation-settings:'FILL' 1,'wght' 400,'GRAD' 0,'opsz' 20"
+      aria-hidden="true">
+      {allOpen ? 'wifi' : anyError ? 'wifi_off' : 'sync'}
+    </span>
+  </button>
+
+  {#if expanded}
+    <div class="detail-card detail-sidebar" role="status" on:click|stopPropagation>
+      {#each statuses as s}
+        <div class="channel-row">
+          <span class="row-icon icon" class:spin={s.status === 'connecting'}
+            style="color: {stateColor[s.status]}; font-size: 14px; font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 20"
+            aria-hidden="true">{stateIcon[s.status]}</span>
+          <span class="row-label">{s.label}</span>
+          <span class="row-status" style="color: {stateColor[s.status]}">{s.status}</span>
+        </div>
+      {/each}
+    </div>
+    <div class="backdrop" aria-hidden="true" on:click={() => expanded = false}></div>
+  {/if}
+
+{:else}
 
 <div class="status-root" class:expanded>
   <!-- Collapsed: single pill summary -->
@@ -95,11 +130,38 @@
 </div>
 
 <!-- Close detail card on backdrop click -->
-{#if expanded}
+{#if expanded && !compact}
   <div class="backdrop" aria-hidden="true" on:click={() => expanded = false}></div>
 {/if}
 
+{/if} <!-- end compact/else -->
+
 <style>
+  /* Compact mode (sidebar) */
+  .compact-btn {
+    display:         flex;
+    align-items:     center;
+    justify-content: center;
+    width:           32px;
+    height:          32px;
+    border:          none;
+    border-radius:   var(--md-sys-shape-corner-small);
+    background:      transparent;
+    cursor:          pointer;
+    transition:      background var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
+  }
+
+  .compact-btn:hover {
+    background: color-mix(in srgb, var(--ctp-surface0) 80%, transparent);
+  }
+
+  .detail-sidebar {
+    left:   48px;
+    bottom: auto;
+    top:    0;
+    right:  auto;
+  }
+
   .status-root {
     position: relative;
     display: flex;
