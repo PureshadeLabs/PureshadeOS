@@ -1,0 +1,17 @@
+[package]
+name    = "lythos-libc"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal C-ABI shim for Lythos — satisfies libc-crate linkage requirements"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name       = "c"
+crate-type = ["staticlib", "rlib"]
+
+[features]
+default = []
+
+[profile.release]
+opt-level = "s"
+lto       = true

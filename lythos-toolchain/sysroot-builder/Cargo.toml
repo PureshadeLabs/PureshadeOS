@@ -1,0 +1,11 @@
+[package]
+name    = "sysroot-builder"
+version = "0.1.0"
+edition = "2021"
+description = "Build-time helper that assembles the Lythos Rust sysroot"
+
+[[bin]]
+name = "sysroot-builder"
+path = "src/main.rs"
+
+[dependencies]

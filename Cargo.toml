@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "lythos-std",
+    "lythos-libstd",
     "lythdist",
     "userspace/lysh",
     "userspace/rutils",
@@ -8,6 +9,9 @@ members = [
     "userspace/rpkg",
     "lythd",
     "lythmsg",
+    "lythos-toolchain/lythos-libc",
+    "lythos-toolchain/lythos-unwind",
+    "lythos-toolchain/sysroot-builder",
 ]
 exclude  = ["orox-pack"]
 resolver = "2"
