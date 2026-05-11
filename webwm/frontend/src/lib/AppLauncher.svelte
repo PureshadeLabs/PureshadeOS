@@ -1,7 +1,9 @@
 <!--
-  AppLauncher.svelte — Caelestia-style Spotlight launcher overlay.
+  AppLauncher.svelte — Caelestia-style list launcher.
 
-  Full-screen blurred backdrop + centered search bar with results below.
+  Floating card at bottom-center.
+  App list (icon + name + description) on top.
+  Search bar at the BOTTOM (matching the video).
   Closes on Escape or backdrop click.
 -->
 <script>
@@ -13,27 +15,33 @@
 
   const dispatch = createEventDispatcher();
 
-  const pinned = [
-    { id: 'terminal',    label: 'Terminal',     icon: 'terminal',         elf: '/usr/bin/lysh'         },
-    { id: 'files',       label: 'Files',        icon: 'folder_open',      elf: '/usr/bin/lyfiles'      },
-    { id: 'settings',    label: 'Settings',     icon: 'settings',         elf: '/usr/bin/lysettings'   },
-    { id: 'browser',     label: 'Browser',      icon: 'language',         elf: '/usr/bin/lybrowser'    },
-    { id: 'editor',      label: 'Text Editor',  icon: 'edit_document',    elf: '/usr/bin/lyeditor'     },
-    { id: 'music',       label: 'Music',        icon: 'music_note',       elf: '/usr/bin/lymusic'      },
-    { id: 'calculator',  label: 'Calculator',   icon: 'calculate',        elf: '/usr/bin/lycalc'       },
-    { id: 'calendar',    label: 'Calendar',     icon: 'calendar_month',   elf: '/usr/bin/lycal'        },
-    { id: 'system',      label: 'System Info',  icon: 'info',             elf: '/usr/bin/lysysinfo'    },
-    { id: 'screenshot',  label: 'Screenshot',   icon: 'screenshot',       elf: '/usr/bin/lyshot'       },
-    { id: 'package',     label: 'Packages',     icon: 'package_2',        elf: '/usr/bin/rpkg-gui'     },
-    { id: 'display',     label: 'Display',      icon: 'display_settings', elf: '/usr/bin/lydisplay'    },
+  const apps = [
+    { id: 'terminal',   label: 'Terminal',        desc: 'System shell',              icon: 'terminal',         elf: '/usr/bin/lysh'         },
+    { id: 'files',      label: 'Files',            desc: 'File manager',              icon: 'folder_open',      elf: '/usr/bin/lyfiles'      },
+    { id: 'settings',   label: 'Settings',         desc: 'System preferences',        icon: 'settings',         elf: '/usr/bin/lysettings'   },
+    { id: 'browser',    label: 'Browser',          desc: 'Web browser',               icon: 'language',         elf: '/usr/bin/lybrowser'    },
+    { id: 'editor',     label: 'Text Editor',      desc: 'Edit documents',            icon: 'edit_document',    elf: '/usr/bin/lyeditor'     },
+    { id: 'music',      label: 'Music',            desc: 'Audio player',              icon: 'music_note',       elf: '/usr/bin/lymusic'      },
+    { id: 'calculator', label: 'Calculator',       desc: 'Quick calculations',        icon: 'calculate',        elf: '/usr/bin/lycalc'       },
+    { id: 'calendar',   label: 'Calendar',         desc: 'Dates and events',          icon: 'calendar_month',   elf: '/usr/bin/lycal'        },
+    { id: 'system',     label: 'System Info',      desc: 'Hardware and OS details',   icon: 'info',             elf: '/usr/bin/lysysinfo'    },
+    { id: 'screenshot', label: 'Screenshot',       desc: 'Capture the screen',        icon: 'screenshot',       elf: '/usr/bin/lyshot'       },
+    { id: 'package',    label: 'Package Manager',  desc: 'Install and update rpkg',   icon: 'package_2',        elf: '/usr/bin/rpkg-gui'     },
+    { id: 'display',    label: 'Display Settings', desc: 'Resolution and scaling',    icon: 'display_settings', elf: '/usr/bin/lydisplay'    },
   ];
 
   let query = '';
+  let focusIdx = 0;
   let inputEl;
 
   $: filtered = query.trim()
-    ? pinned.filter(a => a.label.toLowerCase().includes(query.toLowerCase()))
-    : pinned;
+    ? apps.filter(a =>
+        a.label.toLowerCase().includes(query.toLowerCase()) ||
+        a.desc.toLowerCase().includes(query.toLowerCase())
+      )
+    : apps;
+
+  $: if (filtered) focusIdx = 0;
 
   function launch(app) {
     openWindow(app.label, app.icon);
@@ -48,153 +56,257 @@
 
   function handleKey(e) {
     if (!open) return;
-    if (e.key === 'Escape') close();
+    if (e.key === 'Escape') { close(); return; }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); focusIdx = Math.max(0, focusIdx - 1); }
+    if (e.key === 'ArrowDown') { e.preventDefault(); focusIdx = Math.min(filtered.length - 1, focusIdx + 1); }
+    if (e.key === 'Enter' && filtered[focusIdx]) { launch(filtered[focusIdx]); }
   }
 
   onMount(() => window.addEventListener('keydown', handleKey));
   onDestroy(() => window.removeEventListener('keydown', handleKey));
 
-  $: if (open && inputEl) setTimeout(() => inputEl.focus(), 60);
+  $: if (open && inputEl) setTimeout(() => inputEl.focus(), 50);
 </script>
 
 {#if open}
-  <!-- Full-screen backdrop -->
+  <!-- Backdrop -->
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
-  <div
-    class="backdrop"
-    aria-hidden="true"
-    on:click={close}
-  ></div>
+  <div class="backdrop" aria-hidden="true" on:click={close}></div>
 
   <!-- Launcher card -->
-  <div
-    class="launcher"
-    role="dialog"
-    aria-modal="true"
-    aria-label="App launcher"
-  >
-    <!-- Search bar -->
+  <div class="launcher" role="dialog" aria-modal="true" aria-label="Application launcher">
+
+    <!-- App list -->
+    <div class="list-wrap">
+      {#if filtered.length === 0}
+        <div class="empty">
+          <span class="icon" style="font-size:24px">search_off</span>
+          <span>No results for "{query}"</span>
+        </div>
+      {:else}
+        <ul class="app-list" role="listbox" aria-label="Applications">
+          {#each filtered as app, i (app.id)}
+            <!-- svelte-ignore a11y-click-events-have-key-events -->
+            <li
+              class="app-row"
+              class:focused={i === focusIdx}
+              role="option"
+              aria-selected={i === focusIdx}
+              on:click={() => launch(app)}
+              on:mouseenter={() => focusIdx = i}
+            >
+              <div class="app-icon-wrap">
+                <span class="icon app-icon" aria-hidden="true"
+                  style="font-variation-settings:'FILL' 1,'wght' 400,'GRAD' 0,'opsz' 20">
+                  {app.icon}
+                </span>
+              </div>
+              <div class="app-text">
+                <span class="app-name">{app.label}</span>
+                <span class="app-desc">{app.desc}</span>
+              </div>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+
+    <!-- Divider -->
+    <div class="divider" aria-hidden="true"></div>
+
+    <!-- Search bar (bottom) -->
     <div class="search-row">
-      <span class="icon search-icon">search</span>
+      <span class="icon search-icon" aria-hidden="true">search</span>
       <input
         bind:this={inputEl}
         bind:value={query}
         class="search-input"
         type="search"
-        placeholder="Search apps…"
-        aria-label="Search apps"
+        placeholder='Type ">" for commands'
+        aria-label="Search applications"
         autocomplete="off"
         spellcheck="false"
       />
       {#if query}
-        <button class="clear-btn" aria-label="Clear search" on:click={() => query = ''}>
-          <span class="icon" style="font-size:16px">close</span>
+        <button class="clear-btn" aria-label="Clear" on:click={() => { query = ''; inputEl.focus(); }}>
+          <span class="icon" style="font-size:14px">close</span>
         </button>
       {/if}
     </div>
 
-    <!-- Results -->
-    <div class="grid-wrap">
-      {#if filtered.length > 0}
-        <div class="grid" role="list" aria-label="Applications">
-          {#each filtered as app (app.id)}
-            <button
-              class="app-tile"
-              title={app.label}
-              aria-label="Launch {app.label}"
-              on:click={() => launch(app)}
-            >
-              <div class="tile-icon-wrap">
-                <span class="icon tile-icon" aria-hidden="true">{app.icon}</span>
-              </div>
-              <span class="tile-label">{app.label}</span>
-            </button>
-          {/each}
-        </div>
-      {:else}
-        <div class="empty">
-          <span class="icon" style="font-size:28px">search_off</span>
-          <span>No results for "{query}"</span>
-        </div>
-      {/if}
-    </div>
   </div>
 {/if}
 
 <style>
   /* Backdrop */
   .backdrop {
-    position:        fixed;
-    inset:           0;
-    z-index:         50;
-    background:      rgba(0, 0, 0, 0.60);
-    backdrop-filter: blur(12px) saturate(80%);
-    -webkit-backdrop-filter: blur(12px) saturate(80%);
-    animation: fade-in var(--md-sys-motion-duration-medium1) var(--md-sys-motion-easing-standard) forwards;
-  }
-
-  @keyframes fade-in {
-    from { opacity: 0; }
-    to   { opacity: 1; }
+    position:   fixed;
+    inset:      0;
+    z-index:    49;
+    background: transparent;
   }
 
   /* Launcher card */
   .launcher {
-    position:  fixed;
-    left:      50%;
-    top:       50%;
-    transform: translate(-50%, -50%);
-    width:     min(600px, calc(100vw - 48px));
-    max-height: min(540px, calc(100vh - 100px));
-    display:   flex;
+    position:       fixed;
+    left:           50%;
+    bottom:         60px;
+    transform:      translateX(-50%);
+    width:          min(560px, calc(100vw - 80px));
+    max-height:     min(480px, calc(100vh - 120px));
+    display:        flex;
     flex-direction: column;
-    z-index:   60;
-    overflow:  hidden;
-    border-radius: var(--md-sys-shape-corner-extra-large);
+    z-index:        50;
+    border-radius:  var(--md-sys-shape-corner-extra-large);
+    overflow:       hidden;
 
-    background: color-mix(in srgb, var(--ctp-mantle) 88%, transparent);
-    backdrop-filter:         blur(32px) saturate(150%);
-    -webkit-backdrop-filter: blur(32px) saturate(150%);
-    border: 1px solid color-mix(in srgb, var(--ctp-surface2) 70%, transparent);
+    background:      color-mix(in srgb, var(--ctp-mantle) 92%, transparent);
+    backdrop-filter: blur(32px) saturate(160%);
+    -webkit-backdrop-filter: blur(32px) saturate(160%);
+    border:          1px solid color-mix(in srgb, var(--ctp-surface2) 70%, transparent);
     box-shadow:
-      0 24px 60px rgba(0,0,0,0.55),
+      0 20px 50px rgba(0,0,0,0.55),
       inset 0 1px 0 color-mix(in srgb, white 5%, transparent);
 
-    animation: slide-in var(--md-sys-motion-duration-medium2) var(--md-sys-motion-easing-emphasized-decel) forwards;
+    animation: launcher-in var(--md-sys-motion-duration-medium2) var(--md-sys-motion-easing-emphasized-decel) forwards;
   }
 
-  @keyframes slide-in {
-    from { opacity: 0; transform: translate(-50%, calc(-50% + 20px)) scale(0.97); }
-    to   { opacity: 1; transform: translate(-50%, -50%)              scale(1);    }
+  @keyframes launcher-in {
+    from { opacity: 0; transform: translateX(-50%) translateY(14px); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0);    }
   }
 
-  /* Search row */
+  /* List */
+  .list-wrap {
+    flex:       1;
+    overflow-y: auto;
+    padding:    6px;
+  }
+
+  .app-list {
+    list-style: none;
+    display:    flex;
+    flex-direction: column;
+    gap:        2px;
+  }
+
+  /* Row */
+  .app-row {
+    display:       flex;
+    align-items:   center;
+    gap:           12px;
+    padding:       8px 10px;
+    border-radius: var(--md-sys-shape-corner-medium);
+    cursor:        pointer;
+    transition:    background var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
+  }
+
+  .app-row.focused {
+    background: color-mix(in srgb, var(--ctp-mauve) 12%, var(--ctp-surface0));
+  }
+
+  .app-row:hover {
+    background: color-mix(in srgb, var(--ctp-surface0) 80%, transparent);
+  }
+
+  .app-row.focused:hover {
+    background: color-mix(in srgb, var(--ctp-mauve) 16%, var(--ctp-surface0));
+  }
+
+  /* App icon bubble */
+  .app-icon-wrap {
+    width:           36px;
+    height:          36px;
+    border-radius:   var(--md-sys-shape-corner-medium);
+    background:      color-mix(in srgb, var(--ctp-surface1) 80%, transparent);
+    display:         flex;
+    align-items:     center;
+    justify-content: center;
+    flex-shrink:     0;
+    transition:      background var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
+  }
+
+  .app-row.focused .app-icon-wrap {
+    background: color-mix(in srgb, var(--ctp-mauve) 20%, var(--ctp-surface0));
+  }
+
+  .app-icon {
+    font-size: 18px;
+    color:     var(--ctp-subtext1);
+    transition: color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
+  }
+
+  .app-row.focused .app-icon { color: var(--ctp-mauve); }
+
+  /* Text */
+  .app-text {
+    flex:       1;
+    min-width:  0;
+    display:    flex;
+    flex-direction: column;
+    gap:        1px;
+  }
+
+  .app-name {
+    font-size:   var(--font-size-body);
+    font-weight: var(--font-weight-semibold);
+    color:       var(--ctp-text);
+    white-space: nowrap;
+    overflow:    hidden;
+    text-overflow: ellipsis;
+  }
+
+  .app-desc {
+    font-size:   var(--font-size-label-sm);
+    color:       var(--ctp-subtext0);
+    white-space: nowrap;
+    overflow:    hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Empty */
+  .empty {
+    display:        flex;
+    flex-direction: column;
+    align-items:    center;
+    gap:            10px;
+    padding:        32px 0;
+    color:          var(--ctp-overlay1);
+    font-size:      var(--font-size-body);
+  }
+
+  /* Divider */
+  .divider {
+    height:     1px;
+    background: color-mix(in srgb, var(--ctp-surface2) 55%, transparent);
+    flex-shrink: 0;
+  }
+
+  /* Search bar (bottom) */
   .search-row {
     display:      flex;
     align-items:  center;
     gap:          10px;
-    padding:      16px 20px;
-    border-bottom: 1px solid color-mix(in srgb, var(--ctp-surface2) 50%, transparent);
+    padding:      12px 16px;
     flex-shrink:  0;
   }
 
   .search-icon {
     color:       var(--ctp-overlay1);
-    font-size:   20px;
+    font-size:   18px;
     flex-shrink: 0;
-    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20;
+    font-variation-settings: 'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 20;
   }
 
   .search-input {
-    flex:       1;
-    border:     none;
-    background: transparent;
-    color:      var(--ctp-text);
-    font-size:  var(--font-size-title);
+    flex:        1;
+    border:      none;
+    background:  transparent;
+    color:       var(--ctp-text);
+    font-size:   var(--font-size-body);
     font-family: var(--font-family);
-    font-weight: var(--font-weight-medium);
-    outline:    none;
-    min-width:  0;
+    outline:     none;
+    min-width:   0;
   }
 
   .search-input::placeholder { color: var(--ctp-overlay0); }
@@ -204,111 +316,17 @@
     display:         flex;
     align-items:     center;
     justify-content: center;
-    background:      color-mix(in srgb, var(--ctp-surface2) 60%, transparent);
+    background:      color-mix(in srgb, var(--ctp-surface2) 55%, transparent);
     border:          none;
     cursor:          pointer;
     color:           var(--ctp-subtext0);
-    width:           24px;
-    height:          24px;
+    width:           22px;
+    height:          22px;
     border-radius:   var(--md-sys-shape-corner-full);
     padding:         0;
     flex-shrink:     0;
-    transition: background var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
+    transition:      background var(--md-sys-motion-duration-short1) var(--md-sys-motion-easing-standard);
   }
 
-  .clear-btn:hover {
-    background: var(--ctp-surface2);
-    color:      var(--ctp-text);
-  }
-
-  /* Grid */
-  .grid-wrap {
-    flex:       1;
-    overflow-y: auto;
-    padding:    16px;
-  }
-
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
-    gap: 6px;
-  }
-
-  /* App tile */
-  .app-tile {
-    display:        flex;
-    flex-direction: column;
-    align-items:    center;
-    gap:            8px;
-    padding:        14px 8px 10px;
-    border:         none;
-    background:     transparent;
-    color:          var(--ctp-text);
-    border-radius:  var(--md-sys-shape-corner-large);
-    cursor:         pointer;
-    font-family:    var(--font-family);
-    transition:
-      background  var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
-      transform   var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
-  }
-
-  .app-tile:hover {
-    background: color-mix(in srgb, var(--ctp-surface0) 80%, transparent);
-  }
-
-  .app-tile:active {
-    background: color-mix(in srgb, var(--ctp-surface1) 80%, transparent);
-    transform:  scale(0.94);
-  }
-
-  /* Icon bubble */
-  .tile-icon-wrap {
-    width:           52px;
-    height:          52px;
-    display:         flex;
-    align-items:     center;
-    justify-content: center;
-    background:      color-mix(in srgb, var(--ctp-mauve) 18%, var(--ctp-surface0));
-    border-radius:   var(--md-sys-shape-corner-large);
-    flex-shrink:     0;
-    border:          1px solid color-mix(in srgb, var(--ctp-mauve) 15%, transparent);
-    transition:
-      background  var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
-      border-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
-  }
-
-  .app-tile:hover .tile-icon-wrap {
-    background: color-mix(in srgb, var(--ctp-mauve) 28%, var(--ctp-surface0));
-    border-color: color-mix(in srgb, var(--ctp-mauve) 30%, transparent);
-  }
-
-  .tile-icon {
-    font-size: 24px;
-    color:     var(--ctp-mauve);
-    font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
-  }
-
-  .tile-label {
-    font-size:   var(--font-size-label);
-    font-weight: var(--font-weight-medium);
-    text-align:  center;
-    line-height: 1.3;
-    max-width:   84px;
-    overflow:    hidden;
-    display:     -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    color:       var(--ctp-subtext1);
-  }
-
-  /* Empty state */
-  .empty {
-    display:        flex;
-    flex-direction: column;
-    align-items:    center;
-    gap:            12px;
-    padding:        48px 0;
-    color:          var(--ctp-overlay1);
-    font-size:      var(--font-size-body);
-  }
+  .clear-btn:hover { background: var(--ctp-surface2); color: var(--ctp-text); }
 </style>
