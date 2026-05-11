@@ -4,7 +4,7 @@
 //! directory.  This module exposes what *is* available: the kernel boot-info
 //! record received on handle 2 at task startup.
 
-use lythos_std::boot::BootInfo;
+use lythos_std::BootInfo;
 use _alloc::string::String;
 use _alloc::vec::Vec;
 

@@ -1,5 +1,4 @@
 use _alloc::string::String;
-use _alloc::boxed::Box;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
@@ -71,13 +70,12 @@ impl Error {
         Error { kind, msg: Some(String::from(msg)) }
     }
 
-    pub fn from_kernel(e: lythos_std::error::SysError) -> Self {
-        use lythos_std::syscall::{ENOCAP, ENOPERM, EINVAL};
-        let kind = match e.raw() {
-            ENOCAP  => ErrorKind::PermissionDenied,
-            ENOPERM => ErrorKind::PermissionDenied,
-            EINVAL  => ErrorKind::InvalidInput,
-            _       => ErrorKind::Other,
+    pub fn from_kernel(e: lythos_std::SysError) -> Self {
+        let kind = match e {
+            lythos_std::SysError::NoCap  => ErrorKind::PermissionDenied,
+            lythos_std::SysError::NoPerm => ErrorKind::PermissionDenied,
+            lythos_std::SysError::Inval  => ErrorKind::InvalidInput,
+            _                            => ErrorKind::Other,
         };
         Error { kind, msg: None }
     }
@@ -104,3 +102,9 @@ impl core::fmt::Display for Error {
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
+
+impl From<core::fmt::Error> for Error {
+    fn from(_: core::fmt::Error) -> Self {
+        Error { kind: ErrorKind::Other, msg: None }
+    }
+}

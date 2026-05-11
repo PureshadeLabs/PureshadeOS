@@ -3,7 +3,7 @@
 //! Provides `exit`, `abort`, and a `Command` builder for spawning ELF tasks.
 
 use crate::sys::process_impl;
-use lythos_std::error::SysError;
+use lythos_std::SysError;
 
 /// Exit the current task with the given status code.
 ///

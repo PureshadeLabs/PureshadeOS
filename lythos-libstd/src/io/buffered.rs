@@ -69,10 +69,14 @@ impl<W: Write> BufWriter<W> {
     pub fn get_mut(&mut self) -> &mut W { &mut self.inner }
     pub fn buffer(&self)      -> &[u8]  { &self.buf }
 
-    pub fn into_inner(mut self) -> core::result::Result<W, (W, crate::io::Error)> {
+    pub fn into_inner(mut self) -> core::result::Result<W, crate::io::Error> {
         match self.flush_buf() {
-            Ok(())  => Ok(self.inner),
-            Err(e)  => Err((self.inner, e)),
+            Ok(()) => {
+                // Use ManuallyDrop to move `inner` out of a type that implements Drop.
+                let md = core::mem::ManuallyDrop::new(self);
+                Ok(unsafe { core::ptr::read(&md.inner) })
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -113,7 +117,7 @@ pub struct LineWriter<W: Write>(BufWriter<W>);
 
 impl<W: Write> LineWriter<W> {
     pub fn new(inner: W) -> Self { LineWriter(BufWriter::with_capacity(1024, inner)) }
-    pub fn into_inner(self) -> core::result::Result<W, (W, crate::io::Error)> {
+    pub fn into_inner(self) -> core::result::Result<W, crate::io::Error> {
         self.0.into_inner()
     }
 }

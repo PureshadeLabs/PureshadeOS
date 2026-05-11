@@ -52,7 +52,7 @@ impl<T: ?Sized> Mutex<T> {
 }
 
 pub struct MutexGuard<'a, T: ?Sized> {
-    mutex: &'a Mutex<T>,
+    pub(crate) mutex: &'a Mutex<T>,
 }
 
 impl<T: ?Sized> Deref for MutexGuard<'_, T> {

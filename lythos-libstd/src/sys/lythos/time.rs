@@ -1,11 +1,18 @@
 // PAL — timekeeping via SYS_TIME.
 //
-// SYS_TIME returns the number of nanoseconds elapsed since kernel boot.
+// SYS_TIME returns milliseconds elapsed since kernel boot (not nanoseconds).
 
-use lythos_std::syscall::{SYS_TIME, syscall0};
+/// Read the current kernel timestamp in milliseconds (monotonic).
+#[inline]
+pub fn read_millis() -> u64 {
+    lythos_std::sys_time()
+}
 
 /// Read the current kernel timestamp in nanoseconds (monotonic).
+///
+/// Converts from the kernel's millisecond resolution by multiplying by 1_000_000.
+/// Sub-millisecond precision is not available.
 #[inline]
 pub fn read_nanos() -> u64 {
-    unsafe { syscall0(SYS_TIME) }
+    lythos_std::sys_time().saturating_mul(1_000_000)
 }

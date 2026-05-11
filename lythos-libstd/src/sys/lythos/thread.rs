@@ -1,25 +1,18 @@
 // PAL — threading / cooperative scheduling.
-//
-// Lythos tasks are heavyweight (each is a separate ELF process).  True
-// thread-level parallelism requires spawning via SYS_EXEC.  Within a single
-// task, cooperative yielding is the only primitive.
-
-use lythos_std::syscall::{SYS_YIELD, syscall0};
 
 /// Yield the CPU to another runnable task.
 pub fn yield_now() {
-    unsafe { syscall0(SYS_YIELD); }
+    lythos_std::sys_yield();
 }
 
 /// Spin-yield for approximately `nanos` nanoseconds.
-///
-/// The Lythos kernel provides no sleep syscall; we busy-wait by repeatedly
-/// checking the time and yielding.  This is only suitable for short waits.
 pub fn spin_sleep_nanos(nanos: u64) {
-    let start = super::time::read_nanos();
+    // sys_time() returns milliseconds; convert threshold to ms.
+    let threshold_ms = (nanos / 1_000_000).max(1);
+    let start_ms = super::time::read_millis();
     loop {
-        let now = super::time::read_nanos();
-        if now.saturating_sub(start) >= nanos {
+        let now_ms = super::time::read_millis();
+        if now_ms.saturating_sub(start_ms) >= threshold_ms {
             break;
         }
         yield_now();

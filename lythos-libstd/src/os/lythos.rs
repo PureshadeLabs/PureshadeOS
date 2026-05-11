@@ -6,11 +6,10 @@
 // Re-export key types so callers don't need to depend on lythos-std directly.
 pub use lythos_std::cap::{CapHandle, Rights};
 pub use lythos_std::ipc::{Endpoint, Channel, Message, MSG_SIZE};
-pub use lythos_std::error::SysError;
-pub use lythos_std::syscall as raw;
+pub use lythos_std::SysError;
 
-// Boot info
-pub use lythos_std::boot::BootInfo;
+// Boot info — BootInfo is at the lythos_std crate root (no boot submodule).
+pub use lythos_std::BootInfo;
 pub use crate::env::parse_boot_info;
 
 /// Raw page-flag constants for `SYS_MMAP`.

@@ -125,7 +125,7 @@ impl PathBuf {
 
     pub fn set_file_name(&mut self, name: &str) { self.pop(); self.push(name); }
 
-    pub fn into_os_string(self) -> OsString { OsString::from(self.0) }
+    pub fn into_os_string(self) -> OsString { From::from(self.0) }
 }
 
 impl Default for PathBuf {

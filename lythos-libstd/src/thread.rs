@@ -16,7 +16,7 @@
 
 use crate::time::Duration;
 use crate::sys::{thread_impl, process_impl};
-use lythos_std::error::SysError;
+use lythos_std::SysError;
 
 /// Opaque identifier for a Lythos task, equivalent to `std::thread::ThreadId`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
