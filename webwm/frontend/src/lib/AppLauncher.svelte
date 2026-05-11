@@ -8,8 +8,32 @@
 -->
 <script>
   import { createEventDispatcher, onMount, onDestroy } from 'svelte';
+  import { backOut, quintIn } from 'svelte/easing';
   import { channels } from './ws.js';
   import { openWindow } from './windows.js';
+
+  function launcherIn(node) {
+    return {
+      duration: 500,
+      easing: backOut,
+      css: (t, u) => `
+        opacity: ${t};
+        transform: translateX(-50%) translateY(${22 * u}px) scaleY(${1 - 0.04 * u});
+        transform-origin: bottom center;
+      `
+    };
+  }
+
+  function launcherOut(node) {
+    return {
+      duration: 220,
+      easing: quintIn,
+      css: (t, u) => `
+        opacity: ${t};
+        transform: translateX(-50%) translateY(${12 * u}px);
+      `
+    };
+  }
 
   export let open = false;
 
@@ -74,7 +98,8 @@
   <div class="backdrop" aria-hidden="true" on:click={close}></div>
 
   <!-- Launcher card -->
-  <div class="launcher" role="dialog" aria-modal="true" aria-label="Application launcher">
+  <div class="launcher" role="dialog" aria-modal="true" aria-label="Application launcher"
+       in:launcherIn out:launcherOut>
 
     <!-- App list -->
     <div class="list-wrap">
@@ -148,32 +173,22 @@
 
   /* Launcher card */
   .launcher {
-    position:       fixed;
+    position:       absolute;
     left:           50%;
-    bottom:         60px;
+    bottom:         0;
     transform:      translateX(-50%);
-    width:          min(560px, calc(100vw - 80px));
-    max-height:     min(480px, calc(100vh - 120px));
+    width:          min(600px, calc(100% - 48px));
+    max-height:     min(480px, calc(100% - 60px));
     display:        flex;
     flex-direction: column;
     z-index:        50;
-    border-radius:  var(--md-sys-shape-corner-extra-large);
+    border-radius:  20px 20px 0 0;
     overflow:       hidden;
 
-    background:      color-mix(in srgb, var(--ctp-mantle) 92%, transparent);
-    backdrop-filter: blur(32px) saturate(160%);
-    -webkit-backdrop-filter: blur(32px) saturate(160%);
-    border:          1px solid color-mix(in srgb, var(--ctp-surface2) 70%, transparent);
-    box-shadow:
-      0 20px 50px rgba(0,0,0,0.55),
-      inset 0 1px 0 color-mix(in srgb, white 5%, transparent);
-
-    animation: launcher-in var(--md-sys-motion-duration-medium2) var(--md-sys-motion-easing-emphasized-decel) forwards;
-  }
-
-  @keyframes launcher-in {
-    from { opacity: 0; transform: translateX(-50%) translateY(14px); }
-    to   { opacity: 1; transform: translateX(-50%) translateY(0);    }
+    background:  var(--ctp-crust);
+    border:      1px solid var(--ctp-surface0);
+    border-bottom: none;
+    box-shadow:  0 -16px 50px rgba(0,0,0,0.55);
   }
 
   /* List */

@@ -12,7 +12,31 @@
 -->
 <script>
   import { createEventDispatcher, onMount, onDestroy } from 'svelte';
+  import { backOut, quintIn } from 'svelte/easing';
   import { windows } from './windows.js';
+
+  function osdIn(node) {
+    return {
+      duration: 500,
+      easing: backOut,
+      css: (t, u) => `
+        opacity: ${t};
+        transform: translateX(-50%) translateY(${-20 * u}px) scaleY(${1 - 0.04 * u});
+        transform-origin: top center;
+      `
+    };
+  }
+
+  function osdOut(node) {
+    return {
+      duration: 220,
+      easing: quintIn,
+      css: (t, u) => `
+        opacity: ${t};
+        transform: translateX(-50%) translateY(${-10 * u}px);
+      `
+    };
+  }
 
   const dispatch = createEventDispatcher();
 
@@ -143,8 +167,11 @@
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
   <div class="backdrop" aria-hidden="true" on:click={() => dispatch('close')}></div>
 
-  <!-- OSD Panel -->
-  <div class="osd" role="dialog" aria-modal="true" aria-label="Dashboard">
+  <!-- OSD wrapper: handles position + transition + fillets -->
+  <div class="osd-wrap" in:osdIn out:osdOut>
+
+    <!-- OSD Panel -->
+    <div class="osd" role="dialog" aria-modal="true" aria-label="Dashboard">
 
     <!-- Tab bar -->
     <nav class="tab-bar" role="tablist" aria-label="Dashboard sections">
@@ -255,16 +282,17 @@
     {:else if activeTab === 'media'}
       <div class="panel panel-media" id="panel-media" role="tabpanel">
 
-        <!-- Sunburst album art -->
-        <div class="media-art-wrap" aria-hidden="true">
-          <div class="sunburst" class:spinning={playing}>
-            {#each Array(32) as _, i}
-              <div class="sun-bar" style="--i:{i}"></div>
+        <!-- Vinyl record album art -->
+        <div class="vinyl-wrap" aria-hidden="true">
+          <svg class="vinyl-record" class:spinning={playing} viewBox="0 0 140 140">
+            <circle cx="70" cy="70" r="69" fill="#111118"/>
+            {#each [65,59,53,47,41,35,29] as gr}
+              <circle cx="70" cy="70" r="{gr}" fill="none" stroke="rgba(255,255,255,0.045)" stroke-width="0.7"/>
             {/each}
-          </div>
-          <div class="art-circle">
-            <span class="icon" style="font-size:36px;color:var(--ctp-mauve)">music_note</span>
-          </div>
+            <circle cx="70" cy="70" r="27" fill="var(--ctp-mauve)"/>
+            <circle cx="70" cy="70" r="22" fill="color-mix(in srgb, var(--ctp-mauve) 65%, #000)"/>
+            <circle cx="70" cy="70" r="3.5" fill="#111118"/>
+          </svg>
         </div>
 
         <!-- Track info + controls -->
@@ -302,39 +330,6 @@
           </div>
         </div>
 
-        <!-- Cat mascot (SVG doodle) -->
-        <div class="cat-wrap" aria-hidden="true">
-          <svg width="96" height="80" viewBox="0 0 96 80" fill="none" class="cat-svg">
-            <!-- Body -->
-            <ellipse cx="48" cy="56" rx="30" ry="22" fill="var(--ctp-surface1)"/>
-            <!-- Head -->
-            <ellipse cx="48" cy="32" rx="22" ry="20" fill="var(--ctp-surface1)"/>
-            <!-- Ears -->
-            <polygon points="28,18 22,4 36,14" fill="var(--ctp-surface1)"/>
-            <polygon points="68,18 74,4 60,14" fill="var(--ctp-surface1)"/>
-            <!-- Ear inner -->
-            <polygon points="29,16 25,7 35,14" fill="var(--ctp-mauve)" opacity="0.5"/>
-            <polygon points="67,16 71,7 61,14" fill="var(--ctp-mauve)" opacity="0.5"/>
-            <!-- Eyes (half-closed) -->
-            <path d="M36 30 Q40 26 44 30" stroke="var(--ctp-text)" stroke-width="2.5" stroke-linecap="round" fill="none"/>
-            <path d="M52 30 Q56 26 60 30" stroke="var(--ctp-text)" stroke-width="2.5" stroke-linecap="round" fill="none"/>
-            <!-- Nose -->
-            <ellipse cx="48" cy="37" rx="2.5" ry="1.8" fill="var(--ctp-pink)" opacity="0.8"/>
-            <!-- Mouth -->
-            <path d="M44 39 Q48 43 52 39" stroke="var(--ctp-subtext0)" stroke-width="1.5" stroke-linecap="round" fill="none"/>
-            <!-- Whiskers -->
-            <line x1="26" y1="36" x2="40" y2="37" stroke="var(--ctp-overlay1)" stroke-width="1.2" stroke-linecap="round"/>
-            <line x1="26" y1="40" x2="40" y2="39" stroke="var(--ctp-overlay1)" stroke-width="1.2" stroke-linecap="round"/>
-            <line x1="70" y1="36" x2="56" y2="37" stroke="var(--ctp-overlay1)" stroke-width="1.2" stroke-linecap="round"/>
-            <line x1="70" y1="40" x2="56" y2="39" stroke="var(--ctp-overlay1)" stroke-width="1.2" stroke-linecap="round"/>
-            <!-- Tail -->
-            <path d="M78 56 Q92 44 86 68" stroke="var(--ctp-surface1)" stroke-width="10"
-                  stroke-linecap="round" fill="none"/>
-            <!-- Paw -->
-            <ellipse cx="30" cy="74" rx="10" ry="7" fill="var(--ctp-surface1)"/>
-            <ellipse cx="66" cy="74" rx="10" ry="7" fill="var(--ctp-surface1)"/>
-          </svg>
-        </div>
 
       </div>
 
@@ -424,7 +419,9 @@
       </div>
     {/if}
 
-  </div>
+  </div><!-- .osd -->
+
+  </div><!-- .osd-wrap -->
 {/if}
 
 <style>
@@ -436,33 +433,28 @@
     background:      transparent;
   }
 
-  /* ── OSD Panel ───────────────────────────────────────────────────────── */
-  .osd {
-    position:       absolute;
-    top:            14px;
-    left:           50%;
-    transform:      translateX(-50%);
-    width:          min(700px, calc(100% - 32px));
-    z-index:        30;
-    display:        flex;
-    flex-direction: column;
-    border-radius:  var(--md-sys-shape-corner-extra-large);
-    overflow:       hidden;
-
-    background: color-mix(in srgb, var(--ctp-mantle) 90%, transparent);
-    backdrop-filter:         blur(32px) saturate(160%);
-    -webkit-backdrop-filter: blur(32px) saturate(160%);
-    border: 1px solid color-mix(in srgb, var(--ctp-surface2) 65%, transparent);
-    box-shadow:
-      0 16px 48px rgba(0,0,0,0.50),
-      inset 0 1px 0 color-mix(in srgb, white 5%, transparent);
-
-    animation: osd-in var(--md-sys-motion-duration-medium2) var(--md-sys-motion-easing-emphasized-decel) forwards;
+  /* ── OSD wrapper — positioning, transitions, fillets live here ────────── */
+  .osd-wrap {
+    position:  absolute;
+    top:       0;
+    left:      50%;
+    transform: translateX(-50%);
+    width:     min(700px, calc(100% - 32px));
+    z-index:   30;
   }
 
-  @keyframes osd-in {
-    from { opacity: 0; transform: translateX(-50%) translateY(-12px); }
-    to   { opacity: 1; transform: translateX(-50%) translateY(0);     }
+
+  /* ── OSD Panel ───────────────────────────────────────────────────────── */
+  .osd {
+    display:        flex;
+    flex-direction: column;
+    border-radius:  0 0 20px 20px;
+    overflow:       hidden;
+
+    background:  var(--ctp-crust);
+    border:      1px solid var(--ctp-surface0);
+    border-top:  none;
+    box-shadow:  0 20px 60px rgba(0,0,0,0.60);
   }
 
   /* ── Tab bar ─────────────────────────────────────────────────────────── */
@@ -478,7 +470,7 @@
     flex-direction: column;
     align-items:    center;
     gap:            3px;
-    padding:        12px 4px 10px;
+    padding:        12px 4px 14px;
     border:         none;
     background:     transparent;
     color:          var(--ctp-overlay1);
@@ -492,18 +484,16 @@
   .tab:hover { color: var(--ctp-subtext1); }
 
   .tab.active {
-    color: var(--ctp-text);
+    color: var(--ctp-mauve);
   }
 
-  .tab.active::after {
-    content:      '';
-    position:     absolute;
-    bottom:       0;
-    left:         20%;
-    right:        20%;
-    height:       2px;
-    border-radius: 1px;
-    background:   var(--ctp-mauve);
+  .tab.active::before {
+    content:       '';
+    position:      absolute;
+    inset:         5px 10px 11px;
+    background:    color-mix(in srgb, var(--ctp-mauve) 18%, transparent);
+    border-radius: var(--md-sys-shape-corner-full);
+    border:        1px solid color-mix(in srgb, var(--ctp-mauve) 24%, transparent);
   }
 
   .tab-icon { font-size: 18px; }
@@ -534,9 +524,9 @@
   }
 
   .card {
-    background:    color-mix(in srgb, var(--ctp-surface0) 50%, transparent);
+    background:    color-mix(in srgb, var(--ctp-surface0) 35%, var(--ctp-crust));
     border-radius: var(--md-sys-shape-corner-large);
-    border:        1px solid color-mix(in srgb, var(--ctp-surface2) 40%, transparent);
+    border:        1px solid color-mix(in srgb, var(--ctp-surface2) 55%, transparent);
     padding:       12px;
   }
 
@@ -692,7 +682,7 @@
   .mini-art {
     width:           48px;
     height:          48px;
-    border-radius:   var(--md-sys-shape-corner-medium);
+    border-radius:   50%;
     background:      color-mix(in srgb, var(--ctp-mauve) 15%, var(--ctp-surface0));
     display:         flex;
     align-items:     center;
@@ -727,48 +717,27 @@
     gap:         24px;
   }
 
-  /* Sunburst */
-  .media-art-wrap {
-    position:   relative;
+  /* Vinyl record */
+  .vinyl-wrap {
+    flex-shrink: 0;
     width:       140px;
     height:      140px;
-    flex-shrink: 0;
   }
 
-  .sunburst {
-    position:   absolute;
-    inset:       0;
+  .vinyl-record {
+    width:         100%;
+    height:        100%;
+    display:       block;
+    border-radius: 50%;
+    box-shadow:
+      0 8px 32px rgba(0,0,0,0.65),
+      inset 0 0 0 1px rgba(255,255,255,0.04);
   }
 
-  .sun-bar {
-    position:     absolute;
-    left:         50%;
-    top:          50%;
-    width:        3px;
-    border-radius: 2px;
-    background:   var(--ctp-mauve);
-    opacity:      0.7;
-    transform-origin: 0 0;
-    /* height varies per bar for an organic look */
-    height:       calc(8px + (var(--i) % 5) * 3px);
-    transform:    rotate(calc(var(--i) * 11.25deg)) translate(-1.5px, -70px);
-  }
+  @keyframes vinyl-spin { to { transform: rotate(360deg); } }
 
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  .sunburst.spinning {
-    animation: spin 6s linear infinite;
-  }
-
-  .art-circle {
-    position:        absolute;
-    inset:           16px;
-    border-radius:   50%;
-    background:      color-mix(in srgb, var(--ctp-surface0) 90%, transparent);
-    border:          2px solid color-mix(in srgb, var(--ctp-mauve) 30%, transparent);
-    display:         flex;
-    align-items:     center;
-    justify-content: center;
+  .vinyl-record.spinning {
+    animation: vinyl-spin 2.5s linear infinite;
   }
 
   /* Track info */
@@ -880,14 +849,6 @@
     align-self:      flex-start;
     margin-top:      2px;
   }
-
-  /* Cat */
-  .cat-wrap {
-    flex-shrink: 0;
-    opacity:     0.85;
-  }
-
-  .cat-svg { display: block; }
 
   /* ── PERFORMANCE ─────────────────────────────────────────────────────── */
   .panel-perf {

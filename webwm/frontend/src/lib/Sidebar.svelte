@@ -48,12 +48,10 @@
       aria-expanded={osdOpen}
       on:click={() => dispatch('toggleOSD')}
     >
-      <!-- RaptorOS Λ glyph -->
-      <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
-        <path d="M9 2L16 16H2L9 2Z" stroke="currentColor" stroke-width="1.8"
-              stroke-linejoin="round" fill="none"/>
-        <path d="M5.5 12.5H12.5" stroke="currentColor" stroke-width="1.4"
-              stroke-linecap="round"/>
+      <!-- Lythos logo -->
+      <svg width="18" height="18" viewBox="0 0 128 128" fill="none" aria-hidden="true">
+        <circle cx="64" cy="64" r="25.6" stroke="currentColor" stroke-width="12.8"/>
+        <circle cx="64" cy="64" r="12.8" fill="currentColor"/>
       </svg>
     </button>
 
@@ -128,12 +126,9 @@
     z-index:        20;
     overflow:       hidden;
 
-    background: color-mix(in srgb, var(--ctp-mantle) 88%, transparent);
-    backdrop-filter:         blur(24px) saturate(140%);
-    -webkit-backdrop-filter: blur(24px) saturate(140%);
+    background: var(--ctp-crust);
 
-    /* Right-edge accent line */
-    border-right: 1px solid color-mix(in srgb, var(--ctp-surface2) 55%, transparent);
+    /* No right border — crust background gap provides the visual separation */
   }
 
   /* ── Sections ───────────────────────────────────────────────────────── */

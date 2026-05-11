@@ -102,40 +102,43 @@
 </div>
 
 <style>
+  /*
+    Border/fillet technique (mirrors Caelestia BlobInvertedRect):
+    - Shell background (crust) IS the border — no CSS borders needed
+    - workspace-area has margin on all sides except left (sidebar fills left)
+    - workspace-area border-radius creates the concave fillet at sidebar junction:
+      the crust bg shows through the curved corner gap between sidebar and workspace
+  */
+
   .shell {
-    width:     100%;
-    height:    100%;
-    display:   flex;
+    width:          100%;
+    height:         100%;
+    display:        flex;
     flex-direction: row;
-    overflow:  hidden;
-    position:  relative;
-    background: var(--ctp-crust);
+    overflow:       hidden;
+    background:     var(--ctp-crust);
   }
 
-  /* Workspace area fills remaining space */
   .workspace-area {
-    flex:     1;
-    position: relative;
-    overflow: hidden;
-    min-width: 0;
+    flex:         1;
+    position:     relative;
+    overflow:     hidden;
+    min-width:    0;
+    /* 8px crust gap on top/right/bottom = the visible "border" */
+    margin:       8px 8px 8px 0;
+    /* 20px radius on all corners; left corners create the sidebar fillet */
+    border-radius: 20px;
+    /* 1px edge line for contrast against the crust border strip */
+    box-shadow: inset 0 0 0 1px var(--ctp-surface1);
   }
 
-  /* Wallpaper */
   .wallpaper {
-    position: absolute;
-    inset:    0;
-    z-index:  0;
-    background:
-      radial-gradient(ellipse 70% 55% at 15% 85%, rgba(203,166,247,0.10) 0%, transparent 60%),
-      radial-gradient(ellipse 55% 45% at 85% 15%, rgba(180,190,254,0.08) 0%, transparent 55%),
-      radial-gradient(ellipse 80% 60% at 50% 50%, rgba(137,180,250,0.05) 0%, transparent 70%),
-      linear-gradient(145deg, #181825 0%, #11111b 50%, #1e1e2e 100%);
-    background-size:     cover;
-    background-position: center;
-    background-repeat:   no-repeat;
+    position:   absolute;
+    inset:      0;
+    z-index:    0;
+    background: var(--ctp-base);
   }
 
-  /* Tiled windows layer */
   .workspace {
     position: relative;
     z-index:  1;

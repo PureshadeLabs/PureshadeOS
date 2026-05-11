@@ -56,8 +56,8 @@
 <style>
   .notif-container {
     position:       fixed;
-    top:            14px;
-    right:          14px;
+    top:            16px;
+    right:          16px;
     z-index:        200;
     display:        flex;
     flex-direction: column;
@@ -68,9 +68,9 @@
 
   .toast {
     pointer-events:  all;
-    background:      color-mix(in srgb, var(--ctp-mantle) 92%, transparent);
-    backdrop-filter: blur(20px) saturate(140%);
-    -webkit-backdrop-filter: blur(20px) saturate(140%);
+    background:      color-mix(in srgb, var(--ctp-mantle) 45%, transparent);
+    backdrop-filter: blur(60px) saturate(180%);
+    -webkit-backdrop-filter: blur(60px) saturate(180%);
     border:          1px solid color-mix(in srgb, var(--ctp-surface2) 65%, transparent);
     border-radius:   var(--md-sys-shape-corner-large);
     padding:         10px 12px;
