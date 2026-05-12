@@ -5,7 +5,9 @@ members = [
     "userspace/lysh",
     "userspace/rutils",
     "userspace/rkilo",
+    "userspace/rpkg",
     "lythd",
+    "lythmsg",
 ]
 exclude  = ["orox-pack"]
 resolver = "2"

@@ -43,7 +43,7 @@ const CLEAR_SCREEN: &str = "\x1b[2J\x1b[H";
 
 const BUILTINS: &[&str] = &[
     "cat", "cd", "clear", "cp", "echo", "exec", "exit", "free", "groupadd",
-    "groupdel", "groups", "help", "id", "kill", "ls", "mkdir", "ps", "rm",
+    "groupdel", "groups", "help", "id", "kill", "ls", "mkdir", "poweroff", "ps", "rm",
     "uptime", "useradd", "userdel", "whoami",
 ];
 
@@ -227,8 +227,10 @@ fn dispatch_single(line: &str, cwd: &mut String) {
     match cmd {
         "help"  => cmd_help(),
         "clear" => print!("{}", CLEAR_SCREEN),
-        "exit"  => { println!("Goodbye."); sys_task_exit() }
+        "exit"     => { println!("Goodbye."); sys_task_exit() }
+        "poweroff" => { println!("Shutting down..."); lythos_std::sys_poweroff() }
         "cd"    => cmd_cd(args.first().copied(), cwd),
+        "pwd"   => println!("{}", cwd),
 
         // rutils — resolve any path args against cwd first
         "echo"   => rutils::cmd_echo(&args),
@@ -281,7 +283,7 @@ fn dispatch_single(line: &str, cwd: &mut String) {
         other => {
             // Search PATH directories for an executable matching the command.
             let mut found = false;
-            for dir in &["/bin"] {
+            for dir in &["/lth/bin", "/bin", "/sbin"] {
                 let path = alloc::format!("{}/{}", dir, other);
                 if lythos_std::sys_stat(&path).map(|s| !s.is_dir()).unwrap_or(false) {
                     rutils::cmd_exec(&path);
@@ -321,6 +323,7 @@ fn cmd_help() {
     println!("  clear            clear the terminal screen");
     println!("  exit             exit the shell");
     println!("  help             display this help message");
+    println!("  pwd              print working directory");
     println!();
     rutils::print_help();
     println!();

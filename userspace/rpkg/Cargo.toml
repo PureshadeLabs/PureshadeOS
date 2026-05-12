@@ -1,0 +1,11 @@
+[package]
+name = "rpkg"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "rpkg"
+path = "src/main.rs"
+
+[dependencies]
+lythos-std = { path = "../../lythos-std" }

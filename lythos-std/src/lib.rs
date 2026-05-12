@@ -146,6 +146,12 @@ pub const SYS_IPC_RECV_TIMEOUT:  u64 = 42;
 /// Send to IPC endpoint with a millisecond timeout.
 /// a1=cap, a2=msg_ptr, a3=msg_len, a4=timeout_ms. Returns 0 or EAGAIN.
 pub const SYS_IPC_SEND_TIMEOUT:  u64 = 43;
+/// Non-blocking IPC recv. a1=cap, a2=buf_ptr, a3=buf_len. Returns bytes or EAGAIN.
+pub const SYS_IPC_POLL:          u64 = 39;
+/// Bind an IPC endpoint to a name. a1=cap, a2=name_ptr, a3=name_len (≤128). Returns 0 or ENOSYS.
+pub const SYS_IPC_BIND:          u64 = 40;
+/// Look up a named IPC endpoint. a1=name_ptr, a2=name_len, a3=rights_mask. Returns handle or ENOENT.
+pub const SYS_IPC_LOOKUP:        u64 = 41;
 /// Create a UDP socket. Returns socket fd (≥ 0) or error (ENOSYS if no net device).
 pub const SYS_SOCKET:            u64 = 50;
 /// Bind a UDP socket to a local port. a1=fd, a2=port. Returns 0 or error.
@@ -159,6 +165,8 @@ pub const SYS_SENDTO:            u64 = 52;
 pub const SYS_RECVFROM:          u64 = 53;
 /// Close a socket. a1=fd. Returns 0.
 pub const SYS_NET_CLOSE:         u64 = 54;
+/// Power off the machine (ACPI S5). No arguments. Does not return.
+pub const SYS_POWEROFF:          u64 = 55;
 
 // ── Capability rights constants ───────────────────────────────────────────────
 
@@ -186,7 +194,9 @@ pub enum SysError {
     NoPerm,
     /// Invalid argument — bad task ID, self-grant, etc. (`EINVAL`).
     Inval,
-    /// An error code that isn't one of the above.
+    NoEnt,
+    BadFd,
+    Again,
     Unknown(u64),
 }
 
@@ -197,12 +207,15 @@ impl SysError {
             0xFFFF_FFFF_FFFF_FFFE => SysError::NoCap,
             0xFFFF_FFFF_FFFF_FFFD => SysError::NoPerm,
             0xFFFF_FFFF_FFFF_FFFC => SysError::Inval,
+            0xFFFF_FFFF_FFFF_FFFB => SysError::NoEnt,
+            0xFFFF_FFFF_FFFF_FFFA => SysError::BadFd,
+            0xFFFF_FFFF_FFFF_FFF9 => SysError::Again,
             other                  => SysError::Unknown(other),
         }
     }
 
     #[inline]
-    pub fn is_err_raw(v: u64) -> bool { v >= 0xFFFF_FFFF_FFFF_FFFC }
+    pub fn is_err_raw(v: u64) -> bool { v >= 0xFFFF_FFFF_FFFF_FFF9 }
 }
 
 impl core::fmt::Display for SysError {
@@ -793,10 +806,44 @@ pub fn sys_net_close(fd: u64) {
     unsafe { syscall1(SYS_NET_CLOSE, fd) };
 }
 
+/// Power off the machine via ACPI S5. Does not return.
+pub fn sys_poweroff() -> ! {
+    unsafe { syscall0(SYS_POWEROFF) };
+    loop {}
+}
+
 /// Create a directory at `path`. Parent directory must already exist.
 pub fn sys_mkdir(path: &str) -> Result<(), ()> {
     let r = unsafe { syscall2(SYS_MKDIR, path.as_ptr() as u64, path.len() as u64) };
     if (r as i64) < 0 { Err(()) } else { Ok(()) }
+}
+
+/// Non-blocking receive from an IPC endpoint.
+///
+/// Returns `Ok(bytes)` if a message was ready, or `Err(Again)` if the ring is empty.
+pub fn sys_ipc_poll(cap: u64, buf: &mut [u8]) -> Result<usize, SysError> {
+    let r = unsafe { syscall3(SYS_IPC_POLL, cap, buf.as_mut_ptr() as u64, buf.len() as u64) };
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(r as usize) }
+}
+
+/// Bind an IPC endpoint to a well-known name in the kernel registry.
+///
+/// `name` must be ≤128 bytes. Returns `Err(NoSys)` if the name is already taken.
+/// Requires GRANT right on the cap.
+pub fn sys_ipc_bind(cap: u64, name: &str) -> Result<(), SysError> {
+    let r = unsafe { syscall3(SYS_IPC_BIND, cap, name.as_ptr() as u64, name.len() as u64) };
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(()) }
+}
+
+/// Look up a named IPC endpoint and obtain a new cap handle.
+///
+/// `rights` is a bitmask from `cap_rights` (GRANT/REVOKE are stripped by the kernel).
+/// Returns `Err(NoEnt)` if the name is not registered.
+pub fn sys_ipc_lookup(name: &str, rights: u8) -> Result<u64, SysError> {
+    let r = unsafe {
+        syscall3(SYS_IPC_LOOKUP, name.as_ptr() as u64, name.len() as u64, rights as u64)
+    };
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(r) }
 }
 
 /// Read directory entries for `path`. Returns `None` if not a directory or not found.

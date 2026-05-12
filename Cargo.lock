@@ -25,11 +25,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "lythmsg"
+version = "0.1.0"
+dependencies = [
+ "lythos-std",
+]
+
+[[package]]
 name = "lythos-std"
 version = "0.1.0"
 
 [[package]]
 name = "rkilo"
+version = "0.1.0"
+dependencies = [
+ "lythos-std",
+]
+
+[[package]]
+name = "rpkg"
 version = "0.1.0"
 dependencies = [
  "lythos-std",
