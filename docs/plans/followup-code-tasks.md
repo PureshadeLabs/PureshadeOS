@@ -7,7 +7,7 @@ green before merging.
 
 ---
 
-## 1. SYS_STAT: reorder Stat serialization to canonical layout
+## 1. ~~SYS_STAT: reorder Stat serialization to canonical layout~~ DONE
 
 **Why deferred:** The canonical Stat layout in `docs/spec/syscalls.md` uses
 natural-alignment field ordering (large to small: size, mtime, ctime, flags,

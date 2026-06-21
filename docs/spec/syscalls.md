@@ -912,10 +912,6 @@ Offset  Size  Type    Field
 | 2 | 0x04 | `INODE_SYMLINK` — entry is a symbolic link |
 | 3 | 0x08 | `INODE_FAST_SYM` — symlink name stored inline |
 
-**Implementation note:** The kernel's `SYS_STAT` handler currently writes
-fields in the old unaligned order. It must be updated to match this layout
-before any userspace code reads `Stat`. See `docs/plans/followup-code-tasks.md`.
-
 **Timestamp note:** `mtime` and `ctime` are stored in the RFS inode but the
 kernel does not currently update them at file creation or modification — both
 will read as 0 until the kernel populates them. The unit (ms since boot) is

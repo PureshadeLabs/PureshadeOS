@@ -1014,18 +1014,18 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             )); }
             let mut stat = crate::rfs::Stat::default();
             if !crate::rfs::stat_path(&kpath, &mut stat) { return ENOENT; }
-            // Serialise Stat into a 48-byte user buffer (all LE):
-            // [0..8]=size [8..12]=flags [12..14]=mode [14..18]=uid [18..22]=gid
-            // [22..26]=nlink [26..34]=mtime [34..42]=ctime [42..48]=_pad
+            // Serialise Stat into a 48-byte user buffer (all LE, canonical layout):
+            // [0..8]=size [8..16]=mtime [16..24]=ctime [24..28]=flags [28..32]=uid
+            // [32..36]=gid [36..40]=nlink [40..42]=mode [42..48]=_pad
             let mut buf = [0u8; 48];
-            buf[0..8].copy_from_slice(&stat.size.to_le_bytes());
-            buf[8..12].copy_from_slice(&stat.flags.to_le_bytes());
-            buf[12..14].copy_from_slice(&stat.mode.to_le_bytes());
-            buf[14..18].copy_from_slice(&stat.uid.to_le_bytes());
-            buf[18..22].copy_from_slice(&stat.gid.to_le_bytes());
-            buf[22..26].copy_from_slice(&stat.nlink.to_le_bytes());
-            buf[26..34].copy_from_slice(&stat.mtime.to_le_bytes());
-            buf[34..42].copy_from_slice(&stat.ctime.to_le_bytes());
+            buf[ 0.. 8].copy_from_slice(&stat.size.to_le_bytes());
+            buf[ 8..16].copy_from_slice(&stat.mtime.to_le_bytes());
+            buf[16..24].copy_from_slice(&stat.ctime.to_le_bytes());
+            buf[24..28].copy_from_slice(&stat.flags.to_le_bytes());
+            buf[28..32].copy_from_slice(&stat.uid.to_le_bytes());
+            buf[32..36].copy_from_slice(&stat.gid.to_le_bytes());
+            buf[36..40].copy_from_slice(&stat.nlink.to_le_bytes());
+            buf[40..42].copy_from_slice(&stat.mode.to_le_bytes());
             unsafe { with_user_access(|| core::ptr::copy_nonoverlapping(
                 buf.as_ptr(), frame.a3 as *mut u8, 48,
             )); }

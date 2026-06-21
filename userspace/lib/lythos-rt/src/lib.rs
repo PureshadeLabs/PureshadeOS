@@ -608,33 +608,33 @@ pub fn sys_task_kill(task_id: u64) -> bool {
 
 /// File stat info returned by [`sys_stat`].
 ///
-/// Wire layout (48 bytes, all LE):
-/// `[0..8]=size [8..12]=flags [12..14]=mode [14..18]=uid [18..22]=gid
-///  [22..26]=nlink [26..34]=mtime [34..42]=ctime [42..48]=_pad`
+/// Wire layout (48 bytes, all LE, naturally aligned):
+/// `[0..8]=size [8..16]=mtime [16..24]=ctime [24..28]=flags [28..32]=uid
+///  [32..36]=gid [36..40]=nlink [40..42]=mode [42..48]=_pad`
 #[derive(Clone, Copy, Default, Debug)]
 pub struct FileStat {
     pub size:  u64,
+    pub mtime: u64,
+    pub ctime: u64,
     pub flags: u32,
-    /// Unix permission bits (low 12 bits of st_mode).
-    pub mode:  u16,
     pub uid:   u32,
     pub gid:   u32,
     pub nlink: u32,
-    pub mtime: u64,
-    pub ctime: u64,
+    /// Unix permission bits (low 12 bits of st_mode).
+    pub mode:  u16,
 }
 
 impl FileStat {
     fn from_bytes(b: &[u8; 48]) -> Self {
         FileStat {
             size:  u64::from_le_bytes(b[ 0.. 8].try_into().unwrap()),
-            flags: u32::from_le_bytes(b[ 8..12].try_into().unwrap()),
-            mode:  u16::from_le_bytes(b[12..14].try_into().unwrap()),
-            uid:   u32::from_le_bytes(b[14..18].try_into().unwrap()),
-            gid:   u32::from_le_bytes(b[18..22].try_into().unwrap()),
-            nlink: u32::from_le_bytes(b[22..26].try_into().unwrap()),
-            mtime: u64::from_le_bytes(b[26..34].try_into().unwrap()),
-            ctime: u64::from_le_bytes(b[34..42].try_into().unwrap()),
+            mtime: u64::from_le_bytes(b[ 8..16].try_into().unwrap()),
+            ctime: u64::from_le_bytes(b[16..24].try_into().unwrap()),
+            flags: u32::from_le_bytes(b[24..28].try_into().unwrap()),
+            uid:   u32::from_le_bytes(b[28..32].try_into().unwrap()),
+            gid:   u32::from_le_bytes(b[32..36].try_into().unwrap()),
+            nlink: u32::from_le_bytes(b[36..40].try_into().unwrap()),
+            mode:  u16::from_le_bytes(b[40..42].try_into().unwrap()),
         }
     }
 
