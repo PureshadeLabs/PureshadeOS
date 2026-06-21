@@ -120,9 +120,8 @@ pub const SYS_MEM_STAT:     u64 = 18;
 /// a1 = TaskId.
 /// Returns 0 on success, EINVAL if not found / already dead / protected task.
 pub const SYS_TASK_KILL:    u64 = 19;
-/// Read one 512-byte sector from the VirtIO block device into a user buffer.
-/// a1 = sector (u64), a2 = buf_ptr (user VA, *mut u8, must be 512 bytes).
-/// Returns 0 on success; ENOSYS if no block device; EINVAL on bad args or I/O error.
+/// Check whether keyboard or serial data is ready to read without blocking.
+/// No arguments. Returns 1 if data is available, 0 if not.
 pub const SYS_SERIAL_AVAIL: u64 = 30;
 /// Block the calling task until task `a1` (TaskId) exits.
 /// Returns 0 immediately if the target is not found or already Dead.
