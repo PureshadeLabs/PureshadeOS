@@ -32,6 +32,7 @@ pub mod serial;
 pub mod rfs;
 pub mod syscall;
 pub mod task;
+pub mod time;
 pub mod tss;
 pub mod vmm;
 
@@ -171,6 +172,9 @@ pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
     // ── APIC + preemptive timer ───────────────────────────────────────────
     apic::init();
     kprintln!("{TAG}[apic]{RST} timer active {VRB}— preemptive scheduling enabled{RST}");
+
+    // ── Wall-clock anchor (requires apic::ticks() to be live) ────────────
+    time::init();
 
     ioapic::init();
     kprintln!(
