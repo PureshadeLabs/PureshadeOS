@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "kernel",
+    "userspace/lib/lythos-rt",
+    "userspace/lib/lythos-libstd",
+    "userspace/init/lythd",
+    "userspace/daemons/lythdist",
+    "userspace/daemons/lythmsg",
+    "userspace/shell/lysh",
+    "userspace/apps/rkilo",
+    "userspace/apps/rutils",
+    "pkg/rpkg",
+    "tools/orox-pack",
+    "tools/lythos-toolchain/lythos-libc",
+    "tools/lythos-toolchain/lythos-unwind",
+    "tools/lythos-toolchain/sysroot-builder",
+]
+exclude = [
+    "tools/mkrfs",
+    "userspace/webwm/bridge",
+]
+resolver = "2"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

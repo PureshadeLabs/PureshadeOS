@@ -1,0 +1,5 @@
+[service]
+name     = "lythmsg"
+bin      = "/lth/bin/lythmsg"
+critical = true
+deps     = ["lythdist"]

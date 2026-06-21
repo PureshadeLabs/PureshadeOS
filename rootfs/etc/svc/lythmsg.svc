@@ -1,0 +1,7 @@
+name=lythmsg
+path=/bin/lythmsg
+restart=always
+cap=memory
+cap=ipc
+cap=registry
+dep=lythdist

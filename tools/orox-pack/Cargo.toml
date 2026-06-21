@@ -1,0 +1,8 @@
+[package]
+name    = "orox-pack"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "orox-pack"
+path = "src/main.rs"

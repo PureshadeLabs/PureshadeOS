@@ -1,0 +1,8 @@
+[build]
+target = "aarch64-apple-darwin"
+
+# Override the kernel workspace's build-std with an empty list.
+# mkrfs is a host std tool; it must NOT rebuild core/alloc from source.
+[unstable]
+build-std = []
+build-std-features = []

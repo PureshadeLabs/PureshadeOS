@@ -1,0 +1,3 @@
+name=lysh
+path=/bin/lysh
+restart=on-failure:3

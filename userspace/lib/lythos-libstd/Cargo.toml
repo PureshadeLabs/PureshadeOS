@@ -1,0 +1,22 @@
+[package]
+name    = "lythos-libstd"
+version = "0.1.0"
+edition = "2021"
+description = "Rust standard-library port for the Lythos microkernel"
+license = "MIT OR Apache-2.0"
+
+# This crate is #![no_std] at the implementation level; it builds on
+# core + alloc + lythos-rt.  Programs link lythos-libstd and get a
+# std-compatible API surface without depending on a Linux/POSIX libc.
+[lib]
+name = "std"
+
+[features]
+default = []
+# Enable the hashbrown-backed HashMap / HashSet.
+hashbrown = ["dep:hashbrown"]
+
+[dependencies]
+lythos-rt   = { path = "../lythos-rt" }
+hashbrown   = { version = "0.14", default-features = false, features = ["ahash"], optional = true }
+spinning_top = { version = "0.3", default-features = false }

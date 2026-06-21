@@ -1,0 +1,4 @@
+This is your home directory.
+
+OROS user files live here. Use `ls`, `cat`, and `exec` to explore.
+Binaries are in /bin — run them with `exec /bin/<name>`.

@@ -1,0 +1,15 @@
+# Override the workspace default (x86_64-oros bare-metal) for the bridge,
+# which is a host-native daemon.
+[build]
+target = "aarch64-apple-darwin"
+
+# Cancel out the parent repo's build-std (targets bare-metal x86_64-oros).
+# We rebuild std from source here too but need the macOS SDK lib path so
+# the linker can resolve -liconv (inside libSystem.tbd) despite -nodefaultlibs.
+[unstable]
+build-std = ["std"]
+
+[target.aarch64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-L/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib",
+]

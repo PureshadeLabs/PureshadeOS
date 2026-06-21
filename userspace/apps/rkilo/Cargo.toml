@@ -1,0 +1,11 @@
+[package]
+name = "rkilo"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "rkilo"
+path = "src/main.rs"
+
+[dependencies]
+lythos-rt = { path = "../../lib/lythos-rt" }

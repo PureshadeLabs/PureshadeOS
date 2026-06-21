@@ -1,0 +1,15 @@
+[package]
+name = "rutils"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "rutils"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rutils"
+path = "src/main.rs"
+
+[dependencies]
+lythos-rt = { path = "../../lib/lythos-rt" }

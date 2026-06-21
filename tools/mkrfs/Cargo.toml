@@ -1,0 +1,8 @@
+[package]
+name    = "mkrfs"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mkrfs"
+path = "src/main.rs"

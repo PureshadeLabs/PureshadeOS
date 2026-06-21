@@ -1,0 +1,10 @@
+[build]
+target = "targets/x86_64-oros.json"
+
+[target.x86_64-oros]
+rustflags = ["-C", "link-arg=-Tuserspace/lib/lythos-rt/userspace.ld"]
+
+[unstable]
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
+json-target-spec = true

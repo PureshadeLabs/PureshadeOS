@@ -1,0 +1,3010 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lythos Microkernel</title>
+    <meta
+      name="description"
+      content="Lythos is an experimental x86-64 microkernel written in Rust. Every resource governed by an unforgeable capability handle. Minimal, verifiable, built for security-first systems."
+    />
+    <meta property="og:title" content="Lythos: Capability-Aware Microkernel" />
+    <meta
+      property="og:description"
+      content="An experimental x86-64 microkernel in Rust. Every resource governed by an unforgeable capability. Minimal by design, verifiable by construction."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://lythos.pureshade.dev/" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Lythos: Capability-Aware Microkernel" />
+    <meta
+      name="twitter:description"
+      content="An experimental x86-64 microkernel in Rust. Every resource governed by an unforgeable capability."
+    />
+    <link rel="icon" type="image/svg+xml" href="logo.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Inter:wght@300;400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #000000;
+        --bg-card: #0a0a0a;
+        --border: rgba(255, 255, 255, 0.08);
+        --border-h: rgba(255, 255, 255, 0.14);
+        --text: #ffffff;
+        --text-muted: rgba(255, 255, 255, 0.5);
+        --text-dim: rgba(255, 255, 255, 0.28);
+        --lime: #c9f135;
+        --lime-dark: #a8cc20;
+        --radius: 14px;
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        font-family:
+          "Inter",
+          -apple-system,
+          sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+        overflow-x: hidden;
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+        cursor: pointer;
+      }
+
+      /* ── Nav ── */
+      header {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 200;
+        padding: 0 2rem;
+        height: 56px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: rgba(0, 0, 0, 0.7);
+        backdrop-filter: blur(12px);
+      }
+
+      .nav-logo {
+        font-family: "Inter", sans-serif;
+        font-size: 0.9rem;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        color: var(--text);
+      }
+
+      .nav-logo-mark {
+        width: 18px;
+        height: 18px;
+        border-radius: 4px;
+        background: var(--lime);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+      }
+
+      .nav-logo-mark svg {
+        width: 10px;
+        height: 10px;
+      }
+
+      nav ul {
+        list-style: none;
+        display: flex;
+        gap: 0.1rem;
+        position: absolute;
+        left: 50%;
+        transform: translateX(-50%);
+      }
+
+      nav a {
+        color: var(--text-muted);
+        font-size: 0.825rem;
+        font-weight: 400;
+        padding: 0.35rem 0.7rem;
+        border-radius: 6px;
+        transition:
+          color 0.15s,
+          background 0.15s;
+        display: block;
+      }
+
+      nav a:hover,
+      nav a.active {
+        color: var(--text);
+      }
+
+      .nav-right {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.45rem 1rem;
+        border-radius: 100px;
+        font-size: 0.825rem;
+        font-weight: 500;
+        cursor: pointer;
+        border: none;
+        transition: all 0.15s;
+        white-space: nowrap;
+        font-family: "Inter", sans-serif;
+      }
+
+      .btn-ghost {
+        color: var(--text-muted);
+        background: transparent;
+      }
+      .btn-ghost:hover {
+        color: var(--text);
+      }
+
+      .btn-lime {
+        background: var(--lime);
+        color: #000;
+        font-weight: 600;
+      }
+      .btn-lime:hover {
+        background: #d8f850;
+        transform: translateY(-1px);
+      }
+
+      .btn-outline {
+        border: 1px solid var(--border-h);
+        color: var(--text-muted);
+        background: transparent;
+        border-radius: 100px;
+      }
+      .btn-outline:hover {
+        color: var(--text);
+        border-color: rgba(255, 255, 255, 0.3);
+      }
+
+      /* ── Pages ── */
+      .page {
+        display: none;
+      }
+      .page.active {
+        display: block;
+      }
+
+      /* ── Hero ── */
+      .hero {
+        position: relative;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 6rem 1.5rem 3rem;
+        overflow: hidden;
+      }
+
+      #particle-canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        z-index: 0;
+      }
+
+      .hero-content {
+        position: relative;
+        z-index: 1;
+        max-width: 820px;
+      }
+
+      .hero-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.3rem 0.7rem 0.3rem 0.4rem;
+        border: 1px solid var(--border-h);
+        border-radius: 100px;
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        margin-bottom: 2.5rem;
+        background: rgba(255, 255, 255, 0.04);
+        backdrop-filter: blur(8px);
+      }
+
+      .hero-badge-new {
+        background: var(--lime);
+        color: #000;
+        font-size: 0.65rem;
+        font-weight: 700;
+        padding: 0.1rem 0.45rem;
+        border-radius: 100px;
+        letter-spacing: 0.02em;
+      }
+
+      .hero-badge svg {
+        width: 12px;
+        height: 12px;
+        color: var(--text-dim);
+        margin-left: 0.15rem;
+      }
+
+      .hero h1 {
+        font-family: "DM Serif Display", Georgia, serif;
+        font-size: clamp(3rem, 7vw, 5.5rem);
+        font-weight: 400;
+        letter-spacing: -0.02em;
+        line-height: 1.04;
+        color: var(--text);
+        margin-bottom: 1.5rem;
+      }
+
+      .hero-sub {
+        font-size: 1rem;
+        color: var(--text-muted);
+        max-width: 480px;
+        margin: 0 auto 2.5rem;
+        line-height: 1.65;
+        font-weight: 300;
+      }
+
+      .hero-actions {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
+
+      .hero-actions .btn {
+        padding: 0.6rem 1.4rem;
+        font-size: 0.875rem;
+      }
+
+      /* ── Section break ── */
+      .section-break {
+        border: none;
+        border-top: 1px solid var(--border);
+        margin: 0;
+      }
+
+      /* ── Large section heading ── */
+      .big-section {
+        padding: 6rem 2rem;
+        max-width: 1160px;
+        margin: 0 auto;
+      }
+
+      .big-section-eyebrow {
+        font-size: 0.75rem;
+        font-weight: 500;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--text-dim);
+        margin-bottom: 1.25rem;
+      }
+
+      .big-section h2 {
+        font-family: "DM Serif Display", Georgia, serif;
+        font-size: clamp(2rem, 4vw, 3.5rem);
+        font-weight: 400;
+        letter-spacing: -0.025em;
+        line-height: 1.1;
+        color: var(--text);
+        margin-bottom: 1rem;
+        max-width: 700px;
+      }
+
+      .big-section-sub {
+        font-size: 0.925rem;
+        color: var(--text-muted);
+        max-width: 480px;
+        line-height: 1.7;
+        font-weight: 300;
+        margin-bottom: 3.5rem;
+      }
+
+      /* ── Feature cards ── */
+      .feature-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 1px;
+        background: var(--border);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+
+      .feature-card {
+        background: var(--bg-card);
+        padding: 2rem;
+        position: relative;
+        overflow: hidden;
+        transition: background 0.2s;
+      }
+
+      .feature-card:hover {
+        background: #111;
+      }
+
+      .feature-card::after {
+        content: "";
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 1px;
+        background: linear-gradient(
+          90deg,
+          transparent,
+          rgba(201, 241, 53, 0.2),
+          transparent
+        );
+        opacity: 0;
+        transition: opacity 0.3s;
+      }
+      .feature-card:hover::after {
+        opacity: 1;
+      }
+
+      .feature-num {
+        font-size: 0.65rem;
+        font-weight: 600;
+        letter-spacing: 0.1em;
+        color: var(--text-dim);
+        margin-bottom: 1.5rem;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .feature-card h3 {
+        font-family: "DM Serif Display", Georgia, serif;
+        font-size: 1.2rem;
+        font-weight: 400;
+        color: var(--text);
+        margin-bottom: 0.6rem;
+        letter-spacing: -0.01em;
+        line-height: 1.25;
+      }
+
+      .feature-card p {
+        font-size: 0.825rem;
+        color: var(--text-muted);
+        line-height: 1.7;
+        font-weight: 300;
+      }
+
+      /* ── Syscall table ── */
+      .table-wrap {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+        background: var(--bg-card);
+      }
+
+      .abi-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.8rem;
+      }
+
+      .abi-table th {
+        text-align: left;
+        padding: 0.7rem 1.25rem;
+        font-size: 0.65rem;
+        font-weight: 600;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--text-dim);
+        border-bottom: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.02);
+      }
+
+      .abi-table td {
+        padding: 0.65rem 1.25rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        color: var(--text-muted);
+        vertical-align: top;
+      }
+
+      .abi-table tr:last-child td {
+        border-bottom: none;
+      }
+
+      .abi-table td:first-child {
+        font-family: "Menlo", monospace;
+        font-size: 0.75rem;
+        color: var(--lime);
+        width: 40px;
+      }
+
+      .abi-table td:nth-child(2) {
+        font-family: "Menlo", monospace;
+        font-size: 0.75rem;
+        color: rgba(255, 255, 255, 0.65);
+      }
+
+      .abi-table tr:hover td {
+        background: rgba(255, 255, 255, 0.015);
+      }
+
+      /* ── Code block ── */
+      .code-block {
+        background: #080808;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 1.5rem 1.75rem;
+        font-family: "Menlo", "Monaco", monospace;
+        font-size: 0.775rem;
+        color: var(--text-muted);
+        line-height: 1.9;
+        overflow-x: auto;
+        position: relative;
+      }
+
+      .code-block::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 1px;
+        background: linear-gradient(
+          90deg,
+          transparent,
+          rgba(201, 241, 53, 0.3),
+          transparent
+        );
+      }
+
+      .c-comment {
+        color: #3f3f3f;
+      }
+      .c-key {
+        color: rgba(255, 255, 255, 0.55);
+      }
+      .c-val {
+        color: var(--lime);
+        opacity: 0.85;
+      }
+      .c-ok {
+        color: #4ade80;
+      }
+
+      /* ── Content pages ── */
+      .content-wrap {
+        max-width: 1160px;
+        margin: 0 auto;
+        padding: 8rem 2rem 5rem;
+      }
+
+      .page-eyebrow {
+        font-size: 0.7rem;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--text-dim);
+        margin-bottom: 1.25rem;
+      }
+
+      .content-wrap h1 {
+        font-family: "DM Serif Display", Georgia, serif;
+        font-size: clamp(2rem, 4vw, 3rem);
+        font-weight: 400;
+        letter-spacing: -0.025em;
+        margin-bottom: 2rem;
+        line-height: 1.1;
+        padding-bottom: 1.5rem;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .content-wrap > p,
+      .about-body p {
+        color: var(--text-muted);
+        line-height: 1.8;
+        margin-bottom: 1.25rem;
+        font-size: 0.95rem;
+        max-width: 640px;
+        font-weight: 300;
+      }
+
+      /* ── Docs ── */
+      .docs-layout {
+        display: flex;
+        gap: 4rem;
+        align-items: flex-start;
+      }
+
+      .docs-nav {
+        flex: 0 0 190px;
+        position: sticky;
+        top: 80px;
+      }
+
+      .docs-nav-label {
+        font-size: 0.65rem;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--text-dim);
+        margin: 1.5rem 0 0.5rem;
+        padding: 0 0.5rem;
+      }
+
+      .docs-nav ul {
+        list-style: none;
+      }
+
+      .docs-nav a {
+        display: block;
+        padding: 0.3rem 0.5rem;
+        font-size: 0.8rem;
+        color: var(--text-dim);
+        border-radius: 5px;
+        transition:
+          color 0.12s,
+          background 0.12s;
+        font-weight: 400;
+      }
+
+      .docs-nav a:hover {
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .docs-content {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .docs-content h1 {
+        font-family: "DM Serif Display", Georgia, serif;
+        font-size: 1.9rem;
+        font-weight: 400;
+        letter-spacing: -0.025em;
+        margin: 2.5rem 0 0.75rem;
+        color: var(--text);
+        line-height: 1.15;
+      }
+
+      .docs-content h1:first-child {
+        margin-top: 0;
+      }
+
+      .docs-content h2 {
+        font-size: 1rem;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        margin: 2.5rem 0 0.75rem;
+        color: var(--text);
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .docs-content h3 {
+        font-size: 0.825rem;
+        font-weight: 600;
+        color: rgba(255, 255, 255, 0.7);
+        margin: 1.5rem 0 0.4rem;
+        letter-spacing: 0.01em;
+      }
+
+      .docs-content p {
+        color: var(--text-muted);
+        font-size: 0.875rem;
+        line-height: 1.8;
+        margin-bottom: 1rem;
+        max-width: 640px;
+        font-weight: 300;
+      }
+
+      .docs-content pre {
+        background: #080808;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1rem 1.25rem;
+        overflow-x: auto;
+        margin: 0.75rem 0 1.5rem;
+        font-size: 0.75rem;
+        line-height: 1.7;
+      }
+
+      .docs-content code {
+        font-family: "Menlo", "Monaco", monospace;
+        color: var(--text-muted);
+      }
+
+      .docs-content p code {
+        background: rgba(255, 255, 255, 0.07);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 0.1em 0.4em;
+        font-size: 0.82em;
+        color: var(--lime);
+      }
+
+      .docs-content hr {
+        border: none;
+        border-top: 1px solid var(--border);
+        margin: 2.5rem 0;
+      }
+
+      /* ── Empty state ── */
+      .empty-state {
+        text-align: center;
+        padding: 5rem 1.5rem;
+      }
+
+      .empty-icon {
+        width: 52px;
+        height: 52px;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0 auto 1.75rem;
+        color: var(--text-dim);
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .empty-state h2 {
+        font-family: "DM Serif Display", Georgia, serif;
+        font-size: 1.75rem;
+        font-weight: 400;
+        letter-spacing: -0.02em;
+        margin-bottom: 0.75rem;
+      }
+
+      .empty-state p {
+        font-size: 0.9rem;
+        color: var(--text-muted);
+        max-width: 340px;
+        margin: 0 auto 2rem;
+        line-height: 1.65;
+        font-weight: 300;
+      }
+
+      /* ── Contact ── */
+      .contact-pill {
+        display: inline-flex;
+        flex-direction: column;
+        gap: 0.3rem;
+        padding: 1.25rem 1.75rem;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--bg-card);
+        margin: 1.75rem 0;
+        transition: border-color 0.2s;
+      }
+      .contact-pill:hover {
+        border-color: var(--border-h);
+      }
+      .contact-pill-label {
+        font-size: 0.65rem;
+        font-weight: 600;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--text-dim);
+      }
+      .contact-pill-value {
+        font-size: 1rem;
+        color: var(--text);
+        font-weight: 400;
+      }
+
+      /* ── Footer ── */
+      footer {
+        border-top: 1px solid var(--border);
+        padding: 2rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 1rem;
+      }
+
+      .footer-left {
+        display: flex;
+        align-items: center;
+        gap: 2rem;
+        flex-wrap: wrap;
+      }
+      .footer-copy {
+        font-size: 0.775rem;
+        color: var(--text-dim);
+      }
+
+      .footer-links {
+        display: flex;
+        gap: 1.5rem;
+      }
+      .footer-links a {
+        font-size: 0.775rem;
+        color: var(--text-dim);
+        transition: color 0.15s;
+      }
+      .footer-links a:hover {
+        color: var(--text-muted);
+      }
+
+      .footer-right {
+        font-size: 0.725rem;
+        color: var(--text-dim);
+      }
+
+      /* ── Hamburger ── */
+      .hamburger {
+        display: none;
+        flex-direction: column;
+        gap: 5px;
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: 6px;
+        z-index: 300;
+      }
+      .hamburger span {
+        display: block;
+        width: 20px;
+        height: 2px;
+        background: var(--text-muted);
+        border-radius: 2px;
+        transition:
+          transform 0.2s,
+          opacity 0.2s;
+        transform-origin: center;
+      }
+      .hamburger.open span:nth-child(1) {
+        transform: translateY(7px) rotate(45deg);
+      }
+      .hamburger.open span:nth-child(2) {
+        opacity: 0;
+        transform: scaleX(0);
+      }
+      .hamburger.open span:nth-child(3) {
+        transform: translateY(-7px) rotate(-45deg);
+      }
+
+      /* Mobile nav drawer */
+      .mobile-nav {
+        display: none;
+        position: fixed;
+        top: 56px;
+        left: 0;
+        right: 0;
+        background: rgba(0, 0, 0, 0.95);
+        backdrop-filter: blur(16px);
+        border-bottom: 1px solid var(--border);
+        z-index: 199;
+        padding: 1rem 1.5rem 1.5rem;
+        flex-direction: column;
+        gap: 0.25rem;
+      }
+      .mobile-nav.open {
+        display: flex;
+      }
+      .mobile-nav > a {
+        color: var(--text-muted);
+        font-size: 0.9rem;
+        font-weight: 400;
+        padding: 0.6rem 0.5rem;
+        border-radius: 6px;
+        transition:
+          color 0.15s,
+          background 0.15s;
+        display: block;
+        border-bottom: 1px solid var(--border);
+      }
+      .mobile-nav > a:last-of-type {
+        border-bottom: none;
+      }
+      .mobile-nav > a:hover,
+      .mobile-nav > a.active {
+        color: var(--text);
+      }
+      .mobile-nav-actions {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 0.75rem;
+        padding-top: 0.75rem;
+        border-top: 1px solid var(--border);
+      }
+      body.light .mobile-nav {
+        background: rgba(249, 249, 249, 0.97);
+      }
+
+      /* ── Mobile ── */
+      @media (max-width: 900px) {
+        .feature-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 1024px) {
+        nav {
+          display: none;
+        }
+        .hamburger {
+          display: flex;
+        }
+        .nav-right .btn-ghost,
+        .nav-right .btn-lime {
+          display: none;
+        }
+      }
+
+      @media (max-width: 768px) {
+        .docs-layout {
+          flex-direction: column;
+        }
+        .docs-nav {
+          position: static;
+        }
+        .big-section {
+          padding: 4rem 1.25rem;
+        }
+        .content-wrap {
+          padding: 6rem 1.25rem 4rem;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+
+      /* ── Light mode ── */
+      body.light {
+        --bg: #f9f9f9;
+        --bg-card: #ffffff;
+        --border: rgba(0, 0, 0, 0.08);
+        --border-h: rgba(0, 0, 0, 0.14);
+        --text: #0a0a0a;
+        --text-muted: rgba(0, 0, 0, 0.55);
+        --text-dim: rgba(0, 0, 0, 0.3);
+        --lime: #6ba10e;
+        --lime-dark: #578a0b;
+      }
+      body.light header {
+        background: rgba(249, 249, 249, 0.85);
+        backdrop-filter: blur(12px);
+        border-bottom: 1px solid var(--border);
+      }
+      body.light .hero-badge {
+        background: rgba(0, 0, 0, 0.04);
+      }
+      body.light .docs-content pre,
+      body.light .docs-content code:not(p code) {
+        background: #f0f0f0;
+      }
+      body.light .docs-content p code {
+        background: rgba(0, 0, 0, 0.06);
+        color: var(--lime);
+      }
+      body.light .abi-table td:first-child {
+        color: var(--lime);
+      }
+      body.light .feature-card:hover {
+        background: #f0f0f0;
+      }
+      body.light .table-wrap,
+      body.light .contact-pill {
+        background: #fff;
+      }
+
+      body.light .btn-lime {
+        color: #fff;
+      }
+
+      /* ── FAQ ── */
+      .faq-list {
+        margin-top: 2.5rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+      .faq-item {
+        border-bottom: 1px solid var(--border);
+        background: var(--bg-card);
+      }
+      .faq-item:last-child {
+        border-bottom: none;
+      }
+      .faq-q {
+        width: 100%;
+        text-align: left;
+        padding: 1.25rem 1.5rem;
+        background: none;
+        border: none;
+        color: var(--text);
+        font-family: "Inter", sans-serif;
+        font-size: 0.9rem;
+        font-weight: 500;
+        cursor: pointer;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        transition: background 0.15s;
+      }
+      .faq-q:hover {
+        background: rgba(255, 255, 255, 0.03);
+      }
+      body.light .faq-q:hover {
+        background: rgba(0, 0, 0, 0.03);
+      }
+      .faq-q svg {
+        flex-shrink: 0;
+        width: 14px;
+        height: 14px;
+        color: var(--text-dim);
+        transition: transform 0.2s;
+      }
+      .faq-item.open .faq-q svg {
+        transform: rotate(45deg);
+      }
+      .faq-a {
+        max-height: 0;
+        overflow: hidden;
+        transition:
+          max-height 0.3s ease,
+          padding 0.2s;
+        padding: 0 1.5rem;
+        font-size: 0.875rem;
+        color: var(--text-muted);
+        line-height: 1.8;
+        font-weight: 300;
+      }
+      .faq-item.open .faq-a {
+        max-height: 400px;
+        padding: 0 1.5rem 1.25rem;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ── Nav ── -->
+    <header>
+      <a class="nav-logo" onclick="navigate('#home')">
+        <div class="nav-logo-mark">
+          <svg viewBox="0 0 10 10" fill="none">
+            <circle cx="5" cy="5" r="2" fill="#000" />
+            <circle
+              cx="5"
+              cy="5"
+              r="4"
+              stroke="#000"
+              stroke-width="1"
+              fill="none"
+            />
+          </svg>
+        </div>
+        Lythos
+      </a>
+
+      <nav id="main-nav">
+        <ul class="nav-links">
+          <li><a onclick="navigate('#home')" class="active">Home</a></li>
+          <li><a onclick="navigate('#about')">About</a></li>
+          <li><a onclick="navigate('#docs')">Docs</a></li>
+          <li><a onclick="navigate('#faq')">FAQ</a></li>
+          <li><a onclick="navigate('#downloads')">Downloads</a></li>
+          <li><a onclick="navigate('#contact')">Contact</a></li>
+        </ul>
+      </nav>
+
+      <div class="nav-right">
+        <button
+          class="hamburger"
+          id="hamburger"
+          aria-label="Open menu"
+          aria-expanded="false"
+        >
+          <span></span>
+          <span></span>
+          <span></span>
+        </button>
+        <a
+          href="https://github.com/ArcoNightshade/lythos"
+          target="_blank"
+          rel="noopener"
+          class="btn btn-ghost"
+          style="font-size: 0.8rem"
+          >GitHub</a
+        >
+        <a
+          onclick="navigate('#docs')"
+          class="btn btn-lime"
+          style="padding: 0.45rem 1.1rem; font-size: 0.8rem"
+          >View docs</a
+        >
+      </div>
+    </header>
+
+    <!-- Mobile nav drawer -->
+    <div class="mobile-nav" id="mobile-nav" aria-hidden="true">
+      <a
+        onclick="
+          navigate('#home');
+          closeMobileNav();
+        "
+        class="active"
+        >Home</a
+      >
+      <a
+        onclick="
+          navigate('#about');
+          closeMobileNav();
+        "
+        >About</a
+      >
+      <a
+        onclick="
+          navigate('#docs');
+          closeMobileNav();
+        "
+        >Docs</a
+      >
+      <a
+        onclick="
+          navigate('#faq');
+          closeMobileNav();
+        "
+        >FAQ</a
+      >
+      <a
+        onclick="
+          navigate('#downloads');
+          closeMobileNav();
+        "
+        >Downloads</a
+      >
+      <a
+        onclick="
+          navigate('#contact');
+          closeMobileNav();
+        "
+        >Contact</a
+      >
+      <div class="mobile-nav-actions">
+        <a
+          href="https://github.com/ArcoNightshade/lythos"
+          target="_blank"
+          rel="noopener"
+          class="btn btn-ghost"
+          style="font-size: 0.8rem"
+          >GitHub</a
+        >
+        <a
+          onclick="
+            navigate('#docs');
+            closeMobileNav();
+          "
+          class="btn btn-lime"
+          style="padding: 0.45rem 1.1rem; font-size: 0.8rem"
+          >View docs</a
+        >
+      </div>
+    </div>
+
+    <!-- ══════════════ HOME ══════════════ -->
+    <div id="home" class="page active">
+      <!-- Hero -->
+      <section class="hero">
+        <canvas id="particle-canvas"></canvas>
+
+        <div class="hero-content">
+          <div class="hero-badge">
+            <span class="hero-badge-new">New</span>
+            Capability-based security from the ground up
+            <svg
+              viewBox="0 0 12 12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+            >
+              <path d="M2.5 6h7m-3-3l3 3-3 3" />
+            </svg>
+          </div>
+
+          <h1>
+            The kernel built<br />for security-first<br /><em>systems</em>
+          </h1>
+
+          <p class="hero-sub">
+            An experimental x86-64 microkernel in Rust. Every resource governed
+            by an unforgeable capability. Minimal by design, verifiable by
+            construction.
+          </p>
+
+          <div class="hero-actions">
+            <a onclick="navigate('#docs')" class="btn btn-lime"
+              >Read the docs</a
+            >
+            <a
+              href="https://github.com/ArcoNightshade/lythos"
+              target="_blank"
+              rel="noopener"
+              class="btn btn-outline"
+              >View on GitHub</a
+            >
+          </div>
+        </div>
+      </section>
+
+      <hr class="section-break" />
+
+      <!-- Ship more section -->
+      <div class="big-section">
+        <div class="big-section-eyebrow">Core design</div>
+        <h2>Everything in the kernel<br />is intentional</h2>
+        <p class="big-section-sub">
+          No monolithic bloat. Each subsystem is minimal, tested, and wired
+          through capability handles your processes must earn.
+        </p>
+
+        <div class="feature-grid">
+          <div class="feature-card">
+            <div class="feature-num">01</div>
+            <h3>Capability-Based Security</h3>
+            <p>
+              Every resource (memory, IPC endpoints, rollback authority) is
+              governed by an unforgeable capability handle. No ambient
+              authority. Least privilege by construction.
+            </p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-num">02</div>
+            <h3>Preemptive Scheduler</h3>
+            <p>
+              Round-robin over a ready queue. Cooperative yields via
+              <code>SYS_YIELD</code>. APIC timer-driven preemption. Blocking IPC
+              with automatic task wakeup.
+            </p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-num">03</div>
+            <h3>Ring-Buffer IPC</h3>
+            <p>
+              4 KiB shared pages per endpoint. Fixed 64-byte message slots.
+              Blocking send/recv with task wakeup. Basis of the lythd boot
+              protocol.
+            </p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-num">04</div>
+            <h3>ELF64 Loader</h3>
+            <p>
+              Full <code>ET_EXEC</code> loader: <code>PT_LOAD</code> segments,
+              user stack allocation with guard pages, BSS zero-fill, inherited
+              capability tables, ring-3 via <code>iretq</code>.
+            </p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-num">05</div>
+            <h3>4-Level Paging</h3>
+            <p>
+              NX, U/S, and huge-page support. Higher-half kernel window,
+              identity-mapped lower GiB, per-process user stacks with guard
+              pages and gap slots.
+            </p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-num">06</div>
+            <h3>APIC + IOAPIC</h3>
+            <p>
+              Local APIC with calibrated timer and tick counter. IOAPIC routing
+              replaces legacy 8259 PIC. Full RTE programming with masking per
+              GSI.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <hr class="section-break" />
+
+      <!-- Syscall ABI -->
+      <div class="big-section">
+        <div class="big-section-eyebrow">Syscall ABI</div>
+        <h2>Clean, minimal interface<br />to the kernel</h2>
+        <p class="big-section-sub">
+          Entry via
+          <code
+            style="
+              font-family: monospace;
+              font-size: 0.85em;
+              color: rgba(255, 255, 255, 0.5);
+            "
+            >syscall</code
+          >. RAX carries the number in; the return value out.
+        </p>
+
+        <div class="table-wrap">
+          <table class="abi-table">
+            <thead>
+              <tr>
+                <th>Nr</th>
+                <th>Name</th>
+                <th>Arguments</th>
+                <th>Returns</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>0</td>
+                <td>SYS_YIELD</td>
+                <td style="color: var(--text-dim)">-</td>
+                <td style="color: var(--text-dim)">0</td>
+              </tr>
+              <tr>
+                <td>1</td>
+                <td>SYS_TASK_EXIT</td>
+                <td style="color: var(--text-dim)">-</td>
+                <td style="color: var(--text-dim)">never</td>
+              </tr>
+              <tr>
+                <td>2</td>
+                <td>SYS_MMAP</td>
+                <td>virt, phys, flags</td>
+                <td style="color: var(--text-dim)">0</td>
+              </tr>
+              <tr>
+                <td>3</td>
+                <td>SYS_MUNMAP</td>
+                <td>virt</td>
+                <td style="color: var(--text-dim)">0</td>
+              </tr>
+              <tr>
+                <td>4</td>
+                <td>SYS_CAP_GRANT</td>
+                <td>handle, target_id, rights_mask</td>
+                <td>new handle</td>
+              </tr>
+              <tr>
+                <td>5</td>
+                <td>SYS_CAP_REVOKE</td>
+                <td>handle</td>
+                <td style="color: var(--text-dim)">0</td>
+              </tr>
+              <tr>
+                <td>6</td>
+                <td>SYS_IPC_SEND</td>
+                <td>cap_handle, msg_ptr, msg_len</td>
+                <td style="color: var(--text-dim)">0</td>
+              </tr>
+              <tr>
+                <td>7</td>
+                <td>SYS_IPC_RECV</td>
+                <td>cap_handle, buf_ptr, buf_len</td>
+                <td>bytes</td>
+              </tr>
+              <tr>
+                <td>8</td>
+                <td>SYS_IPC_CREATE</td>
+                <td style="color: var(--text-dim)">-</td>
+                <td>new cap handle</td>
+              </tr>
+              <tr>
+                <td>9</td>
+                <td>SYS_ROLLBACK</td>
+                <td style="color: var(--text-dim)">-</td>
+                <td style="color: var(--text-dim)">never</td>
+              </tr>
+              <tr>
+                <td>10</td>
+                <td>SYS_EXEC</td>
+                <td>elf_ptr, elf_len, caps_ptr, caps_len</td>
+                <td>TaskId</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <!-- /home -->
+
+    <!-- ══════════════ ABOUT ══════════════ -->
+    <div id="about" class="page">
+      <div class="content-wrap">
+        <div class="page-eyebrow">About</div>
+        <h1>About Lythos</h1>
+        <div class="about-body">
+          <p>
+            Lythos is an experimental x86-64 microkernel developed by Pureshade
+            Labs, LLC. Built from scratch in Rust, it explores what a
+            capability-based security model looks like when taken seriously from
+            the first line of code, not bolted on as an afterthought.
+          </p>
+          <p>
+            The design philosophy: every resource the kernel manages is accessed
+            through an unforgeable capability handle. Memory, IPC endpoints,
+            rollback authority. All gated. Processes hold only what they're
+            explicitly granted, and no more. This is the principle of least
+            privilege applied at the kernel level.
+          </p>
+          <p>
+            Lythos isn't trying to be Linux. It's trying to be a correct,
+            minimal, verifiable foundation- the kind you'd actually trust to run
+            security-sensitive workloads.
+          </p>
+          <p>
+            The project is open. We're committed to building in public and
+            sharing the design decisions that shaped the kernel.
+          </p>
+        </div>
+        <div
+          style="
+            margin-top: 2.5rem;
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+          "
+        >
+          <a
+            href="https://github.com/ArcoNightshade/lythos"
+            target="_blank"
+            rel="noopener"
+            class="btn btn-lime"
+            >View on GitHub</a
+          >
+          <a onclick="navigate('#docs')" class="btn btn-outline"
+            >Read the docs</a
+          >
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════ DOCS ══════════════ -->
+    <div id="docs" class="page">
+      <div class="content-wrap">
+        <div class="docs-layout">
+          <aside class="docs-nav">
+            <div class="docs-nav-label" style="margin-top: 0">Overview</div>
+            <ul>
+              <li><a href="#docs-intro">Introduction</a></li>
+              <li><a href="#docs-arch">Architecture</a></li>
+              <li><a href="#docs-boot">Boot sequence</a></li>
+            </ul>
+            <div class="docs-nav-label">Memory</div>
+            <ul>
+              <li><a href="#mem-pmm">Physical (PMM)</a></li>
+              <li><a href="#mem-vmm">Virtual (VMM)</a></li>
+              <li><a href="#mem-heap">Heap</a></li>
+            </ul>
+            <div class="docs-nav-label">Kernel</div>
+            <ul>
+              <li><a href="#docs-tasks">Tasks &amp; scheduler</a></li>
+              <li><a href="#docs-syscalls">Syscall reference</a></li>
+              <li><a href="#docs-caps">Capabilities</a></li>
+              <li><a href="#docs-ipc">IPC</a></li>
+              <li><a href="#docs-elf">ELF loader</a></li>
+              <li><a href="#docs-lythd">lythd</a></li>
+            </ul>
+            <div class="docs-nav-label">Drivers</div>
+            <ul>
+              <li><a href="#drv-ioapic">IOAPIC</a></li>
+              <li><a href="#drv-pci">PCI scanner</a></li>
+              <li><a href="#drv-virtio">VirtIO block</a></li>
+            </ul>
+            <div class="docs-nav-label">RFS Filesystem</div>
+            <ul>
+              <li><a href="#rfs-overview">Overview</a></li>
+              <li><a href="#rfs-layout">On-disk layout</a></li>
+              <li><a href="#rfs-inode">Inode format</a></li>
+              <li><a href="#rfs-extent">Extent format</a></li>
+              <li><a href="#rfs-overflow">Overflow blocks</a></li>
+              <li><a href="#rfs-dir">Directory entries</a></li>
+              <li><a href="#rfs-symlink">Fast symlinks</a></li>
+              <li><a href="#rfs-mkrfs">mkrfs tool</a></li>
+              <li><a href="#rfs-driver">Kernel driver</a></li>
+            </ul>
+          </aside>
+
+          <article class="docs-content">
+            <!-- ── Introduction ── -->
+            <h1 id="docs-intro">Lythos Microkernel Documentation</h1>
+            <p>
+              Internal documentation covering kernel internals for developers
+              working on or extending Lythos. For writing userspace software
+              that runs <em>on</em> Lythos, see the OROS repository.
+            </p>
+
+            <!-- ── Architecture ── -->
+            <h1 id="docs-arch">Architecture</h1>
+            <p>
+              Lythos is a capability-based microkernel. The kernel provides
+              memory management, scheduling, IPC, and a capability system. All
+              device drivers, filesystems, and services run as userspace
+              processes. Isolation is enforced through hardware paging and the
+              capability system: a process can only access a resource if it
+              holds a capability that grants it.
+            </p>
+            <p>
+              The kernel is single-processor. Multi-AP support requires a
+              per-CPU scheduler and APIC startup sequence (tracked in
+              <code>TODO.md</code>).
+            </p>
+
+            <h2>Component map</h2>
+            <pre><code>┌─────────────────────────────────────────────────────────┐
+│                     Userspace (ring 3)                  │
+│  lythd (PID 1)  ──  lythdist  ──  lysh  ──  other tasks │
+│                        ↕ syscall                        │
+├─────────────────────────────────────────────────────────┤
+│                      Kernel (ring 0)                    │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────┐   │
+│  │  syscall │  │   task   │  │   cap    │  │  ipc   │   │
+│  │ dispatch │  │scheduler │  │  table   │  │  rings │   │
+│  └──────────┘  └──────────┘  └──────────┘  └────────┘   │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐               │
+│  │   PMM    │  │   VMM    │  │   heap   │               │
+│  │ (bitmap) │  │ (4-level)│  │(ll-alloc)│               │
+│  └──────────┘  └──────────┘  └──────────┘               │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐               │
+│  │  IOAPIC  │  │ virtio   │  │   ELF    │               │
+│  │  driver  │  │  -blk    │  │  loader  │               │
+│  └──────────┘  └──────────┘  └──────────┘               │
+└─────────────────────────────────────────────────────────┘
+                    ↕ MMIO / port I/O
+┌─────────────────────────────────────────────────────────┐
+│           QEMU: x86_64, VirtIO block, LAPIC, IOAPIC     │
+└─────────────────────────────────────────────────────────┘</code></pre>
+
+            <h2>Key source files</h2>
+            <pre><code>src/main.rs              kmain, boot sequence, integration test
+src/arch/x86_64/boot.s   32→64-bit stub, Multiboot headers, BSS zero
+src/arch/x86_64/isr_stubs.s  ISR stubs 0–31, exception_common
+src/pmm.rs               Physical memory manager (bitmap)
+src/vmm.rs               Virtual memory manager (4-level paging)
+src/heap.rs              Kernel heap (GlobalAlloc)
+src/gdt.rs               GDT: null, kernel/user code+data, TSS
+src/tss.rs               TSS: RSP0 for ring-3 → ring-0 switches
+src/idt.rs               IDT: ISR wiring, PIC remap, register_irq
+src/exceptions.rs        Exception handler, page fault diagnostics
+src/apic.rs              LAPIC init, calibrated timer, apic_eoi
+src/task.rs              Task struct, round-robin scheduler, context switch
+src/serial.rs            COM1 UART, SpinLock&lt;T&gt;, kprint!/kprintln!
+src/syscall.rs           syscall_entry (asm), syscall_dispatch, enter_userspace
+src/cap.rs               Capability system
+src/ipc.rs               IPC endpoints: ring buffer, blocking send/recv
+src/elf.rs               ELF64 loader
+src/ioapic.rs            IOAPIC driver
+src/pci.rs               PCI config space scanner
+src/virtio_blk.rs        VirtIO 0.9 legacy block device
+linker.ld                .boot at 0x100000, kernel sections, symbols</code></pre>
+
+            <h2>Memory map</h2>
+            <pre><code>Region                   Address                        Notes
+─────────────────────── ────────────────────────────── ───────────────────────────
+Kernel load              0x0010_0000                    Physical; identity-mapped
+Identity map             0x0000_0000 – 0x4000_0000      1 GiB, 2 MiB huge pages
+Higher-half data window  0xFFFF_8000_0000_0000 + pa     Same physical, NX set
+Kernel heap              0xFFFF_C000_0000_0000           64 MiB, pre-mapped
+IPC kernel window        0xFFFF_D000_0000_0000           4 KiB per endpoint
+VMM scratch              0xFFFF_A000_xxxx_xxxx           VMM smoke test
+User code                0x0000_0001_0000_0000+          Above 1 GiB identity map
+User stacks              0x0000_7FFF_0000_0000+          2050 pages per slot
+lythd ELF blob           0x0040_0000 (phys)             Loaded by QEMU</code></pre>
+
+            <h2>Critical invariants</h2>
+            <p>
+              <strong style="color: rgba(255, 255, 255, 0.65)"
+                >BSS zeroing.</strong
+              >
+              <code>boot.s</code> zeros
+              <code>__bss_start...__bss_end</code> before building page tables.
+              MB1 header sets <code>bss_end_addr = 0</code> to skip loader
+              zeroing.
+            </p>
+            <p>
+              <strong style="color: rgba(255, 255, 255, 0.65)"
+                >U/S bit propagation.</strong
+              >
+              Every page table level must have U/S set for user-mode accesses.
+              <code>vmm::walk_or_create</code> propagates
+              <code>entry |= 1 &lt;&lt; 2</code> on all intermediate tables when
+              the User flag is in <code>flags</code>.
+            </p>
+            <p>
+              <strong style="color: rgba(255, 255, 255, 0.65)"
+                >No map_page in 0–1 GiB.</strong
+              >
+              That range uses 2 MiB huge pages. Calling
+              <code>map_page</code> there trips the PS=1 guard in
+              <code>walk_or_create</code>.
+            </p>
+            <p>
+              <strong style="color: rgba(255, 255, 255, 0.65)"
+                >Single-threaded allocators.</strong
+              >
+              <code>alloc_frame</code> and <code>NEXT_STACK_SLOT</code> are not
+              locked. Safe while single-CPU with cooperative scheduling. A
+              spinlock wrapper is required before SMP.
+            </p>
+            <p>
+              <strong style="color: rgba(255, 255, 255, 0.65)"
+                >SpinLock disables interrupts.</strong
+              >
+              <code>serial::SpinLock::lock</code> saves RFLAGS and executes
+              <code>cli</code>; guard restores via <code>popfq</code> on drop.
+              Never call <code>yield_task</code> while holding a SpinLock.
+            </p>
+
+            <hr />
+
+            <!-- ── Boot ── -->
+            <h1 id="docs-boot">Boot sequence</h1>
+            <p>
+              Lythos boots via Multiboot1 or Multiboot2. QEMU loads the kernel
+              ELF at physical <code>0x100000</code> and jumps to the 32-bit
+              entry in <code>.boot</code>. The stub switches to 64-bit mode and
+              calls <code>kmain</code>.
+            </p>
+
+            <h2>Stage 1: 32-bit stub (<code>boot.s</code>)</h2>
+            <pre><code>1. Multiboot headers present (MB1 + MB2); GRUB/QEMU selects one.
+   MB1 sets bss_end_addr = 0; stub owns BSS zeroing.
+2. rep stosl clears __bss_start...__bss_end before any Rust runs.
+3. 16 KiB temporary stack in .bss used during boot.
+4. Minimal 4-level page table: identity-maps first 1 GiB with 2 MiB huge pages.
+5. EFER.LME + CR0.PG → long mode. Far jump loads 64-bit CS.
+6. Push Multiboot magic + info pointer, call kmain (never returns).</code></pre>
+
+            <h2>Stage 2: kmain sequence</h2>
+            <pre><code>Step  Action
+────  ──────────────────────────────────────────────────────────────
+1     serial::init        UART ready; kprintln! works
+2     gdt::init           Load GDT: kernel/user segments + TSS descriptor
+3     tss::init           Set RSP0 for ring-3 → ring-0 transitions
+4     idt::init           Wire ISR stubs, remap legacy PIC to 32–47, sti
+5     pmm::init           Parse Multiboot mmap, mark free frames
+6     vmm::init           Full 4-level page table: identity, higher-half, heap
+7     heap::init          Activate linked-list GlobalAlloc; alloc crate usable
+8     apic::init          Disable legacy PIC, enable LAPIC, calibrate timer
+9     ioapic::init        Map IOAPIC MMIO, read entry count, mask all GSIs
+10    task::init          Bootstrap task (task 0), SCHEDULER ready
+11    syscall::init       Set LSTAR/STAR/FMASK; syscall instruction routed
+12    virtio_blk::init    Scan PCI for VirtIO block device, set up virtqueue
+13    exec lythd ELF      Copy from phys 0x400000, exec, pre-queue BootInfo
+14    step14_smoke        Integration test: caps, IPC, exec, yield, task_exit</code></pre>
+
+            <h2>Multiboot magic values</h2>
+            <pre><code>0x2BADB002  Multiboot1 (GRUB legacy / QEMU a.out kludge)
+0x36D76289  Multiboot2</code></pre>
+
+            <h2>lythd ELF at boot</h2>
+            <p>
+              QEMU writes the lythd ELF to physical <code>0x400000</code> via
+              <code>-device loader,file=lythd,addr=0x400000,force-raw=on</code>.
+              PMM reserves frames <code>0x400000..0x480000</code> (512 KiB) so
+              no allocator call overwrites the ELF. <code>kmain</code> reads
+              from <code>0x400000</code> if the ELF magic is present, falling
+              back to the embedded <code>LYTHD_ELF</code> byte slice.
+            </p>
+
+            <hr />
+
+            <!-- ── Memory ── -->
+            <h1 id="mem-pmm">Physical Memory Manager</h1>
+            <p>
+              Bitmap allocator in <code>src/pmm.rs</code>. One bit per 4 KiB
+              frame; bit 0 = free, bit 1 = used. 4 GiB max = 1 M frames = 128
+              KiB bitmap stored in <code>BITMAP: [u64; 16384]</code> in
+              <code>.bss</code>.
+            </p>
+
+            <h2>Init order</h2>
+            <pre><code>1. All frames marked used (bitmap = all-ones).
+2. Parse Multiboot1/2 mmap; mark type=1 (available) regions free.
+3. Re-mark kernel image frames used (KERNEL_START..KERNEL_END).
+4. Re-mark frame 0 used (BIOS data / IVT).
+5. Re-mark 0x400000..0x480000 used (lythd ELF blob).
+6. Count free frames → store in FREE_FRAMES atomic.</code></pre>
+
+            <h2>API</h2>
+            <pre><code>init(mb_magic, mb_info)         One-shot init; call before any alloc
+alloc_frame()                   Allocate one 4 KiB frame → Option&lt;PhysAddr&gt;
+free_frame(addr)                Return frame to pool; panics on double-free
+alloc_frames_contiguous(n)      Allocate n physically-contiguous frames
+free_frames_contiguous(addr,n)  Free n contiguous frames
+free_frame_count()              Current free frame count</code></pre>
+
+            <hr />
+            <h1 id="mem-vmm">Virtual Memory Manager</h1>
+            <p>
+              Standard x86_64 4-level paging in <code>src/vmm.rs</code>: PML4 →
+              PDPT → PD → PT. Each level maps 9 bits. Leaf entries are 4 KiB
+              (except the identity-map huge pages built by <code>boot.s</code>).
+            </p>
+
+            <h2>Page flags</h2>
+            <pre><code>Bit  Name   Meaning
+───  ─────  ────────────────
+0    P      Present
+1    Write  Writable
+2    User   Ring-3 accessible
+63   NX     No-execute (XD)
+
+Common combinations:
+0x1  (P)      Read-only kernel page
+0x3  (P+W)    Read-write kernel page
+0x5  (P+U)    Read-only user page
+0x7  (P+W+U)  Read-write user page
+0x9  (P+NX)   No-exec kernel data</code></pre>
+
+            <h2>API</h2>
+            <pre><code>init()                    Build full page table: identity, higher-half, heap
+map_page(virt,phys,flags) Map one 4 KiB page
+unmap_page(virt)          Unmap and flush TLB (invlpg)
+current_pml4_phys()       Physical address of active PML4</code></pre>
+
+            <p>
+              <strong style="color: rgba(255, 255, 255, 0.65)"
+                >Do not call map_page on 0–1 GiB.</strong
+              >
+              Those are huge pages. <code>walk_or_create</code> panics with
+              "huge page encountered" on a PS=1 PDE.
+            </p>
+
+            <hr />
+            <h1 id="mem-heap">Kernel Heap</h1>
+            <p>
+              Linked-list allocator in <code>src/heap.rs</code>, backed by the
+              VMM. Implements <code>core::alloc::GlobalAlloc</code>, registered
+              via <code>#[global_allocator]</code>. After
+              <code>heap::init()</code>, all <code>alloc</code> crate types
+              (<code>Box</code>, <code>Vec</code>, <code>String</code>) are
+              available.
+            </p>
+            <pre><code>Base:        0xFFFF_C000_0000_0000
+Max size:    64 MiB
+Pre-mapped:  HEAP_INIT_PAGES × 4 KiB at boot
+Min align:   8 bytes
+Locking:     serial::SpinLock (disables interrupts)</code></pre>
+
+            <hr />
+
+            <!-- ── Tasks ── -->
+            <h1 id="docs-tasks">Tasks &amp; Scheduler</h1>
+            <p>
+              Defined in <code>src/task.rs</code>. A task is the kernel's unit
+              of execution. Every task has a unique
+              <code>TaskId</code> (<code>u64</code>), a state, a 64 KiB kernel
+              stack, a saved register context, a capability table, and a PML4
+              root. Task 0 is the bootstrap task (kmain).
+            </p>
+
+            <h2>State machine</h2>
+            <pre><code>         spawn
+          │
+          ▼
+ ┌──── Ready ◄──── wake_task ──── Blocked
+ │        │                          ▲
+ │    scheduled                      │
+ │        ▼                   block_and_yield
+ │    Running ──── yield_task ──► Ready
+ │        │
+ │   task_exit
+ │        ▼
+ └──────  Dead</code></pre>
+
+            <h2>Scheduler functions</h2>
+            <pre><code>spawn_kernel_task(fn)                  Create kernel-mode task, add to ready queue
+spawn_userspace_task(entry,stack,      Create ring-3 task
+  caps,trampoline)
+yield_task()                           Cooperative yield; also called from timer ISR
+task_exit()                            Mark Dead, switch to next; never returns
+block_and_yield()                      Mark Blocked, yield (used by IPC)
+wake_task(id)                          Blocked → Ready</code></pre>
+
+            <h2>Context switch</h2>
+            <p>
+              Software-only. <code>switch</code> saves callee-saved registers
+              (RBX, R12–R15, RBP) + RSP for the outgoing task, restores them for
+              the incoming task. The saved RIP is the return address pushed when
+              <code>switch</code> was called.
+            </p>
+
+            <h2>User stack layout</h2>
+            <pre><code>Slots start at 0x0000_7FFF_0000_0000. Each slot = 2050 pages:
+
+  [0]        guard page   (unmapped; fault on stack overflow)
+  [1..2048]  usable stack (P + W + U + NX, 8 MiB)
+  [2049]     gap page     (unmapped; separates slots)</code></pre>
+
+            <h2>LAPIC timer</h2>
+            <p>
+              Timer ISR (vector 32) fires at a calibrated rate measured against
+              PIT in <code>apic::init</code>. Each tick increments
+              <code>TICK_COUNT</code> atomic and calls <code>yield_task</code>;
+              this is the preemption mechanism. Edge-triggered,
+              locally-delivered, does not go through IOAPIC.
+            </p>
+
+            <h2>RSP0 / ring switching</h2>
+            <p>
+              On syscall or interrupt from ring 3, the CPU loads
+              <code>TSS.RSP0</code> as the kernel stack pointer.
+              <code>tss::init</code> sets RSP0 to the top of the current task's
+              kernel stack. RSP0 is updated on every context switch since only
+              one task runs at a time.
+            </p>
+
+            <hr />
+
+            <!-- ── Syscalls ── -->
+            <h1 id="docs-syscalls">Syscall reference</h1>
+            <p>
+              Entry via <code>syscall</code> instruction (LSTAR =
+              <code>syscall_entry</code>). FMASK clears IF; interrupts disabled
+              during handler. <code>sysretq</code> restores user RIP from RCX
+              and RFLAGS from R11.
+            </p>
+
+            <h2>Register conventions</h2>
+            <pre><code>Register  Entry role              Return role
+────────  ──────────────────────  ───────────
+RAX       Syscall number          Return value
+RDI       Argument 1 (a1)         Preserved
+RSI       Argument 2 (a2)         Preserved
+RDX       Argument 3 (a3)         Preserved
+R10       Argument 4 (a4)         Preserved  ← RCX clobbered by syscall
+R8        Argument 5 (a5)         Preserved
+R9        Argument 6 (a6)         Preserved
+RCX       User RIP (CPU-saved)    -
+R11       User RFLAGS (CPU-saved) -</code></pre>
+
+            <h2>Error codes</h2>
+            <pre><code>u64 value                    i64   Name      Meaning
+───────────────────────────  ────  ────────  ─────────────────────────────
+0xFFFF_FFFF_FFFF_FFFF        -1    ENOSYS    Unknown syscall number
+0xFFFF_FFFF_FFFF_FFFE        -2    ENOCAP    Invalid or stale cap handle
+0xFFFF_FFFF_FFFF_FFFD        -3    ENOPERM   Capability rights insufficient
+0xFFFF_FFFF_FFFF_FFFC        -4    EINVAL    Invalid argument</code></pre>
+
+            <h2>SYS_YIELD (0)</h2>
+            <p>
+              Voluntarily yield to the next ready task. Calling task placed at
+              back of ready queue. Returns 0.
+            </p>
+
+            <h2>SYS_TASK_EXIT (1)</h2>
+            <p>
+              Terminate the calling task. Marks task Dead, switches to next.
+              Frees kernel stack and capability table. Never returns.
+            </p>
+
+            <h2>SYS_MMAP (2)</h2>
+            <p>Map a physical frame into the calling task's address space.</p>
+            <pre><code>a1  virtual address   (4 KiB-aligned)
+a2  physical address  (4 KiB-aligned)
+a3  page flags        (bit 0=P, 1=W, 2=U, 63=NX)
+→   0 on success, EINVAL if unaligned</code></pre>
+            <p>
+              Caller must hold a <code>Memory</code> capability. Currently
+              validates cap presence; range restriction is planned.
+            </p>
+
+            <h2>SYS_MUNMAP (3)</h2>
+            <p>
+              Unmap a virtual page (<code>a1</code> = virtual address, 4
+              KiB-aligned). Calls <code>vmm::unmap_page</code> +
+              <code>invlpg</code>. Physical frame is <strong>not</strong> freed;
+              caller tracks ownership.
+            </p>
+
+            <h2>SYS_CAP_GRANT (4)</h2>
+            <pre><code>a1  source handle in caller's table
+a2  target task ID
+a3  rights mask (result = source_rights &amp; mask)
+→   new handle in target's table, or ENOCAP / ENOPERM / EINVAL</code></pre>
+            <p>
+              Cannot grant to self. Target task must exist. Requires
+              <code>GRANT</code> right.
+            </p>
+
+            <h2>SYS_CAP_REVOKE (5)</h2>
+            <p>
+              <code>a1</code> = handle to revoke. Sets slot to
+              <code>None</code>. Requires <code>REVOKE</code> right. Returns 0
+              or <code>ENOCAP</code>/<code>ENOPERM</code>.
+            </p>
+
+            <h2>SYS_IPC_SEND (6)</h2>
+            <pre><code>a1  IPC cap handle
+a2  message buffer pointer (user space)
+a3  message length in bytes (max 64)
+→   0 on success; blocks if ring full</code></pre>
+            <p>
+              Requires <code>WRITE</code> right. Validates
+              <code>[a2, a2+a3)</code> is in user address space before copying.
+            </p>
+
+            <h2>SYS_IPC_RECV (7)</h2>
+            <pre><code>a1  IPC cap handle
+a2  destination buffer pointer (user space)
+a3  buffer length in bytes
+→   bytes copied (up to 64); blocks if ring empty</code></pre>
+            <p>
+              Requires <code>READ</code> right. Returns
+              <code>min(a3, MSG_SIZE)</code>.
+            </p>
+
+            <h2>SYS_IPC_CREATE (8)</h2>
+            <p>
+              No arguments. Allocates one 4 KiB physical page for a new ring
+              buffer, maps it at
+              <code>0xFFFF_D000_0000_0000 + idx * 4096</code> in the kernel IPC
+              window. Returns new IPC capability handle with
+              <code>ALL</code> rights.
+            </p>
+
+            <h2>SYS_ROLLBACK (9)</h2>
+            <p>
+              No arguments. Requires <code>Rollback</code> capability. Currently
+              a stub that panics with "rollback invoked". Full
+              checkpoint/restore is a future implementation. Returns
+              <code>ENOPERM</code> if no Rollback cap.
+            </p>
+
+            <h2>SYS_EXEC (10)</h2>
+            <pre><code>a1  pointer to ELF data (caller's address space)
+a2  ELF data length in bytes
+a3  pointer to capability handle array (u64[])
+a4  number of capabilities to inherit
+→   new TaskId on success</code></pre>
+            <p>
+              Copies ELF + cap list from user space, parses, loads segments,
+              allocates user stack, writes ABI frame, spawns exec trampoline.
+              New task's cap table: handle 0 = caps[0], handle 1 = caps[1], etc.
+            </p>
+
+            <h2>SYS_BLK_READ (20)</h2>
+            <pre><code>a1  sector number (u64, 0-based)
+a2  pointer to 512-byte destination buffer
+→   0 on success; ENOSYS if no block device</code></pre>
+
+            <h2>SYS_BLK_WRITE (21)</h2>
+            <pre><code>a1  sector number (u64, 0-based)
+a2  pointer to 512-byte source buffer
+→   0 on success; ENOSYS if no block device</code></pre>
+
+            <h2>Planned syscalls</h2>
+            <pre><code>Nr  Name          Purpose
+──  ────────────  ─────────────────────────────────
+22  SYS_OPEN      Open a file on the RFS filesystem
+23  SYS_READ      Read from an open file descriptor
+24  SYS_WRITE     Write to an open file descriptor
+25  SYS_CLOSE     Close a file descriptor
+26  SYS_STAT      Query file metadata
+27  SYS_READDIR   Read directory entries</code></pre>
+
+            <hr />
+
+            <!-- ── Capabilities ── -->
+            <h1 id="docs-caps">Capability system</h1>
+            <p>
+              A capability is an unforgeable token granting a task the right to
+              perform a specific operation on a specific resource. User code
+              holds an opaque <code>CapHandle(u64)</code> and passes it to a
+              syscall. The kernel looks up the handle in the task's
+              <code>CapabilityTable</code> and checks the rights field.
+            </p>
+
+            <h2>Capability kinds</h2>
+            <pre><code>Kind      Resource            Grants access to
+────────  ──────────────────  ─────────────────────────────────────────
+Memory    Physical memory     SYS_MMAP: map arbitrary physical frames
+Ipc       One IPC endpoint    SYS_IPC_SEND / SYS_IPC_RECV
+Rollback  Kernel checkpoint   SYS_ROLLBACK</code></pre>
+
+            <h2>Rights bitfield</h2>
+            <pre><code>Bit  Constant    Meaning
+───  ──────────  ────────────────────────────────────────────
+0    READ  = 1   Can read / recv from the resource
+1    WRITE = 2   Can write / send to the resource
+2    GRANT = 4   Can grant a derived cap to another task
+3    REVOKE= 8   Can revoke a cap from self or descendants
+     ALL   = 15  All four rights combined</code></pre>
+            <p>
+              Rights can only be reduced in transit: grant result =
+              <code>source_rights &amp; mask</code>. No escalation path.
+            </p>
+
+            <h2>CapabilityTable</h2>
+            <p>
+              Each task has one <code>CapabilityTable</code>: a
+              <code>Vec&lt;Option&lt;Capability&gt;&gt;</code> indexed by
+              <code>CapHandle</code>. A <code>None</code> slot = revoked or
+              never allocated. Handle numbers are assigned sequentially and
+              never reused within a table, preventing use-after-revoke races.
+            </p>
+
+            <h2>Operations</h2>
+            <pre><code>cap_grant(from_table, handle, target_task_id, to_table, rights_mask)
+  1. Lookup handle in from_table → ENOCAP if absent
+  2. Check GRANT right → ENOPERM if missing
+  3. new rights = source.rights &amp; rights_mask
+  4. Append Capability to to_table with reduced rights
+  5. Return new handle index
+
+cap_revoke(table, handle)
+  Slot → None. Requires REVOKE right.
+
+cap_cascade_revoke(table, handle, resolver)
+  Revokes from holder + all derived holders (linear walk over live tasks).</code></pre>
+
+            <h2>Initial capabilities at boot</h2>
+            <pre><code>Handle  Kind      Rights  Description
+──────  ────────  ──────  ──────────────────────────────────────────────
+0       Memory    ALL     All free physical frames at boot
+1       Rollback  ALL     Access to kernel rollback mechanism
+2       Ipc       ALL     Boot IPC endpoint with pre-queued BootInfo</code></pre>
+
+            <h2>Security model notes</h2>
+            <p>
+              <strong style="color: rgba(255, 255, 255, 0.65)"
+                >No ambient authority.</strong
+              >
+              A task with no capabilities cannot allocate memory, communicate,
+              or spawn children.
+            </p>
+            <p>
+              <strong style="color: rgba(255, 255, 255, 0.65)"
+                >Handle opacity.</strong
+              >
+              Sending a <code>CapHandle</code> value over IPC grants nothing;
+              only <code>SYS_CAP_GRANT</code> transfers the actual capability.
+            </p>
+            <p>
+              <strong style="color: rgba(255, 255, 255, 0.65)"
+                >Planned: range-restricted Memory caps.</strong
+              >
+              Currently grants access to all physical memory. A planned
+              improvement adds a <code>[base, limit)</code> range field enforced
+              in <code>SYS_MMAP</code>.
+            </p>
+
+            <hr />
+
+            <!-- ── IPC ── -->
+            <h1 id="docs-ipc">IPC</h1>
+            <p>
+              Each IPC endpoint is a 4 KiB physical page shared between the
+              kernel and any tasks holding a capability to it. All messaging is
+              in-kernel copy; user data is copied from sender's address space
+              into the ring, then from the ring into the receiver's address
+              space. No shared memory between tasks at the IPC layer.
+            </p>
+
+            <h2>Ring buffer layout</h2>
+            <pre><code>Offset  Size  Field
+──────  ────  ──────────────────────────────────────────────
+0       4     head (u32)  index of next slot to consume
+4       4     tail (u32)  index of next slot to produce
+8       4088  data        circular buffer of 64-byte message slots
+
+MSG_SIZE      = 64 bytes
+RING_CAPACITY = 63 messages   (floor(4088 / 64))
+
+empty: head == tail
+full:  (tail + 1) % RING_CAPACITY == head</code></pre>
+
+            <h2>Kernel mapping</h2>
+            <p>
+              Each endpoint is mapped at
+              <code>0xFFFF_D000_0000_0000 + endpoint_index * 4096</code> for
+              kernel access. User tasks access only via
+              <code>SYS_IPC_SEND</code> / <code>SYS_IPC_RECV</code>.
+            </p>
+
+            <h2>Send semantics</h2>
+            <pre><code>1. Validate IPC cap + WRITE right.
+2. Validate user pointer [msg_ptr, msg_ptr+msg_len) in user space.
+3. If ring full → block task, yield. Resume when receiver drains.
+4. Copy ≤MSG_SIZE bytes into data[tail * MSG_SIZE], advance tail.
+5. If a task is blocked waiting to recv → wake it.</code></pre>
+
+            <h2>Recv semantics</h2>
+            <pre><code>1. Validate IPC cap + READ right.
+2. If ring empty → block task, yield. Resume when sender writes.
+3. Copy min(buf_len, MSG_SIZE) bytes from data[head * MSG_SIZE], advance head.
+4. Return bytes copied.
+5. If a task is blocked waiting to send → wake it.</code></pre>
+
+            <h2>BootInfo message (64 bytes)</h2>
+            <pre><code>Offset  Size  Field
+──────  ────  ──────────────────────────────────────────────────────
+0       8     signature   0xB007_1000_B007_1000
+8       8     mem_bytes   free_frames × 4096
+16      8     free_frames PMM free frame count at boot
+24      12    vendor      CPUID leaf 0 vendor (EBX||EDX||ECX, 12 bytes)
+36      28    _pad        zeroed</code></pre>
+
+            <h2>Limitations</h2>
+            <p>
+              Fixed 64-byte messages. Large data: share a Memory cap, exchange
+              addresses over IPC. No multicast, no priority, no timeout.
+            </p>
+
+            <hr />
+
+            <!-- ── ELF ── -->
+            <h1 id="docs-elf">ELF loader</h1>
+            <p>
+              Minimal ELF64 loader in <code>src/elf.rs</code>. Statically
+              linked, position-dependent (<code>ET_EXEC</code>) x86_64 only. No
+              shared libraries, dynamic linking, or relocations.
+            </p>
+
+            <h2>exec() steps</h2>
+            <pre><code>pub fn exec(elf_data: &amp;[u8], caps: &amp;[CapHandle]) → TaskId
+
+1. Validate ELF header: magic \x7FELF, ELFCLASS64, ELFDATA2LSB,
+   ET_EXEC, EM_X86_64. Panics on mismatch.
+
+2. For each PT_LOAD segment:
+   a. Allocate frames covering [p_vaddr, p_vaddr + p_memsz).
+   b. Map frames at p_vaddr with flags from p_flags:
+        PF_X(1) → no NX  |  PF_W(2) → Write  |  PF_R(4) → Present
+        Always set User bit (ring-3 accessible).
+   c. Copy p_filesz bytes from ELF at p_offset.
+   d. Zero-fill p_memsz - p_filesz bytes (BSS padding).
+
+3. alloc_user_stack → next slot from NEXT_STACK_SLOT:
+     slot_base = 0x7FFF_0000_0000 + slot × (2050 × 4096)
+     [0]       guard (unmapped)
+     [1..2048] usable stack, P+W+U+NX
+     [2049]    gap (unmapped)
+
+4. Write initial SysV ABI frame below stack top:
+     argc    (u64) = 0
+     argv[0] (u64) = 0  (NULL)
+     envp[0] (u64) = 0  (NULL)
+   Align RSP down to 16 bytes.
+
+5. Clone caps slice into new task's CapabilityTable:
+     handle 0 = caps[0], handle 1 = caps[1], ...
+
+6. Spawn kernel task running exec_trampoline(entry, stack_top).
+   Trampoline calls enter_userspace → iretq to ring 3:
+     CS/SS = user segments, RIP = e_entry, RSP = stack_top, IF set.</code></pre>
+
+            <h2>Embedded ELF blobs</h2>
+            <pre><code>SMOKE_ELF         Userspace smoke test
+LYTHD_ELF         lythd init process (also loaded from phys 0x400000)
+IPC_SENDER_ELF    Integration test IPC sender
+IPC_RECEIVER_ELF  Integration test IPC receiver</code></pre>
+
+            <h2>Known limitations</h2>
+            <p>
+              No ASLR. No relocation support. No dynamic linker. No per-process
+              PML4; all tasks share the kernel mapping (planned future step).
+              Segment overlap not checked.
+            </p>
+
+            <hr />
+
+            <!-- ── lythd ── -->
+            <h1 id="docs-lythd">lythd: init process</h1>
+            <p>
+              lythd is the first userspace process and parent of all other
+              processes. The kernel starts exactly one lythd instance at boot.
+              If lythd exits, the kernel panics. lythd is part of the OROS
+              userspace repository; the compiled ELF is embedded in the kernel
+              image for bootstrap.
+            </p>
+
+            <h2>Boot protocol</h2>
+            <pre><code>Step 1: kmain calls exec(LYTHD_ELF, &amp;[mem_cap, rollback_cap, boot_cap])
+
+  Handle 0  Memory    ALL  All free physical frames at boot
+  Handle 1  Rollback  ALL  Kernel rollback / checkpoint access
+  Handle 2  Ipc       ALL  Boot IPC endpoint with one pre-queued BootInfo
+
+Step 2: lythd's first syscall:
+  SYS_IPC_RECV(handle=2, buf, 64)   ← consume BootInfo
+
+Step 3: lythd calls SYS_EXEC to launch lythdist (service manager),
+  passing appropriate cap subset via caps array.
+
+Step 4: lythd enters service loop:
+  - Listens on IPC endpoint for service registration requests
+  - Reaps dead tasks (no waitpid yet)
+  - Holds Rollback cap; may invoke SYS_ROLLBACK on request</code></pre>
+
+            <h2>BootInfo message (64 bytes)</h2>
+            <pre><code>Offset  Size  Field        Description
+──────  ────  ───────────  ────────────────────────────────────────────────
+0       8     signature    0xB007_1000_B007_1000 (sanity check)
+8       8     mem_bytes    free_frames × 4096 (usable RAM in bytes)
+16      8     free_frames  PMM free frame count at the moment of boot
+24      12    vendor       CPUID leaf 0: EBX||EDX||ECX (e.g. "GenuineIntel")
+36      28    _pad         zeroed</code></pre>
+
+            <h2>Capability delegation policy</h2>
+            <p>
+              <strong style="color: rgba(255, 255, 255, 0.65)">Memory.</strong>
+              lythd should derive restricted Memory caps for each child (range
+              restriction is a planned kernel feature; currently children
+              receive a copy of the full Memory cap).
+            </p>
+            <p>
+              <strong style="color: rgba(255, 255, 255, 0.65)"
+                >Rollback.</strong
+              >
+              Held by lythd only; should not be delegated to untrusted code.
+            </p>
+            <p>
+              <strong style="color: rgba(255, 255, 255, 0.65)">IPC.</strong>
+              lythd creates new endpoints via <code>SYS_IPC_CREATE</code> for
+              each service and passes the capability to appropriate parties.
+            </p>
+
+            <h2>OROS relationship</h2>
+            <p>
+              The kernel specifies only the binary protocol: capabilities at
+              fixed handles, BootInfo layout, syscall ABI. lythd's internal
+              structure (lythdist, lysh, lythos-std) is an OROS concern.
+            </p>
+
+            <hr />
+
+            <!-- ── Drivers ── -->
+            <h1 id="drv-ioapic">IOAPIC (<code>src/ioapic.rs</code>)</h1>
+            <p>
+              Routes hardware interrupts from devices to local APICs. Replaces
+              legacy 8259 PIC (remapped to vectors 32–47, then masked) with
+              IOAPIC-based routing for VirtIO PCI interrupts.
+            </p>
+
+            <h2>MMIO interface</h2>
+            <pre><code>Offset   Register  Role
+──────   ────────  ──────────────────────────────────────
++0x00    IOREGSEL  Write index of register to access
++0x10    IOWIN     Read/write the selected register
+
+Index          Name      Contents
+─────────────  ────────  ─────────────────────────────────
+0x00           IOAPICID  IOAPIC ID in bits [27:24]
+0x01           IOAPICVER Max redirection entry in [23:16]
+0x10 + gsi*2   RTE_LO    Low 32 bits of redirection entry
+0x11 + gsi*2   RTE_HI    High 32 bits (dest APIC ID [63:56])</code></pre>
+
+            <h2>RTE format (64 bits per GSI)</h2>
+            <pre><code>Bits   Field            Description
+─────  ───────────────  ─────────────────────────────────────────
+7:0    Vector           IDT vector the interrupt delivers to
+10:8   Delivery mode    000 = Fixed
+11     Dest mode        0 = Physical, 1 = Logical
+12     Delivery status  R/O; 1 = pending
+13     Pin polarity     0 = Active high
+14     Remote IRR       R/O; level-triggered state
+15     Trigger mode     0 = Edge, 1 = Level
+16     Mask             1 = Masked (suppressed)
+63:56  Destination      Target APIC ID</code></pre>
+
+            <h2>Init sequence + API</h2>
+            <pre><code>init()
+  1. Map 0xFEC0_0000 → 0xFFFF_8000_FEC0_0000, write-through no-cache.
+  2. Read IOAPICVER → MAX_ENTRY.
+  3. Write all RTEs with IRQ_MASKED = 1 &lt;&lt; 16.
+
+map_irq(gsi, vector, flags)  Program one RTE; deliver to BSP (APIC ID 0)
+mask_irq(gsi)                Set Mask bit
+unmask_irq(gsi)              Clear Mask bit
+entry_count()                Number of supported GSIs
+set_phys_base(phys)          Override IOAPIC base (for ACPI MADT)</code></pre>
+
+            <hr />
+            <h1 id="drv-pci">PCI scanner (<code>src/pci.rs</code>)</h1>
+            <p>
+              x86 Configuration Mechanism 1: write address to port
+              <code>0xCF8</code>, read/write data at <code>0xCFC</code> in
+              32-bit chunks.
+            </p>
+            <pre><code>CONFIG_ADDRESS format:
+  Bit 31      Enable (must be 1)
+  Bits 23:16  Bus number
+  Bits 15:11  Device number (0–31)
+  Bits 10:8   Function number (0–7)
+  Bits 7:2    Register offset (dword-aligned)
+  Bits 1:0    Always 0
+
+find_device(vendor_id, device_id)
+  Scans bus 0, devices 0–31, function 0 only.
+  Returns PciDevice { bus, dev, vendor, device, io_bar0, irq_line }.
+  Enables bus mastering (Command register bit 2) for DMA.</code></pre>
+
+            <hr />
+            <h1 id="drv-virtio">
+              VirtIO block device (<code>src/virtio_blk.rs</code>)
+            </h1>
+            <p>
+              VirtIO 0.9 (legacy) spec via PCI I/O BAR. PCI IDs: vendor
+              <code>0x1AF4</code>, device <code>0x1001</code>. All I/O
+              synchronous (polled). No interrupt-driven path yet.
+            </p>
+
+            <h2>Port register map (offsets from BAR0)</h2>
+            <pre><code>Offset  Size  Name              Direction
+──────  ────  ────────────────  ─────────
+0x00    4     DEVICE_FEATURES   R
+0x04    4     GUEST_FEATURES    W
+0x08    4     QUEUE_PFN         R/W
+0x0C    2     QUEUE_NUM         R
+0x0E    2     QUEUE_SEL         W
+0x10    2     QUEUE_NOTIFY      W
+0x12    1     DEVICE_STATUS     R/W
+0x13    1     ISR_STATUS        R/W (write-to-clear)
+0x14    4     BLK_CAPACITY_LO   R
+0x18    4     BLK_CAPACITY_HI   R</code></pre>
+
+            <h2>Init sequence</h2>
+            <pre><code>DEVICE_STATUS = 0                               reset
+DEVICE_STATUS = ACKNOWLEDGE (1)
+DEVICE_STATUS = ACKNOWLEDGE | DRIVER (3)        negotiate features (none needed)
+DEVICE_STATUS = ACKNOWLEDGE | DRIVER | DRIVER_OK (7)</code></pre>
+
+            <h2>Virtqueue layout (QUEUE_SIZE_MAX = 128, QUEUE_PAGES = 2)</h2>
+            <pre><code>Page 0:
+  [0x000..0x800]  128 × 16-byte descriptors
+  [0x800..0xA02]  Available ring: flags(u16) + idx(u16) + ring[128](u16)
+Page 1:
+  [0x000..0x408]  Used ring: flags(u16) + idx(u16) + ring[128](used_elem)
+                  used_elem = id(u32) + len(u32)
+QUEUE_PFN = vq_phys &gt;&gt; 12</code></pre>
+
+            <h2>3-descriptor I/O chain</h2>
+            <pre><code>Descriptor 0  request header (16 bytes, device-readable)
+  type (u32): 0=read, 1=write
+  reserved (u32): 0
+  sector (u64): target sector
+
+Descriptor 1  data buffer (512 bytes)
+  Read:  VRING_DESC_F_WRITE (device-writable)
+  Write: device-readable
+
+Descriptor 2  status byte (1 byte, device-writable)
+  0=success  1=error  2=unsupported
+
+Submit flow:
+  1. Fill descriptor chain.
+  2. atomic::fence(SeqCst).
+  3. Write 0 to QUEUE_NOTIFY (kick).
+  4. Spin on used_ring.idx until it advances.
+  5. Read + discard ISR_STATUS (clears spurious interrupt flag).</code></pre>
+
+            <hr />
+
+            <!-- ── RFS ── -->
+            <h1 id="rfs-overview">RFS: Raptor File System</h1>
+            <p>
+              Native filesystem for Lythos. Custom extent-based design for
+              simplicity and correctness. No checksums (by design). Supports
+              Unix permissions, symbolic links, 64-bit file sizes, and sparse
+              files.
+            </p>
+
+            <h2 id="rfs-layout">On-disk layout</h2>
+            <pre><code>Block  Contents
+─────  ─────────────────────────
+0      Superblock
+1      Block bitmap
+2–33   Inode table (32 blocks)
+34+    Data blocks
+
+Block size: 4096 bytes (8 × 512-byte sectors). All integers little-endian.</code></pre>
+
+            <h3>Superblock (block 0, first 64 bytes)</h3>
+            <pre><code>Offset  Size  Field         Value
+──────  ────  ────────────  ──────────────────────
+0       8     magic         RFS_V1\0\0
+8       4     version       1
+12      4     block_size    4096
+16      4     total_blocks  image size / 4096
+20      4     free_blocks   at format time
+24      4     inode_count   1024
+28      4     root_inode    0
+32      4     bitmap_block  1
+36      4     inode_start   2
+40      4     inode_blocks  32
+44      4     data_start    34
+48      16    _pad          zeroed</code></pre>
+
+            <h3>Block bitmap (block 1)</h3>
+            <p>
+              One bit per block. Bit 0 of byte 0 = block 0. Set (1) = used.
+              Blocks 0–33 always set. 4096 × 8 = 32768 blocks addressable = 128
+              MiB max.
+            </p>
+
+            <h3>Inode table (blocks 2–33)</h3>
+            <p>
+              32 blocks × 32 inodes per block = 1024 inodes. Each inode 128
+              bytes. Inode 0 = root directory.
+            </p>
+
+            <hr />
+            <h2 id="rfs-inode">Inode format (128 bytes)</h2>
+            <pre><code>Offset  Size  Field         Description
+──────  ────  ────────────  ──────────────────────────────────────
+0       4     flags         Inode status and type flags
+4       2     mode          Unix permission bits (low 12 bits)
+6       2     _pad0         Reserved, zeroed
+8       4     uid           Owner user ID
+12      4     gid           Owner group ID
+16      4     nlink         Hard link count
+20      8     size          File size in bytes (64-bit)
+28      8     blocks        Number of 4096-byte blocks allocated
+36      8     mtime         Modification time (Unix seconds, 64-bit)
+44      8     ctime         Change time (Unix seconds, 64-bit)
+52      4     ovfl_block    First overflow extent block (0 if none)
+56      2     extent_count  Total number of extents
+58      2     _pad1         Reserved, zeroed
+60      64    extents[4]    Four inline extents (16 bytes each)
+124     4     _pad2         Reserved, zeroed
+
+Flags:
+  Bit 0  INODE_USED     Allocated
+  Bit 1  INODE_DIR      Directory
+  Bit 2  INODE_SYMLINK  Symbolic link
+  Bit 3  INODE_FAST_SYM Inline symlink target (≤64 bytes, stored in extents[])</code></pre>
+
+            <hr />
+            <h2 id="rfs-extent">Extent format (16 bytes)</h2>
+            <pre><code>Offset  Size  Field     Description
+──────  ────  ────────  ─────────────────────────────────────────────
+0       4     logical   First logical block in this extent
+4       4     physical  First physical block number
+8       4     count     Number of contiguous blocks
+12      4     flags     Reserved, zeroed
+
+Sparse: logical ranges with no covering extent → implicit zeros.
+Lookup: scan extents for E where E.logical ≤ L &lt; E.logical + E.count.
+        physical = E.physical + (L − E.logical)</code></pre>
+
+            <hr />
+            <h2 id="rfs-overflow">Overflow extent blocks</h2>
+            <pre><code>Offset  Size  Field        Description
+──────  ────  ───────────  ───────────────────────────
+0       4     next         Next overflow block (0=end)
+4       4     used         Extents stored in this block
+8       8     _pad         Reserved, zeroed
+16      4080  extents[255] 255 × 16-byte extents
+
+4 inline + 255 per overflow block = 259 extents with one overflow.
+Chain grows arbitrarily.</code></pre>
+
+            <hr />
+            <h2 id="rfs-dir">Directory entry format</h2>
+            <pre><code>Offset  Size  Field      Description
+──────  ────  ─────────  ────────────────────────────────────────
+0       4     inode      Target inode number (u32)
+4       2     rec_len    Total byte length of entry (u16)
+6       1     name_len   Name length 1–255 (u8)
+7       1     file_type  1=regular 2=directory 3=symlink (u8)
+8       N     name       UTF-8, not null-terminated
+8+N     P     padding    Zeroes to align rec_len to 4 bytes
+
+- Last entry in a block: rec_len extended to fill remaining space.
+- Entry with inode=0: deleted (hole). Scanning must check.
+- Every directory has . and .. as its first two entries.</code></pre>
+
+            <hr />
+            <h2 id="rfs-symlink">Fast symlinks</h2>
+            <p>
+              Symlinks with target ≤64 bytes are stored inline in
+              <code>inode.extents[]</code> (bytes 60–123).
+              <code>INODE_FAST_SYM</code> flag distinguishes inline from
+              block-stored. Inline: read <code>inode.size</code> bytes from
+              <code>inode.extents</code> as raw bytes. Block-stored: normal
+              extent lookup.
+            </p>
+
+            <hr />
+            <h2 id="rfs-mkrfs">mkrfs tool (<code>tools/mkrfs/</code>)</h2>
+            <p>Host-side formatting tool for creating RFS disk images.</p>
+            <pre><code>cd tools/mkrfs && make          # uses rustc directly (avoids kernel build-std)
+
+./mkrfs &lt;image&gt; &lt;size[K|M|G]&gt; [&lt;src-dir&gt;]
+
+./mkrfs disk.img 64M            # empty 64 MiB image
+./mkrfs disk.img 64M rootfs/    # populate from rootfs/
+
+Output:
+  mkrfs: creating disk.img (67108864 bytes, 16384 blocks)
+  mkrfs: done. 16384 total blocks, 16315 free, 42 inodes used.
+
+Limits:
+  Max image size:  128 MiB (32768-block bitmap)
+  Max inodes:      1024 (fixed inode table size)
+  No hardlinks     (each file gets a fresh inode)
+  Timestamps from  host filesystem (stat.st_mtime)</code></pre>
+
+            <hr />
+            <h2 id="rfs-driver">
+              Kernel RFS driver (planned: <code>src/rfs.rs</code>)
+            </h2>
+            <pre><code>1. Mount: read and validate the superblock.
+2. Block I/O: wrap virtio_blk read/write into block-granular interface
+   (8 sectors per block).
+3. Inode read: compute block and offset from inode number.
+4. Extent traversal: scan inline then overflow chain to resolve
+   logical block → physical block.
+5. File read: walk extents, copy data to caller buffer, fill sparse
+   gaps with zeroes.
+6. File write: allocate blocks, write data, update extents and inode.
+7. Directory scan: iterate variable-length entries in directory blocks.
+8. Path resolution: walk /-delimited components, resolve symlinks.
+9. VFS interface: open, read, write, close, stat, readdir.</code></pre>
+          </article>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════ DOWNLOADS ══════════════ -->
+    <!-- ══════════════ FAQ ══════════════ -->
+    <div id="faq" class="page">
+      <div class="content-wrap">
+        <p class="page-eyebrow">FAQ</p>
+        <h1>Frequently asked questions</h1>
+
+        <div class="faq-list">
+          <div class="faq-item">
+            <button class="faq-q" aria-expanded="false">
+              Why a microkernel?
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+            <div class="faq-a">
+              Monolithic kernels run drivers and filesystems in ring 0. A bug in
+              a driver is a kernel bug: it can corrupt memory, escalate
+              privileges, or crash the whole system. Lythos moves these
+              components to userspace, where capability handles gate every
+              resource access. A misbehaving driver can only damage what it was
+              explicitly granted, and can be restarted without a reboot.
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-q" aria-expanded="false">
+              What is lythd?
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+            <div class="faq-a">
+              <code style="font-family: monospace; font-size: 0.88em"
+                >lythd</code
+              >
+              is the first userspace process, analogous to PID 1 on Unix. The
+              kernel starts it at boot with three capabilities (Memory,
+              Rollback, and a boot IPC endpoint). It reads a
+              <code style="font-family: monospace; font-size: 0.88em"
+                >BootInfo</code
+              >
+              message, then spawns
+              <code style="font-family: monospace; font-size: 0.88em"
+                >lythdist</code
+              >
+              (the service manager) and enters a service loop. If lythd exits,
+              the kernel panics; there is no recovery from a dead init.
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-q" aria-expanded="false">
+              Is there Linux compatibility?
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+            <div class="faq-a">
+              No, and intentionally so. Lythos has its own minimal syscall ABI
+              (11 syscalls at present). Linux compatibility is an optional OROS
+              userspace concern (an OROS server could implement a Linux syscall
+              translation layer), but it is not in the kernel and is not a
+              current goal. The Lythos ABI is designed to be clean and correct,
+              not compatible.
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-q" aria-expanded="false">
+              What's the license?
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+            <div class="faq-a">
+              Lythos is developed by Pureshade Labs, LLC and is currently
+              source-available for inspection and research. A formal open-source
+              license will be announced alongside a stable release. Check the
+              GitHub repository for the current license file.
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-q" aria-expanded="false">
+              How can I contribute?
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+            <div class="faq-a">
+              Open an issue or pull request on the GitHub repository. Areas most
+              welcoming of contributions: documentation, OROS userspace tooling,
+              and test coverage. For kernel changes, open an issue first to
+              discuss the design; the kernel ABI is intentionally stable and
+              changes require careful review.
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-q" aria-expanded="false">
+              What hardware does it run on?
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+            <div class="faq-a">
+              Lythos targets x86-64 (AMD64). It is tested under QEMU with a
+              VirtIO block device, LAPIC, and IOAPIC. It should boot on real
+              x86-64 hardware via any Multiboot1 or Multiboot2 compliant
+              bootloader (e.g. GRUB), but real-hardware testing is ongoing.
+              Multi-processor (SMP) support is tracked in TODO.md and not yet
+              implemented.
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-q" aria-expanded="false">
+              What does "Lythos" mean?
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+            <div class="faq-a">
+              Lythos is also the name of the broader protocol suite that the
+              kernel anchors. The word is coined, a blend chosen for its feel
+              rather than a direct translation. Internally it evokes
+              <em>lithos</em> (stone, foundation) and a sense of deliberate,
+              minimal construction. The kernel was previously codenamed CASK
+              during early development.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="downloads" class="page">
+      <div class="content-wrap">
+        <div class="empty-state">
+          <div class="empty-icon">
+            <svg
+              width="22"
+              height="22"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+            >
+              <path
+                d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"
+              />
+            </svg>
+          </div>
+          <h2>Downloads coming soon</h2>
+          <p>
+            Working on the first public builds of Lythos. Star the project on
+            GitHub to be notified when they're ready.
+          </p>
+          <a
+            href="https://github.com/ArcoNightshade/lythos"
+            target="_blank"
+            rel="noopener"
+            class="btn btn-lime"
+            >Star on GitHub</a
+          >
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════ CONTACT ══════════════ -->
+    <div id="contact" class="page">
+      <div class="content-wrap">
+        <div class="page-eyebrow">Contact</div>
+        <h1>Get in touch</h1>
+        <p
+          style="
+            max-width: 520px;
+            color: var(--text-muted);
+            font-weight: 300;
+            font-size: 0.95rem;
+            line-height: 1.75;
+          "
+        >
+          Questions, contributions, or just want to talk operating system
+          design? We're always happy to connect with people who care about
+          systems software.
+        </p>
+        <a href="mailto:lyon@lyonos.dev" class="contact-pill">
+          <div class="contact-pill-label">Email</div>
+          <div class="contact-pill-value">lyon@lyonos.dev</div>
+        </a>
+        <div style="display: flex; gap: 0.75rem; margin-top: 0.5rem">
+          <a
+            href="https://github.com/ArcoNightshade/lythos"
+            target="_blank"
+            rel="noopener"
+            class="btn btn-outline"
+          >
+            View on GitHub
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Footer ── -->
+    <footer>
+      <div class="footer-left">
+        <span class="footer-copy">© 2026 Pureshade Labs, LLC</span>
+        <div class="footer-links">
+          <a onclick="navigate('#home')">Home</a>
+          <a onclick="navigate('#docs')">Docs</a>
+          <a
+            href="https://github.com/ArcoNightshade/lythos"
+            target="_blank"
+            rel="noopener"
+            >GitHub</a
+          >
+          <a onclick="navigate('#contact')">Contact</a>
+        </div>
+      </div>
+      <div class="footer-right">Built in Rust · x86-64</div>
+    </footer>
+
+    <script>
+      /* ── Navigation ── */
+      const allPages = document.querySelectorAll(".page");
+      const navAnchors = document.querySelectorAll("nav a, .mobile-nav > a");
+
+      function navigate(hash) {
+        const id = hash.replace("#", "");
+        allPages.forEach((p) => p.classList.remove("active"));
+        navAnchors.forEach((a) => a.classList.remove("active"));
+
+        const target =
+          document.getElementById(id) || document.getElementById("home");
+        target.classList.add("active");
+
+        navAnchors.forEach((a) => {
+          if (
+            a.getAttribute("onclick") &&
+            a.getAttribute("onclick").includes(`navigate('${hash}')`)
+          )
+            a.classList.add("active");
+        });
+
+        window.scrollTo(0, 0);
+      }
+
+      window.navigate = navigate;
+
+      /* ── Docs sidebar: scroll-only, no SPA hash conflict ── */
+      document.querySelectorAll(".docs-nav a").forEach((link) => {
+        link.addEventListener("click", (e) => {
+          e.preventDefault();
+          const targetId = link.getAttribute("href").replace("#", "");
+          const target = document.getElementById(targetId);
+          if (target)
+            target.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      });
+
+      /* ── Theme: auto-detect system preference ── */
+      const mq = window.matchMedia("(prefers-color-scheme: light)");
+      if (mq.matches) document.body.classList.add("light");
+      mq.addEventListener("change", (e) => {
+        document.body.classList.toggle("light", e.matches);
+      });
+
+      /* ── Hamburger menu ── */
+      const hamburger = document.getElementById("hamburger");
+      const mobileNav = document.getElementById("mobile-nav");
+
+      function closeMobileNav() {
+        hamburger.classList.remove("open");
+        mobileNav.classList.remove("open");
+        hamburger.setAttribute("aria-expanded", "false");
+        mobileNav.setAttribute("aria-hidden", "true");
+      }
+      window.closeMobileNav = closeMobileNav;
+
+      hamburger.addEventListener("click", () => {
+        const isOpen = mobileNav.classList.contains("open");
+        if (isOpen) {
+          closeMobileNav();
+        } else {
+          hamburger.classList.add("open");
+          mobileNav.classList.add("open");
+          hamburger.setAttribute("aria-expanded", "true");
+          mobileNav.setAttribute("aria-hidden", "false");
+        }
+      });
+
+      document.addEventListener("click", (e) => {
+        if (!hamburger.contains(e.target) && !mobileNav.contains(e.target)) {
+          closeMobileNav();
+        }
+      });
+
+      /* ── FAQ accordion ── */
+      document.querySelectorAll(".faq-q").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const item = btn.closest(".faq-item");
+          const isOpen = item.classList.contains("open");
+          // close all
+          document.querySelectorAll(".faq-item.open").forEach((el) => {
+            el.classList.remove("open");
+            el.querySelector(".faq-q").setAttribute("aria-expanded", "false");
+          });
+          if (!isOpen) {
+            item.classList.add("open");
+            btn.setAttribute("aria-expanded", "true");
+          }
+        });
+      });
+
+      /* ── Particle sphere ── */
+      (function () {
+        const canvas = document.getElementById("particle-canvas");
+        if (!canvas) return;
+
+        const ctx = canvas.getContext("2d");
+        let W, H, cx, cy, radius;
+        let particles = [];
+        let raf;
+
+        const NUM = 780;
+        const GOLD_RATIO = 1.6180339887;
+        const TAU = Math.PI * 2;
+        const ROT_SPEED = 0.08;
+
+        function resize() {
+          W = canvas.width = canvas.offsetWidth;
+          H = canvas.height = canvas.offsetHeight;
+          cx = W / 2;
+          cy = H / 2;
+          radius = Math.min(W, H) * 0.44; // larger sphere
+          build();
+        }
+
+        function build() {
+          particles = [];
+          for (let i = 0; i < NUM; i++) {
+            const t = i / NUM;
+            const inclination = Math.acos(1 - 2 * t);
+            const azimuth = TAU * GOLD_RATIO * i;
+            const sinI = Math.sin(inclination);
+
+            const bright = Math.random() < 0.08;
+            const lime = Math.random() < 0.04; // lime accent dots
+            const size = bright
+              ? 1.8 + Math.random() * 1.6
+              : lime
+                ? 1.2 + Math.random() * 0.8
+                : 0.5 + Math.random() * 1.0;
+            const speed = 0.00015 + Math.random() * 0.00015;
+            const phase = Math.random() * TAU;
+
+            particles.push({
+              x0: sinI * Math.cos(azimuth),
+              y0: sinI * Math.sin(azimuth),
+              z0: Math.cos(inclination),
+              size,
+              bright,
+              lime,
+              speed,
+              phase,
+            });
+          }
+        }
+
+        function draw(ts) {
+          ctx.clearRect(0, 0, W, H);
+
+          // outer glow halo
+          const halo = ctx.createRadialGradient(
+            cx,
+            cy,
+            radius * 0.3,
+            cx,
+            cy,
+            radius * 1.5,
+          );
+          halo.addColorStop(0, "rgba(80, 40, 180, 0.10)");
+          halo.addColorStop(0.5, "rgba(40, 20,  80, 0.08)");
+          halo.addColorStop(1, "rgba(0,   0,   0, 0)");
+          ctx.fillStyle = halo;
+          ctx.beginPath();
+          ctx.arc(cx, cy, radius * 1.5, 0, TAU);
+          ctx.fill();
+
+          const t = ts * 0.001;
+          const baseAngle = t * ROT_SPEED;
+
+          // sort back-to-front
+          const sorted = particles.slice().sort((a, b) => {
+            const za = a.z0 * Math.cos(baseAngle) - a.x0 * Math.sin(baseAngle);
+            const zb = b.z0 * Math.cos(baseAngle) - b.x0 * Math.sin(baseAngle);
+            return za - zb;
+          });
+
+          for (const p of sorted) {
+            const angle = baseAngle + p.phase * 0.02;
+            const cosA = Math.cos(angle);
+            const sinA = Math.sin(angle);
+
+            const rx = p.x0 * cosA + p.z0 * sinA;
+            const ry = p.y0;
+            const rz = -p.x0 * sinA + p.z0 * cosA;
+
+            const depth = (rz + 1) / 2;
+            const scale = 0.45 + depth * 0.55;
+            const screenX = cx + rx * radius * scale;
+            const screenY = cy + ry * radius * scale;
+            const opacity = Math.pow(depth, 1.6);
+            const sz = p.size * scale;
+
+            if (p.bright) {
+              // gold glow
+              const g = ctx.createRadialGradient(
+                screenX,
+                screenY,
+                0,
+                screenX,
+                screenY,
+                sz * 6,
+              );
+              g.addColorStop(0, `rgba(220,240,100,${opacity * 0.9})`);
+              g.addColorStop(1, "rgba(0,0,0,0)");
+              ctx.fillStyle = g;
+              ctx.beginPath();
+              ctx.arc(screenX, screenY, sz * 6, 0, TAU);
+              ctx.fill();
+              ctx.fillStyle = `rgba(235,255,140,${opacity})`;
+            } else if (p.lime) {
+              // lime accent
+              const g = ctx.createRadialGradient(
+                screenX,
+                screenY,
+                0,
+                screenX,
+                screenY,
+                sz * 4,
+              );
+              g.addColorStop(0, `rgba(201,241,53,${opacity * 0.7})`);
+              g.addColorStop(1, "rgba(0,0,0,0)");
+              ctx.fillStyle = g;
+              ctx.beginPath();
+              ctx.arc(screenX, screenY, sz * 4, 0, TAU);
+              ctx.fill();
+              ctx.fillStyle = `rgba(215,255,80,${opacity})`;
+            } else {
+              const v = Math.floor(160 + depth * 95);
+              ctx.fillStyle = `rgba(${v},${v},${v},${opacity * 0.6})`;
+            }
+
+            ctx.beginPath();
+            ctx.arc(screenX, screenY, sz, 0, TAU);
+            ctx.fill();
+          }
+
+          raf = requestAnimationFrame(draw);
+        }
+
+        window.addEventListener("resize", () => {
+          cancelAnimationFrame(raf);
+          resize();
+          raf = requestAnimationFrame(draw);
+        });
+
+        resize();
+        raf = requestAnimationFrame(draw);
+      })();
+    </script>
+  </body>
+</html>

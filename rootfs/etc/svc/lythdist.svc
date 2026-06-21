@@ -1,0 +1,7 @@
+name=lythdist
+path=/bin/lythdist
+restart=always
+cap=memory
+cap=ipc
+cap=ipc
+cap=registry

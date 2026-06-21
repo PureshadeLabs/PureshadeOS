@@ -1,0 +1,59 @@
+# config.toml template for building a Rust toolchain that targets Lythos.
+#
+# Copy this file to the root of your rust-lang/rust checkout as `config.toml`,
+# then run `./x.py build library/std` to produce a sysroot.
+#
+# This config targets the HOST build tools at your current machine and
+# cross-compiles the TARGET libraries for x86_64-lythos.
+#
+# Usage:
+#   cp <raptoros>/lythos-toolchain/config.toml.template <rust-src>/config.toml
+#   cd <rust-src>
+#   ./x.py build --stage 2 library/std --target x86_64-lythos
+
+[llvm]
+download-ci-llvm = true
+assertions        = false
+optimize          = true
+
+[build]
+# Host triple — your build machine.
+build         = "x86_64-unknown-linux-gnu"
+# Targets to produce sysroot libraries for.
+target        = ["x86_64-unknown-linux-gnu", "x86_64-lythos"]
+docs          = false
+extended      = false
+tools         = []
+cargo-native-static = false
+low-priority  = true
+
+[install]
+prefix    = "/usr/local/lythos-rust"
+sysconfdir = "etc"
+
+[rust]
+channel           = "nightly"
+optimize          = true
+debug             = false
+debug-assertions  = false
+backtrace         = false
+incremental       = false
+parallel-compiler = false
+# We use abort-panic on Lythos.
+panic             = "abort"
+# No LLVM unwind on Lythos.
+default-linker    = "rust-lld"
+
+[target.x86_64-lythos]
+# Path to the Lythos target JSON spec.
+# (rustc will look for it on the filesystem or via RUST_TARGET_PATH)
+# Uncomment if you want rustc to find it automatically:
+# target-json = "<path-to>/lythos-toolchain/target-specs/x86_64-lythos.json"
+linker     = "rust-lld"
+ar         = "llvm-ar"
+cc         = "clang"
+cxx        = "clang++"
+ranlib     = "llvm-ranlib"
+
+[dist]
+src-tarball = false

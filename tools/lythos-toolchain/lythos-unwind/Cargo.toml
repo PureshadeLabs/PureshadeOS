@@ -1,0 +1,14 @@
+[package]
+name    = "lythos-unwind"
+version = "0.1.0"
+edition = "2021"
+description = "No-op unwinder for Lythos (panic=abort strategy)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name       = "unwind"
+crate-type = ["staticlib", "rlib"]
+
+[profile.release]
+opt-level = "s"
+lto       = true
