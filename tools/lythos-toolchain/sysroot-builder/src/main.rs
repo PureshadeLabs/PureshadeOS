@@ -13,7 +13,7 @@
 //! ## Usage
 //!
 //! ```sh
-//! cargo run --manifest-path lythos-toolchain/sysroot-builder/Cargo.toml -- \
+//! cargo run --manifest-path tools/lythos-toolchain/sysroot-builder/Cargo.toml -- \
 //!     --toolchain-root "$(rustup show home)/toolchains/nightly-x86_64-unknown-linux-gnu" \
 //!     --out-sysroot    ./lythos-sysroot
 //! ```
@@ -49,7 +49,7 @@ fn parse_args() -> Result<Args, String> {
     let mut args = env::args().skip(1);
     let mut toolchain_root = None;
     let mut out_sysroot    = PathBuf::from("lythos-sysroot");
-    let mut target_spec    = PathBuf::from("lythos-toolchain/target-specs/x86_64-lythos.json");
+    let mut target_spec    = PathBuf::from("tools/lythos-toolchain/target-specs/x86_64-lythos-sysroot.json");
     let mut verbose        = false;
 
     while let Some(arg) = args.next() {
@@ -102,7 +102,7 @@ fn stage0(args: &Args) -> Result<(), String> {
                 "-Z", "build-std=core,compiler_builtins",
                 "-Z", "build-std-features=compiler-builtins-mem",
                 "--target", args.target_spec.to_str().unwrap(),
-                "--manifest-path", "lythos-toolchain/lythos-libc/Cargo.toml",
+                "--manifest-path", "tools/lythos-toolchain/lythos-libc/Cargo.toml",
             ])
             .env("RUSTFLAGS", "-C panic=abort"),
         args.verbose,
@@ -121,7 +121,7 @@ fn stage1(args: &Args) -> Result<(), String> {
                 "--release",
                 "-Z", "build-std=core,alloc,compiler_builtins",
                 "--target", args.target_spec.to_str().unwrap(),
-                "--manifest-path", "lythos-toolchain/lythos-libc/Cargo.toml",
+                "--manifest-path", "tools/lythos-toolchain/lythos-libc/Cargo.toml",
             ])
             .env("RUSTFLAGS", "-C panic=abort"),
         args.verbose,
@@ -135,7 +135,7 @@ fn stage1(args: &Args) -> Result<(), String> {
                 "--release",
                 "-Z", "build-std=core,compiler_builtins",
                 "--target", args.target_spec.to_str().unwrap(),
-                "--manifest-path", "lythos-toolchain/lythos-unwind/Cargo.toml",
+                "--manifest-path", "tools/lythos-toolchain/lythos-unwind/Cargo.toml",
             ])
             .env("RUSTFLAGS", "-C panic=abort"),
         args.verbose,
@@ -153,7 +153,7 @@ fn stage2(args: &Args) -> Result<(), String> {
                 "--release",
                 "-Z", "build-std=core,alloc,compiler_builtins",
                 "--target", args.target_spec.to_str().unwrap(),
-                "--manifest-path", "lythos-libstd/Cargo.toml",
+                "--manifest-path", "userspace/lib/lythos-libstd/Cargo.toml",
             ])
             .env("RUSTFLAGS", "-C panic=abort"),
         args.verbose,

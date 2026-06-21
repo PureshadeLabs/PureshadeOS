@@ -1,6 +1,6 @@
 {
-  "_comment": "Lythos microkernel target for x86_64.",
-  "_comment2": "Differences from x86_64-unknown-none: os=lythos, panic=abort, no red-zone, soft-float (no SSE at ring-3), lld linker.",
+  "_comment": "Sysroot/toolchain target for x86_64-lythos. Used ONLY by tools/lythos-toolchain scripts to build the Rust sysroot.",
+  "_comment2": "NOT the same as targets/x86_64-lythos.json (the kernel target). Key divergences: os='lythos' (not 'none'), broader SSE disable, pre-link-args -nostdlib/-static, relro/rpath/thread-local flags needed by sysroot. Keep these in sync intentionally."
 
   "llvm-target":         "x86_64-unknown-none-elf",
   "data-layout":         "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",

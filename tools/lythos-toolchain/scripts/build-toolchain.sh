@@ -11,9 +11,9 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TOOLCHAIN_DIR="$REPO_ROOT/lythos-toolchain"
-TARGET_SPEC="$TOOLCHAIN_DIR/target-specs/x86_64-lythos.json"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+TOOLCHAIN_DIR="$REPO_ROOT/tools/lythos-toolchain"
+TARGET_SPEC="$TOOLCHAIN_DIR/target-specs/x86_64-lythos-sysroot.json"
 SYSROOT_OUT="$REPO_ROOT/lythos-sysroot"
 
 echo "=== Lythos Rust Toolchain Build ==="
@@ -51,7 +51,7 @@ cargo +nightly build \
     -Z build-std=core,compiler_builtins \
     -Z build-std-features=compiler-builtins-mem \
     --target "$TARGET_SPEC" \
-    --manifest-path lythos-toolchain/lythos-libc/Cargo.toml \
+    --manifest-path tools/lythos-toolchain/lythos-libc/Cargo.toml \
     2>&1
 
 # ── Stage 1: lythos-libc + lythos-unwind ─────────────────────────────────────
@@ -63,26 +63,26 @@ cargo +nightly build \
     -Z build-std=core,alloc,compiler_builtins \
     -Z build-std-features=compiler-builtins-mem \
     --target "$TARGET_SPEC" \
-    --manifest-path lythos-toolchain/lythos-libc/Cargo.toml \
+    --manifest-path tools/lythos-toolchain/lythos-libc/Cargo.toml \
     2>&1
 
 cargo +nightly build \
     --release \
     -Z build-std=core,compiler_builtins \
     --target "$TARGET_SPEC" \
-    --manifest-path lythos-toolchain/lythos-unwind/Cargo.toml \
+    --manifest-path tools/lythos-toolchain/lythos-unwind/Cargo.toml \
     2>&1
 
-# ── Stage 2: lythos-std + lythos-libstd ──────────────────────────────────────
+# ── Stage 2: lythos-rt + lythos-libstd ───────────────────────────────────────
 
 echo ""
-echo "--- Stage 2: lythos-std + lythos-libstd ---"
+echo "--- Stage 2: lythos-rt + lythos-libstd ---"
 cargo +nightly build \
     --release \
     -Z build-std=core,alloc,compiler_builtins \
     -Z build-std-features=compiler-builtins-mem \
     --target "$TARGET_SPEC" \
-    --manifest-path lythos-std/Cargo.toml \
+    --manifest-path userspace/lib/lythos-rt/Cargo.toml \
     2>&1
 
 cargo +nightly build \
@@ -90,7 +90,7 @@ cargo +nightly build \
     -Z build-std=core,alloc,compiler_builtins \
     -Z build-std-features=compiler-builtins-mem \
     --target "$TARGET_SPEC" \
-    --manifest-path lythos-libstd/Cargo.toml \
+    --manifest-path userspace/lib/lythos-libstd/Cargo.toml \
     2>&1
 
 # ── Assemble sysroot ──────────────────────────────────────────────────────────
@@ -98,7 +98,7 @@ cargo +nightly build \
 echo ""
 echo "--- Assembling sysroot at $SYSROOT_OUT ---"
 cargo +nightly run \
-    --manifest-path lythos-toolchain/sysroot-builder/Cargo.toml \
+    --manifest-path tools/lythos-toolchain/sysroot-builder/Cargo.toml \
     -- \
     --toolchain-root "$(rustup show home)/toolchains/nightly-x86_64-unknown-linux-gnu" \
     --out-sysroot    "$SYSROOT_OUT" \

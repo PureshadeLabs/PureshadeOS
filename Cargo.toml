@@ -19,6 +19,14 @@ exclude = [
     "tools/mkrfs",
     "userspace/webwm/bridge",
 ]
+# default-members: host-compilable tools only.
+# kernel/ needs --target x86_64-lythos.json; all userspace/ crates need --target x86_64-oros.json.
+# lythos-libc and lythos-unwind need the lythos sysroot target.
+# Use `cargo xtask build-kernel` / `cargo xtask build-userspace` (xtask TBD).
+default-members = [
+    "tools/orox-pack",
+    "tools/lythos-toolchain/sysroot-builder",
+]
 resolver = "2"
 
 [profile.dev]

@@ -7,7 +7,7 @@
 # cross-compiles the TARGET libraries for x86_64-lythos.
 #
 # Usage:
-#   cp <raptoros>/lythos-toolchain/config.toml.template <rust-src>/config.toml
+#   cp <repo>/tools/lythos-toolchain/config.toml.template <rust-src>/config.toml
 #   cd <rust-src>
 #   ./x.py build --stage 2 library/std --target x86_64-lythos
 
@@ -48,7 +48,7 @@ default-linker    = "rust-lld"
 # Path to the Lythos target JSON spec.
 # (rustc will look for it on the filesystem or via RUST_TARGET_PATH)
 # Uncomment if you want rustc to find it automatically:
-# target-json = "<path-to>/lythos-toolchain/target-specs/x86_64-lythos.json"
+# target-json = "<path-to>/tools/lythos-toolchain/target-specs/x86_64-lythos-sysroot.json"
 linker     = "rust-lld"
 ar         = "llvm-ar"
 cc         = "clang"
