@@ -381,14 +381,16 @@ Return the liveness status of a task.
 **Arguments:**
 - a1 — task ID
 
-**Returns:**
+**Intended contract (canonical task state encoding):**
 - 0 — not found or dead
-- 1 — running or ready
-- 2 — blocked
+- 1 — running
+- 2 — ready
+- 3 — blocked
 
-Note: this syscall conflates running and ready into a single value (1). To
-distinguish between them, use `SYS_TASK_LIST` or `SYS_PS` whose `state` field
-has separate values for each.
+**Current kernel behavior differs:** the kernel currently returns 0=dead,
+1=running-or-ready (conflated), 2=blocked. It will be updated to the canonical
+0/1/2/3 encoding above. Callers should treat return value 2 as "ready or
+blocked" until the fix lands (see `docs/plans/followup-code-tasks.md`).
 
 ---
 
@@ -516,7 +518,7 @@ Query metadata for a path.
 **Returns:** 0 on success; `ENOENT` if path not found; `EINVAL` on bad
 arguments
 
-Writes 48 bytes into `*a3`. See [Struct layouts — Stat](#stat--48-bytes-proposed--pending-confirmation).
+Writes 48 bytes into `*a3`. See [Struct layouts — Stat](#stat--48-bytes).
 
 ---
 
@@ -534,7 +536,7 @@ Read directory entries for a path.
 on bad arguments
 
 Each entry is 264 bytes. Entries written = `min(actual_count, a4 / 264)`. See
-[Struct layouts — DirEntry](#direntry--264-bytes-proposed--pending-confirmation).
+[Struct layouts — DirEntry](#direntry--264-bytes).
 
 ---
 
@@ -840,6 +842,20 @@ Issues ACPI S5 shutdown via QEMU PM1a port `0x604`.
 
 All fields are little-endian. All padding bytes are zeroed by the kernel.
 
+### Canonical task state encoding
+
+All task-state fields in all structs and syscalls use this encoding:
+
+| Value | Meaning |
+|-------|---------|
+| 0 | dead or not found (not included in list output) |
+| 1 | running |
+| 2 | ready |
+| 3 | blocked |
+
+`SYS_TASK_STATUS` currently returns a non-canonical encoding; see its entry
+above and `docs/plans/followup-code-tasks.md`.
+
 ### TaskInfo — 24 bytes
 
 Used by `SYS_TASK_LIST` (17).
@@ -848,13 +864,10 @@ Used by `SYS_TASK_LIST` (17).
 Offset  Size  Type    Field
 ──────  ────  ──────  ─────────────────────────────────────────────────
 0       8     u64 LE  task_id     — unique task identifier
-8       8     u64 LE  state       — 1 = running, 2 = ready, 3 = blocked
+8       8     u64 LE  state       — canonical task state (see above)
 16      1     u8      kind        — 0 = kernel task, 1 = userspace task
 17      7     [u8;7]  _pad        — zeroed
 ```
-
-Note: `SYS_TASK_STATUS` uses a different encoding where running and ready are
-both reported as 1. See the note in the `SYS_TASK_STATUS` entry.
 
 ### PsEntry — 48 bytes
 
@@ -864,7 +877,7 @@ Used by `SYS_PS` (37).
 Offset  Size  Type     Field
 ──────  ────  ───────  ─────────────────────────────────────────────────
 0       8     u64 LE   id          — unique task identifier
-8       8     u64 LE   state       — 1 = running, 2 = ready, 3 = blocked
+8       8     u64 LE   state       — canonical task state (see above)
 16      1     u8       kind        — 0 = kernel task, 1 = userspace task
 17      1     u8       priority    — 0 = low, 1 = normal, 2 = high
 18      1     u8       name_len    — length of name in bytes (0–16)
@@ -873,28 +886,29 @@ Offset  Size  Type     Field
 40      8     [u8;8]   _pad2       — zeroed
 ```
 
-### Stat — 48 bytes *(PROPOSED — PENDING CONFIRMATION)*
+### Stat — 48 bytes
 
-Used by `SYS_STAT` (26). The kernel serializes this field-by-field; the layout
-does not match natural C alignment (`uid` is at offset 14, which is not 4-byte
-aligned). Userspace must copy the 48-byte buffer locally and read fields by
-offset — do not cast a pointer to a `#[repr(C)]` struct.
+Used by `SYS_STAT` (26). All fields naturally aligned (every field at an
+offset that is a multiple of its own size). Safe to cast a `[u8; 48]` buffer
+to a `#[repr(C, packed)]`-free struct if field order matches exactly.
 
 ```
 Offset  Size  Type    Field
 ──────  ────  ──────  ─────────────────────────────────────────────────
 0       8     u64 LE  size        — file size in bytes
-8       4     u32 LE  flags       — inode flags (see below)
-12      2     u16 LE  mode        — permission bits (UNIX-style, e.g. 0o644)
-14      4     u32 LE  uid         — owner user ID  [NOTE: unaligned]
-18      4     u32 LE  gid         — owner group ID
-22      4     u32 LE  nlink       — hard link count
-26      8     u64 LE  mtime       — last-modified time (RFS timestamp; unit TBD)
-34      8     u64 LE  ctime       — creation/change time (RFS timestamp; unit TBD)
+8       8     u64 LE  mtime       — last-modified time (ms since kernel boot;
+                                    same epoch as SYS_TIME; 0 if not yet set)
+16      8     u64 LE  ctime       — creation time (ms since kernel boot;
+                                    same epoch as SYS_TIME; 0 if not yet set)
+24      4     u32 LE  flags       — inode flags (see below)
+28      4     u32 LE  uid         — owner user ID
+32      4     u32 LE  gid         — owner group ID
+36      4     u32 LE  nlink       — hard link count
+40      2     u16 LE  mode        — permission bits (UNIX-style, e.g. 0o644)
 42      6     [u8;6]  _pad        — zeroed
 ```
 
-`flags` bit meanings (currently defined):
+`flags` bit meanings:
 
 | Bit | Value | Meaning |
 |-----|-------|---------|
@@ -903,12 +917,16 @@ Offset  Size  Type    Field
 | 2 | 0x04 | `INODE_SYMLINK` — entry is a symbolic link |
 | 3 | 0x08 | `INODE_FAST_SYM` — symlink name stored inline |
 
-**Pending confirmation:**
-- `mtime` / `ctime` timestamp unit is not yet defined.
-- `flags` bit assignments above are from the implementation; confirm they are
-  the intended public contract.
+**Implementation note:** The kernel's `SYS_STAT` handler currently writes
+fields in the old unaligned order. It must be updated to match this layout
+before any userspace code reads `Stat`. See `docs/plans/followup-code-tasks.md`.
 
-### DirEntry — 264 bytes *(PROPOSED — PENDING CONFIRMATION)*
+**Timestamp note:** `mtime` and `ctime` are stored in the RFS inode but the
+kernel does not currently update them at file creation or modification — both
+will read as 0 until the kernel populates them. The unit (ms since boot) is
+the canonical contract; the population is a known gap.
+
+### DirEntry — 264 bytes
 
 Used by `SYS_READDIR` (27). One entry per directory member.
 
@@ -916,12 +934,21 @@ Used by `SYS_READDIR` (27). One entry per directory member.
 Offset  Size  Type      Field
 ──────  ────  ────────  ─────────────────────────────────────────────────
 0       4     u32 LE    ino         — inode number
-4       1     u8        file_type   — RFS file type byte (values TBD)
+4       1     u8        file_type   — entry type (see below)
 5       1     u8        name_len    — length of name in bytes (0–255)
 6       2     [u8;2]    _pad        — zeroed
 8       256   [u8;256]  name        — filename; first name_len bytes valid,
                                      remainder zeroed; max 255 usable bytes
 ```
 
-**Pending confirmation:**
-- `file_type` byte values are not yet formally defined.
+`file_type` values:
+
+| Value | Meaning | Corresponding Stat.flags bit |
+|-------|---------|------------------------------|
+| 1 | regular file | — (bit0=USED set, bit1 and bit2 clear) |
+| 2 | directory | bit1=0x02 (`INODE_DIR`) |
+| 3 | symbolic link | bit2=0x04 (`INODE_SYMLINK`) |
+
+The numeric values do not equal the Stat `flags` bit positions, but the
+semantic meaning is consistent: a directory entry with `file_type=2` will have
+`Stat.flags & 0x02` set if you stat the same path.
