@@ -381,16 +381,11 @@ Return the liveness status of a task.
 **Arguments:**
 - a1 — task ID
 
-**Intended contract (canonical task state encoding):**
+**Returns:**
 - 0 — not found or dead
 - 1 — running
 - 2 — ready
 - 3 — blocked
-
-**Current kernel behavior differs:** the kernel currently returns 0=dead,
-1=running-or-ready (conflated), 2=blocked. It will be updated to the canonical
-0/1/2/3 encoding above. Callers should treat return value 2 as "ready or
-blocked" until the fix lands (see `docs/plans/followup-code-tasks.md`).
 
 ---
 

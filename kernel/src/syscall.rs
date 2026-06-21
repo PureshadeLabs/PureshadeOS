@@ -882,7 +882,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             crate::apic::ticks()
         }
         SYS_TASK_STATUS => {
-            // a1 = TaskId; returns 0=dead/missing, 1=running/ready, 2=blocked.
+            // a1 = TaskId; returns canonical: 0=dead/missing, 1=running, 2=ready, 3=blocked.
             crate::task::task_status_raw(frame.a1)
         }
         SYS_TASK_LIST => {

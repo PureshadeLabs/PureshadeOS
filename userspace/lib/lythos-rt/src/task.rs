@@ -6,9 +6,11 @@ pub type TaskId = u64;
 /// Liveness state of a task as reported by `SYS_TASK_STATUS`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskStatus {
-    /// Task is running or ready to run.
+    /// Task is actively scheduled on the CPU.
     Running,
-    /// Task is blocked waiting on an IPC endpoint.
+    /// Task is in the ready queue, waiting for a CPU slice.
+    Ready,
+    /// Task is blocked waiting on an IPC endpoint or timer.
     Blocked,
     /// Task has exited or was never created.
     Dead,
@@ -20,7 +22,8 @@ pub enum TaskStatus {
 pub fn task_status(task_id: TaskId) -> TaskStatus {
     match crate::sys_task_status(task_id) {
         1 => TaskStatus::Running,
-        2 => TaskStatus::Blocked,
+        2 => TaskStatus::Ready,
+        3 => TaskStatus::Blocked,
         _ => TaskStatus::Dead,
     }
 }

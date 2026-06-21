@@ -41,7 +41,7 @@ and `[0..8]`/`[8..12]`/etc. patterns in userspace crates.
 
 ---
 
-## 2. SYS_TASK_STATUS: return canonical task state encoding
+## 2. ~~SYS_TASK_STATUS: return canonical task state encoding~~ DONE
 
 **Why deferred:** The spec defines a canonical 4-value task state encoding:
 0=dead, 1=running, 2=ready, 3=blocked. `SYS_TASK_LIST` (17) and `SYS_PS` (37)

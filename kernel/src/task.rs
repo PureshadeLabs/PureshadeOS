@@ -555,16 +555,17 @@ pub fn task_status_raw(id: TaskId) -> u64 {
     match sched.tasks.iter().find(|t| t.id == id) {
         None    => 0,
         Some(t) => match t.state {
-            TaskState::Dead              => 0,
-            TaskState::Running |
-            TaskState::Ready             => 1,
-            TaskState::Blocked           => 2,
+            TaskState::Dead    => 0,
+            TaskState::Running => 1,
+            TaskState::Ready   => 2,
+            TaskState::Blocked => 3,
         },
     }
 }
 
 /// Iterate live (non-Dead) tasks, calling `f(index, id, state_raw, kind)` for each.
-/// `state_raw`: 1=running/ready, 2=blocked.  `kind`: 0=kernel, 1=userspace.
+/// `state_raw`: canonical encoding — 1=running, 2=ready, 3=blocked.
+/// `kind`: 0=kernel, 1=userspace.
 /// Returns the number of live tasks visited.
 pub fn for_each_task<F>(mut f: F) -> usize
 where
@@ -575,8 +576,10 @@ where
     for t in sched.tasks.iter() {
         if t.state == TaskState::Dead { continue; }
         let state_raw = match t.state {
-            TaskState::Blocked => 2,
-            _                  => 1,
+            TaskState::Running => 1,
+            TaskState::Ready   => 2,
+            TaskState::Blocked => 3,
+            TaskState::Dead    => continue,
         };
         let kind: u8 = if t.page_table.is_some() { 1 } else { 0 };
         f(idx, t.id, state_raw, kind);
@@ -665,7 +668,12 @@ where
     let mut idx = 0;
     for t in sched.tasks.iter() {
         if t.state == TaskState::Dead { continue; }
-        let state_raw = match t.state { TaskState::Blocked => 2, _ => 1 };
+        let state_raw = match t.state {
+            TaskState::Running => 1,
+            TaskState::Ready   => 2,
+            TaskState::Blocked => 3,
+            TaskState::Dead    => continue,
+        };
         let kind: u8  = if t.page_table.is_some() { 1 } else { 0 };
         f(idx, t.id, state_raw, kind, t.priority, &t.name);
         idx += 1;
