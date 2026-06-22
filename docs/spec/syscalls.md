@@ -33,13 +33,18 @@ Errors are returned in RAX as large `u64` values (two's-complement negative
 
 | Value (u64) | i64 | Name | Meaning |
 |---|---|---|---|
-| `0xFFFF_FFFF_FFFF_FFFF` | -1 | `ENOSYS` | Unknown or unassigned syscall number |
-| `0xFFFF_FFFF_FFFF_FFFE` | -2 | `ENOCAP` | Invalid or stale capability handle |
-| `0xFFFF_FFFF_FFFF_FFFD` | -3 | `ENOPERM` | Capability rights insufficient |
-| `0xFFFF_FFFF_FFFF_FFFC` | -4 | `EINVAL` | Invalid argument |
-| `0xFFFF_FFFF_FFFF_FFFB` | -5 | `ENOENT` | No such file or directory |
-| `0xFFFF_FFFF_FFFF_FFFA` | -6 | `EBADF` | Bad file descriptor |
-| `0xFFFF_FFFF_FFFF_FFF9` | -7 | `EAGAIN` | Resource temporarily unavailable |
+| `0xFFFF_FFFF_FFFF_FFFF` | -1  | `ENOSYS`  | Unknown or unassigned syscall number |
+| `0xFFFF_FFFF_FFFF_FFFE` | -2  | `ENOCAP`  | Invalid or stale capability handle |
+| `0xFFFF_FFFF_FFFF_FFFD` | -3  | `ENOPERM` | Capability rights insufficient |
+| `0xFFFF_FFFF_FFFF_FFFC` | -4  | `EINVAL`  | Invalid argument |
+| `0xFFFF_FFFF_FFFF_FFFB` | -5  | `ENOENT`  | No such file or directory |
+| `0xFFFF_FFFF_FFFF_FFFA` | -6  | `EBADF`   | Bad file descriptor |
+| `0xFFFF_FFFF_FFFF_FFF9` | -7  | `EAGAIN`  | Resource temporarily unavailable (IPC timeout, non-blocking empty/full) |
+| `0xFFFF_FFFF_FFFF_FFF8` | -8  | `ENOTDIR` | Path component is not a directory (SYS_CREATE, SYS_MKDIR, SYS_RENAME) |
+| `0xFFFF_FFFF_FFFF_FFF7` | -9  | `ENOMNT`  | Filesystem not mounted; returned by all VFS syscalls when RFS is absent |
+| `0xFFFF_FFFF_FFFF_FFF6` | -10 | `EMFILE`  | Too many open file descriptors (SYS_OPEN, SYS_CREATE) |
+| `0xFFFF_FFFF_FFFF_FFF5` | -11 | `EEXIST`  | File or directory already exists (SYS_CREATE, SYS_MKDIR, SYS_RENAME) |
+| `0xFFFF_FFFF_FFFF_FFF4` | -12 | `ENOSPC`  | No space left on device (SYS_CREATE, SYS_MKDIR) |
 
 `SYSCALL_MAX = 55`. Syscall numbers above 55 and unassigned numbers 45–49
 always return `ENOSYS`.
@@ -459,8 +464,9 @@ Open a file on the RFS filesystem.
 - a1 — pointer to path string in user address space
 - a2 — path length in bytes
 
-**Returns:** file descriptor (≥ 0) on success; `ENOENT` if not found; `EINVAL`
-on bad arguments
+**Returns:** file descriptor (≥ 0) on success; `ENOENT` if not found; `EMFILE`
+if the per-process fd table is full; `ENOMNT` if the filesystem is not mounted;
+`EINVAL` on bad arguments
 
 ---
 
@@ -486,8 +492,9 @@ Write bytes to an open writable file descriptor.
 - a2 — pointer to source buffer in user address space
 - a3 — number of bytes to write
 
-**Returns:** bytes written; `EBADF` if fd invalid or not writable; `EINVAL` on
-other errors
+**Returns:** bytes written; `EBADF` if fd invalid or not writable; `ENOSPC` if
+the device has no free blocks; `ENOMNT` if the filesystem is not mounted;
+`EINVAL` on other errors
 
 ---
 
@@ -544,7 +551,10 @@ Create a new empty regular file.
 - a1 — pointer to path string in user address space
 - a2 — path length in bytes
 
-**Returns:** writable file descriptor on success; error on failure
+**Returns:** writable file descriptor on success; `EEXIST` if the path already
+exists; `ENOTDIR` if a path component is not a directory; `EMFILE` if the fd
+table is full; `ENOSPC` if the device has no free blocks; `ENOMNT` if not
+mounted; `EINVAL` on bad arguments
 
 ---
 
@@ -589,7 +599,9 @@ Create a new directory.
 - a1 — pointer to path string in user address space
 - a2 — path length in bytes
 
-**Returns:** 0 on success; `EINVAL` on error
+**Returns:** 0 on success; `EEXIST` if the path already exists; `ENOTDIR` if a
+path component is not a directory; `ENOSPC` if the device has no free blocks;
+`ENOMNT` if not mounted; `EINVAL` on bad arguments
 
 ---
 
@@ -628,7 +640,9 @@ Rename or move a regular file.
 - a3 — pointer to new path string in user address space
 - a4 — new path length in bytes
 
-**Returns:** 0 on success; `ENOENT` / `EINVAL` on error
+**Returns:** 0 on success; `ENOENT` if the source path is not found; `EEXIST`
+if the destination already exists; `ENOTDIR` if a path component is not a
+directory; `ENOMNT` if not mounted; `EINVAL` on bad arguments
 
 ---
 

@@ -108,6 +108,16 @@ pub enum SysError {
     NoEnt,
     BadFd,
     Again,
+    /// Path component is not a directory (`ENOTDIR`).
+    NotDir,
+    /// Filesystem not mounted (`ENOMNT`).
+    NoMnt,
+    /// Too many open file descriptors (`EMFILE`).
+    MFile,
+    /// File or directory already exists (`EEXIST`).
+    Exist,
+    /// No space left on device (`ENOSPC`).
+    NoSpc,
     Unknown(u64),
 }
 
@@ -121,12 +131,17 @@ impl SysError {
             0xFFFF_FFFF_FFFF_FFFB => SysError::NoEnt,
             0xFFFF_FFFF_FFFF_FFFA => SysError::BadFd,
             0xFFFF_FFFF_FFFF_FFF9 => SysError::Again,
+            0xFFFF_FFFF_FFFF_FFF8 => SysError::NotDir,
+            0xFFFF_FFFF_FFFF_FFF7 => SysError::NoMnt,
+            0xFFFF_FFFF_FFFF_FFF6 => SysError::MFile,
+            0xFFFF_FFFF_FFFF_FFF5 => SysError::Exist,
+            0xFFFF_FFFF_FFFF_FFF4 => SysError::NoSpc,
             other                  => SysError::Unknown(other),
         }
     }
 
     #[inline]
-    pub fn is_err_raw(v: u64) -> bool { v >= 0xFFFF_FFFF_FFFF_FFF9 }
+    pub fn is_err_raw(v: u64) -> bool { v >= 0xFFFF_FFFF_FFFF_FFF4 }
 }
 
 impl core::fmt::Display for SysError {

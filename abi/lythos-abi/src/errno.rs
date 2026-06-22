@@ -1,17 +1,8 @@
 //! Error code sentinels — transcribed from `docs/spec/syscalls.md` error table.
 //!
 //! All values are returned in RAX as two's-complement u64 (negative i64 reinterpreted).
-//! The spec documents exactly seven codes; they are listed in the table at the top
-//! of syscalls.md.
-//!
-//! ## Note on rfs-internal codes (FINDING F3)
-//!
-//! Five additional error codes exist in `kernel/src/rfs.rs` as `i64` constants:
-//!   ENOTDIR = -8, ENOMNT = -9, EMFILE = -10, EEXIST = -11, ENOSPC = -12
-//!
-//! These are returned by VFS syscalls (SYS_OPEN, SYS_CREATE, SYS_MKDIR, etc.)
-//! but are absent from the spec error table and from all current userspace code.
-//! They are NOT included here pending spec adjudication.
+//! Twelve codes are defined: seven generic capability/syscall codes (-1..-7) plus
+//! five VFS-specific codes (-8..-12) returned by filesystem syscalls.
 
 /// Unknown or unassigned syscall number.
 pub const ENOSYS:  u64 = (-1i64) as u64;   // 0xFFFF_FFFF_FFFF_FFFF
@@ -35,9 +26,26 @@ pub const EBADF:   u64 = (-6i64) as u64;   // 0xFFFF_FFFF_FFFF_FFFA
 /// or IPC timeout expired).
 pub const EAGAIN:  u64 = (-7i64) as u64;   // 0xFFFF_FFFF_FFFF_FFF9
 
+/// Path component is not a directory (VFS: SYS_CREATE, SYS_MKDIR, SYS_RENAME).
+pub const ENOTDIR: u64 = (-8i64) as u64;   // 0xFFFF_FFFF_FFFF_FFF8
+
+/// Filesystem not mounted; VirtIO block device absent at VFS call time.
+/// Returned by all VFS syscalls (SYS_OPEN, SYS_READ, SYS_WRITE, SYS_CREATE,
+/// SYS_MKDIR, SYS_UNLINK, SYS_RENAME, SYS_SEEK) when the RFS is not mounted.
+pub const ENOMNT:  u64 = (-9i64) as u64;   // 0xFFFF_FFFF_FFFF_FFF7
+
+/// Too many open file descriptors (VFS: SYS_OPEN, SYS_CREATE).
+pub const EMFILE:  u64 = (-10i64) as u64;  // 0xFFFF_FFFF_FFFF_FFF6
+
+/// File or directory already exists (VFS: SYS_CREATE, SYS_MKDIR, SYS_RENAME).
+pub const EEXIST:  u64 = (-11i64) as u64;  // 0xFFFF_FFFF_FFFF_FFF5
+
+/// No space left on device (VFS: SYS_CREATE, SYS_MKDIR).
+pub const ENOSPC:  u64 = (-12i64) as u64;  // 0xFFFF_FFFF_FFFF_FFF4
+
 /// The lowest (most negative as i64) error sentinel value.
 /// Any return value ≥ ERR_MIN is an error.
-pub const ERR_MIN: u64 = EAGAIN;
+pub const ERR_MIN: u64 = ENOSPC;
 
 /// Return `true` if `v` is an error sentinel.
 #[inline(always)]

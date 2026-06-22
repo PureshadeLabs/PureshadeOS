@@ -62,7 +62,7 @@ const _TASKINFO_OFF_KIND:     () = assert!(core::mem::offset_of!(TaskInfo, kind)
 //   copy_nonoverlapping(name, entry+24, 16)   ← offset 24  ✓
 //   write_bytes(entry+40, 0, 8)               ← pad 8      ✓
 //
-// NOTE (FINDING F2): No PsEntry type existed in userspace before this crate.
+// First definition of PsEntry in userspace; previously only existed in the kernel.
 
 /// One entry in the buffer filled by `SYS_PS` (37).
 #[repr(C)]
