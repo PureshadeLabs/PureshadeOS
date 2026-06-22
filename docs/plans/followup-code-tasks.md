@@ -135,3 +135,26 @@ to confirm the root cause is resolved (not just masked).
 
 **Location:** `kernel/src/main.rs:210` — `net::init()` call, guarded by
 `if virtio_net::init()` at line 204.
+
+---
+
+## 6. xtask: replace Makefile with cargo xtask
+
+**Why deferred:** `Cargo.toml` workspace comment marks `cargo xtask build-kernel` /
+`cargo xtask build-userspace` as TBD. The current build system is the top-level `Makefile`.
+`make` works but is not idiomatic for a Cargo workspace and forces contributors to have `make`
+available.
+
+**What to add:**
+- `tools/xtask/` crate added to workspace `members` (but not `default-members`)
+- `xtask build-kernel [--release]` — wraps `cargo +nightly build --target
+  targets/x86_64-lythos.json -Z build-std=... -p lythos`
+- `xtask build-userspace [--release]` — wraps the corresponding oros build + rootfs copy
+- `xtask run [--release] [--gui] [--debug-ints]` — invokes QEMU with the correct flags
+- `xtask clean` — `cargo clean` + `rm -f disk.img`
+
+**When to do it:** after the kernel and userspace builds are stable. Avoid during active ABI
+churn — the Makefile is simpler to patch.
+
+**Relevant files:** `Cargo.toml` (add member), `Makefile` (can be removed or kept as thin
+wrapper once xtask is complete).
