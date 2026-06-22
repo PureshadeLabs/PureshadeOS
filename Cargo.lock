@@ -91,6 +91,10 @@ dependencies = [
 [[package]]
 name = "lythos-rt"
 version = "0.1.0"
+dependencies = [
+ "lythos-abi",
+ "lythos-syscall",
+]
 
 [[package]]
 name = "lythos-syscall"

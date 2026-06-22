@@ -73,113 +73,20 @@ pub mod boxed {
     pub use alloc::boxed::Box;
 }
 
-// ── Syscall numbers (pub so crates can inspect them) ─────────────────────────
+// ── Syscall numbers ───────────────────────────────────────────────────────────
 
-pub const SYS_YIELD:      u64 = 0;
-pub const SYS_TASK_EXIT:  u64 = 1;
-pub const SYS_MMAP:       u64 = 2;
-pub const SYS_MUNMAP:     u64 = 3;
-pub const SYS_CAP_GRANT:  u64 = 4;
-pub const SYS_CAP_REVOKE: u64 = 5;
-pub const SYS_IPC_SEND:   u64 = 6;
-pub const SYS_IPC_RECV:   u64 = 7;
-pub const SYS_IPC_CREATE: u64 = 8;
-pub const SYS_ROLLBACK:   u64 = 9;
-pub const SYS_EXEC:       u64 = 10;
-/// Write a UTF-8 string to the kernel serial console (debug aid).
-pub const SYS_LOG:           u64 = 11;
-/// Send a 64-byte message **and** transfer a capability over an IPC endpoint.
-/// a1=ipc_cap, a2=msg_ptr, a3=msg_len, a4=cap_handle_to_send (moved from caller).
-pub const SYS_IPC_SEND_CAP:  u64 = 12;
-/// Receive a 64-byte message **and** accept any in-flight capability.
-/// a1=ipc_cap, a2=buf_ptr, a3=buf_len, a4=out_handle_ptr (*mut u64; 0=ignore).
-/// Returns bytes received; writes new handle (or u64::MAX if none) to *out_handle_ptr.
-pub const SYS_IPC_RECV_CAP:  u64 = 13;
-/// Read bytes from the COM1 serial port into a user buffer.
-/// a1=buf_ptr (user VA), a2=buf_len.
-/// Blocks until at least one byte is available.  Returns bytes read.
-pub const SYS_SERIAL_READ:   u64 = 14;
-/// Non-blocking serial poll.  No arguments.
-/// Returns 1 if at least one byte is waiting in the COM1 FIFO, 0 otherwise.
-/// Does NOT consume any bytes (reads LSR bit 0 only, never RBR).
-pub const SYS_SERIAL_AVAIL:  u64 = 30;
-/// Block the calling task until task `a1` (TaskId) exits.
-/// Returns 0 immediately if the target is not found or already Dead.
-pub const SYS_TASK_WAIT:     u64 = 31;
-/// Return milliseconds elapsed since kernel boot.  No arguments.
-/// Return value is always a valid u64 millisecond count (never an error sentinel).
-pub const SYS_TIME:          u64 = 15;
-/// Return Unix epoch milliseconds (ms since 1970-01-01 00:00:00 UTC).  No arguments.
-/// Anchored from CMOS RTC at boot; advances via APIC tick counter.
-/// Return value is always a valid u64 (never an error sentinel).
-pub const SYS_TIME_EPOCH:    u64 = 44;
-/// Return liveness of a task by ID.
-/// a1=TaskId.  Returns: 0=dead/missing, 1=running/ready, 2=blocked.
-pub const SYS_TASK_STATUS:   u64 = 16;
-/// Fill a user buffer with TaskInfo structs for all live tasks.
-/// a1=buf_ptr (*mut TaskInfo), a2=buf_capacity (max entries).
-/// Returns number of entries written.
-pub const SYS_TASK_LIST:     u64 = 17;
-/// Return physical memory statistics.  No arguments.
-/// Returns free 4 KiB frame count as a u64.
-pub const SYS_MEM_STAT:      u64 = 18;
-/// Terminate a task by ID.
-/// a1=TaskId.  Returns 0 on success, EINVAL if not found/dead/protected.
-pub const SYS_TASK_KILL:     u64 = 19;
-/// Open a file by path. a1=path_ptr, a2=path_len. Returns fd (≥ 0) or error.
-pub const SYS_OPEN:          u64 = 22;
-/// Read from an open fd. a1=fd, a2=buf_ptr, a3=len. Returns bytes read or error.
-pub const SYS_READ:          u64 = 23;
-/// Write to a writable fd. a1=fd, a2=buf_ptr, a3=len. Returns bytes written or error.
-pub const SYS_WRITE:         u64 = 24;
-/// Close an fd. a1=fd. Returns 0 or error.
-pub const SYS_CLOSE:         u64 = 25;
-/// Stat a path. a1=path_ptr, a2=path_len, a3=stat_ptr (48 bytes). Returns 0 or error.
-pub const SYS_STAT:          u64 = 26;
-/// Readdir. a1=path_ptr, a2=path_len, a3=buf_ptr, a4=buf_len. Returns entry count or error.
-pub const SYS_READDIR:       u64 = 27;
-/// Create a new empty file. a1=path_ptr, a2=path_len. Returns writable fd or error.
-pub const SYS_CREATE:        u64 = 28;
-/// Delete a file. a1=path_ptr, a2=path_len. Returns 0 or error.
-pub const SYS_UNLINK:        u64 = 29;
-/// Create a directory. a1=path_ptr, a2=path_len. Returns 0 or error.
-pub const SYS_MKDIR:              u64 = 32;
-/// Receive from IPC endpoint with a millisecond timeout.
-/// a1=cap, a2=buf_ptr, a3=buf_len, a4=timeout_ms. Returns bytes or EAGAIN.
-pub const SYS_IPC_RECV_TIMEOUT:  u64 = 42;
-/// Send to IPC endpoint with a millisecond timeout.
-/// a1=cap, a2=msg_ptr, a3=msg_len, a4=timeout_ms. Returns 0 or EAGAIN.
-pub const SYS_IPC_SEND_TIMEOUT:  u64 = 43;
-/// Non-blocking IPC recv. a1=cap, a2=buf_ptr, a3=buf_len. Returns bytes or EAGAIN.
-pub const SYS_IPC_POLL:          u64 = 39;
-/// Bind an IPC endpoint to a name. a1=cap, a2=name_ptr, a3=name_len (≤128). Returns 0 or ENOSYS.
-pub const SYS_IPC_BIND:          u64 = 40;
-/// Look up a named IPC endpoint. a1=name_ptr, a2=name_len, a3=rights_mask. Returns handle or ENOENT.
-pub const SYS_IPC_LOOKUP:        u64 = 41;
-/// Create a UDP socket. Returns socket fd (≥ 0) or error (ENOSYS if no net device).
-pub const SYS_SOCKET:            u64 = 50;
-/// Bind a UDP socket to a local port. a1=fd, a2=port. Returns 0 or error.
-pub const SYS_BIND:              u64 = 51;
-/// Send a UDP datagram. a1=fd, a2=buf_ptr, a3=len, a4=dst_ip (u32), a5=dst_port (u16).
-/// Returns 0 on success, EAGAIN if ARP not yet resolved.
-pub const SYS_SENDTO:            u64 = 52;
-/// Receive a UDP datagram (blocking). a1=fd, a2=buf_ptr, a3=len,
-/// a4=src_ip_out (*mut u32, 0=ignore), a5=src_port_out (*mut u16, 0=ignore).
-/// Returns bytes received.
-pub const SYS_RECVFROM:          u64 = 53;
-/// Close a socket. a1=fd. Returns 0.
-pub const SYS_NET_CLOSE:         u64 = 54;
-/// Power off the machine (ACPI S5). No arguments. Does not return.
-pub const SYS_POWEROFF:          u64 = 55;
+pub use lythos_abi::syscall::*;
 
 // ── Capability rights constants ───────────────────────────────────────────────
 
 pub mod cap_rights {
-    pub const READ:   u8 = 1;
-    pub const WRITE:  u8 = 2;
-    pub const GRANT:  u8 = 4;
-    pub const REVOKE: u8 = 8;
-    pub const ALL:    u8 = 15;
+    pub use lythos_abi::cap::{
+        RIGHT_READ   as READ,
+        RIGHT_WRITE  as WRITE,
+        RIGHT_GRANT  as GRANT,
+        RIGHT_REVOKE as REVOKE,
+        RIGHT_ALL    as ALL,
+    };
 }
 
 // ── Kernel error codes ────────────────────────────────────────────────────────
@@ -231,60 +138,9 @@ impl core::fmt::Display for SysError {
 // Backward-compat alias so existing code using `lythos_rt::Error` still works.
 pub use SysError as Error;
 
-// ── Raw syscall helpers (private) ─────────────────────────────────────────────
+// ── Raw syscall helpers ───────────────────────────────────────────────────────
 
-#[inline]
-unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            in("r10") a4,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-#[inline] unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> u64 {
-    unsafe { syscall4(nr, a1, a2, a3, 0) }
-}
-#[inline] unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> u64 {
-    unsafe { syscall4(nr, a1, a2, 0, 0) }
-}
-#[inline] unsafe fn syscall1(nr: u64, a1: u64) -> u64 {
-    unsafe { syscall4(nr, a1, 0, 0, 0) }
-}
-#[inline] unsafe fn syscall0(nr: u64) -> u64 {
-    unsafe { syscall4(nr, 0, 0, 0, 0) }
-}
-
-#[inline]
-unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            in("r10") a4,
-            in("r8")  a5,
-            in("r9")  a6,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
+use lythos_syscall::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall6};
 
 // ── Public raw syscall API ────────────────────────────────────────────────────
 
@@ -566,6 +422,12 @@ pub fn sys_time() -> u64 {
     unsafe { syscall0(SYS_TIME) }
 }
 
+/// Sleep for at least `ns` nanoseconds (rounded up to the next APIC ms tick).
+#[inline]
+pub fn sys_nanosleep(ns: u64) {
+    unsafe { syscall1(SYS_NANOSLEEP, ns); }
+}
+
 /// Return Unix epoch milliseconds (ms since 1970-01-01 00:00:00 UTC).
 ///
 /// Anchored from the CMOS RTC at boot and advanced by the APIC tick counter.
@@ -584,17 +446,7 @@ pub fn sys_task_status(task_id: u64) -> u64 {
     unsafe { syscall1(SYS_TASK_STATUS, task_id) }
 }
 
-/// Filled by `sys_task_list` for each live task.
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct TaskInfo {
-    pub id:    u64,
-    /// Canonical task state: 1=running, 2=ready, 3=blocked.
-    pub state: u64,
-    /// 0 = kernel task, 1 = userspace task
-    pub kind:  u8,
-    pub _pad:  [u8; 7],
-}
+pub use lythos_abi::structs::TaskInfo;
 
 /// Fill `buf` with info on every live task.  Returns the number of entries written.
 pub fn sys_task_list(buf: &mut [TaskInfo]) -> usize {
@@ -937,32 +789,4 @@ macro_rules! eprintln {
 
 // ── BootInfo ──────────────────────────────────────────────────────────────────
 
-/// Signature constant for the `BootInfo` message.
-pub const BOOT_INFO_SIGNATURE: u64 = 0xB007_1000_B007_1000;
-
-/// The 64-byte boot-info message pre-queued by the kernel on capability handle 2.
-///
-/// lythd reads this on startup via `sys_ipc_recv(2, &mut buf)`.
-#[repr(C, packed)]
-pub struct BootInfo {
-    pub signature:   u64,
-    pub mem_bytes:   u64,
-    pub free_frames: u64,
-    pub vendor:      [u8; 12],
-    pub _pad:        [u8; 28],
-}
-
-const _: () = assert!(core::mem::size_of::<BootInfo>() == 64);
-
-impl BootInfo {
-    /// Parse from a raw 64-byte IPC buffer. Returns `None` on signature mismatch.
-    pub fn from_bytes(buf: &[u8; 64]) -> Option<Self> {
-        let info: Self = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const Self) };
-        if { info.signature } == BOOT_INFO_SIGNATURE { Some(info) } else { None }
-    }
-
-    /// CPU vendor string as `&str` (best-effort UTF-8).
-    pub fn vendor_str(&self) -> &str {
-        core::str::from_utf8(&self.vendor).unwrap_or("unknown")
-    }
-}
+pub use lythos_abi::ipc::{BootInfo, BOOT_SIGNATURE as BOOT_INFO_SIGNATURE};

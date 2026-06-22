@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+lythos-abi    = { path = "../../../abi/lythos-abi" }
+lythos-syscall = { path = "../../../abi/lythos-syscall" }

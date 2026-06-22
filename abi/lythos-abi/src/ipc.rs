@@ -112,4 +112,10 @@ impl BootInfo {
         let info: Self = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const Self) };
         if info.signature == BOOT_SIGNATURE { Some(info) } else { None }
     }
+
+    /// CPU vendor string, trimmed to the first null byte.
+    pub fn vendor_str(&self) -> &str {
+        let n = self.vendor.iter().position(|&b| b == 0).unwrap_or(12);
+        core::str::from_utf8(&self.vendor[..n]).unwrap_or("unknown")
+    }
 }
