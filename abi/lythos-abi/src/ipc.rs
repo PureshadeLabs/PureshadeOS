@@ -49,15 +49,15 @@ const _RING_CAPACITY_CHECK:() = assert!(RING_CAPACITY == 63);
 // ── IPC kernel virtual base ───────────────────────────────────────────────────
 //
 // Spec § "Kernel mapping":
-//   0xFFFF_D000_0000_0000 + endpoint_index * 4096
+//   actual_base = 0xFFFF_D000_0000_0000 + kaslr_offset()
+//   endpoint_VA = actual_base + endpoint_index * 4096
 
-/// Nominal (pre-KASLR) base virtual address of the IPC endpoint page array
-/// in the kernel's address space.
+/// Nominal (pre-KASLR) base virtual address of the IPC endpoint page array.
 ///
-/// FINDING F7: The kernel adds `kaslr::offset()` to this at runtime
-/// (`kernel/src/ipc.rs::ipc_kern_base()`).  The spec omits the KASLR
-/// adjustment.  This constant is kernel-internal; userspace never accesses
-/// endpoint pages directly (all access is via IPC syscalls).
+/// The kernel adds `kaslr::offset()` at runtime (`ipc_kern_base()`) to derive
+/// the actual address, which varies per boot.  This constant is
+/// documentation-only and kernel-internal; userspace never accesses endpoint
+/// pages directly — all access goes through IPC syscalls.
 pub const IPC_KERN_BASE_NOMINAL: u64 = 0xFFFF_D000_0000_0000;
 
 // ── BootInfo — 64 bytes ───────────────────────────────────────────────────────

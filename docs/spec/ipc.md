@@ -39,15 +39,20 @@ at `u32::MAX`). The slot index for a given counter value is
 
 ## Kernel mapping
 
-The kernel maps each endpoint page at a fixed virtual address for its own
-access:
+The kernel maps each endpoint page at a virtual address derived from the
+**nominal base** `0xFFFF_D000_0000_0000` plus a per-boot KASLR offset:
 
 ```
-0xFFFF_D000_0000_0000 + endpoint_index * 4096
+actual_base = 0xFFFF_D000_0000_0000 + kaslr_offset()
+endpoint_VA = actual_base + endpoint_index * 4096
 ```
 
-User tasks do not have the endpoint page mapped. All access goes through the
-IPC syscalls.
+The nominal base is a documentation constant only — the actual address varies
+per boot. User tasks do not have endpoint pages mapped at any address; all
+access goes through the IPC syscalls (`SYS_IPC_SEND`, `SYS_IPC_RECV`, etc.).
+The `IPC_KERN_BASE_NOMINAL` constant in `lythos-abi` reflects the pre-KASLR
+value; kernel-internal code calls `ipc_kern_base()` to obtain the adjusted
+address.
 
 ---
 
