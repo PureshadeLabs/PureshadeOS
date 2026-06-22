@@ -31,6 +31,7 @@ pub const SYS_IPC_RECV_CAP:  u64 = 13;
 pub const SYS_SERIAL_READ:   u64 = 14;
 pub const SYS_TIME:          u64 = 15;
 pub const SYS_TASK_STATUS:   u64 = 16;
+pub const SYS_TIME_EPOCH:    u64 = 44;
 
 // ── Error sentinels ───────────────────────────────────────────────────────────
 

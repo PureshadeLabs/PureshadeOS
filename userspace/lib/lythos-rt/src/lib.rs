@@ -109,6 +109,10 @@ pub const SYS_TASK_WAIT:     u64 = 31;
 /// Return milliseconds elapsed since kernel boot.  No arguments.
 /// Return value is always a valid u64 millisecond count (never an error sentinel).
 pub const SYS_TIME:          u64 = 15;
+/// Return Unix epoch milliseconds (ms since 1970-01-01 00:00:00 UTC).  No arguments.
+/// Anchored from CMOS RTC at boot; advances via APIC tick counter.
+/// Return value is always a valid u64 (never an error sentinel).
+pub const SYS_TIME_EPOCH:    u64 = 44;
 /// Return liveness of a task by ID.
 /// a1=TaskId.  Returns: 0=dead/missing, 1=running/ready, 2=blocked.
 pub const SYS_TASK_STATUS:   u64 = 16;
@@ -562,6 +566,15 @@ pub fn sys_time() -> u64 {
     unsafe { syscall0(SYS_TIME) }
 }
 
+/// Return Unix epoch milliseconds (ms since 1970-01-01 00:00:00 UTC).
+///
+/// Anchored from the CMOS RTC at boot and advanced by the APIC tick counter.
+/// Resolution ~1 ms; accuracy within boot-overhead of the RTC reading.
+#[inline]
+pub fn sys_time_epoch() -> u64 {
+    unsafe { syscall0(SYS_TIME_EPOCH) }
+}
+
 /// Return the liveness status of a task by `task_id`.
 ///
 /// Returns the raw kernel value: 0 = dead/missing, 1 = running/ready, 2 = blocked.
@@ -573,9 +586,10 @@ pub fn sys_task_status(task_id: u64) -> u64 {
 
 /// Filled by `sys_task_list` for each live task.
 #[repr(C)]
+#[derive(Copy, Clone)]
 pub struct TaskInfo {
     pub id:    u64,
-    /// 1 = running/ready, 2 = blocked
+    /// Canonical task state: 1=running, 2=ready, 3=blocked.
     pub state: u64,
     /// 0 = kernel task, 1 = userspace task
     pub kind:  u8,

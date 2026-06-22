@@ -41,7 +41,7 @@ Errors are returned in RAX as large `u64` values (two's-complement negative
 | `0xFFFF_FFFF_FFFF_FFFA` | -6 | `EBADF` | Bad file descriptor |
 | `0xFFFF_FFFF_FFFF_FFF9` | -7 | `EAGAIN` | Resource temporarily unavailable |
 
-`SYSCALL_MAX = 55`. Syscall numbers above 55 and unassigned numbers 44–49
+`SYSCALL_MAX = 55`. Syscall numbers above 55 and unassigned numbers 45–49
 always return `ENOSYS`.
 
 ---
@@ -94,7 +94,8 @@ always return `ENOSYS`.
 | 41 | `SYS_IPC_LOOKUP` | Look up named IPC endpoint |
 | 42 | `SYS_IPC_RECV_TIMEOUT` | IPC recv with millisecond timeout |
 | 43 | `SYS_IPC_SEND_TIMEOUT` | IPC send with millisecond timeout |
-| 44–49 | *(unassigned)* | Return `ENOSYS` |
+| 44 | `SYS_TIME_EPOCH` | Unix epoch milliseconds (UTC) |
+| 45–49 | *(unassigned)* | Return `ENOSYS` |
 | 50 | `SYS_SOCKET` | Create UDP socket |
 | 51 | `SYS_BIND` | Bind socket to local port |
 | 52 | `SYS_SENDTO` | Send UDP datagram |
@@ -748,7 +749,24 @@ Send to an IPC endpoint with a millisecond deadline.
 
 ---
 
-### Numbers 44–49 — unassigned
+### SYS_TIME_EPOCH — 44
+
+Return Unix epoch milliseconds since 1970-01-01 00:00:00 UTC.
+
+**Arguments:** none  
+**Returns:** current time as a `u64` millisecond count since the Unix epoch
+
+**Contract:**
+- Anchored from the CMOS RTC (MC146818) at boot, converted to Unix epoch
+  milliseconds using Hinnant's days-from-civil algorithm.
+- Advances monotonically via the APIC tick counter (~1 ms resolution).
+- UTC assumed; no timezone conversion.
+- Never returns an error sentinel — the return value is always a valid timestamp.
+- Accuracy within boot-overhead of the CMOS RTC read (~seconds).
+
+---
+
+### Numbers 45–49 — unassigned
 
 Return `ENOSYS`. Reserved for future assignment.
 
@@ -891,10 +909,12 @@ to a `#[repr(C, packed)]`-free struct if field order matches exactly.
 Offset  Size  Type    Field
 ──────  ────  ──────  ─────────────────────────────────────────────────
 0       8     u64 LE  size        — file size in bytes
-8       8     u64 LE  mtime       — last-modified time (ms since kernel boot;
-                                    same epoch as SYS_TIME; 0 if not yet set)
-16      8     u64 LE  ctime       — creation time (ms since kernel boot;
-                                    same epoch as SYS_TIME; 0 if not yet set)
+8       8     u64 LE  mtime       — last-modified time (Unix epoch milliseconds,
+                                    ms since 1970-01-01 00:00:00 UTC; same epoch
+                                    as SYS_TIME_EPOCH)
+16      8     u64 LE  ctime       — creation time (Unix epoch milliseconds,
+                                    ms since 1970-01-01 00:00:00 UTC; same epoch
+                                    as SYS_TIME_EPOCH)
 24      4     u32 LE  flags       — inode flags (see below)
 28      4     u32 LE  uid         — owner user ID
 32      4     u32 LE  gid         — owner group ID
@@ -912,10 +932,9 @@ Offset  Size  Type    Field
 | 2 | 0x04 | `INODE_SYMLINK` — entry is a symbolic link |
 | 3 | 0x08 | `INODE_FAST_SYM` — symlink name stored inline |
 
-**Timestamp note:** `mtime` and `ctime` are stored in the RFS inode but the
-kernel does not currently update them at file creation or modification — both
-will read as 0 until the kernel populates them. The unit (ms since boot) is
-the canonical contract; the population is a known gap.
+**Timestamp note:** `mtime` and `ctime` use Unix epoch milliseconds (same epoch
+as `SYS_TIME_EPOCH`). Both are populated by the kernel at file/directory
+creation. `mtime` is updated on write.
 
 ### DirEntry — 264 bytes
 

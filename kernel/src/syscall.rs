@@ -66,6 +66,9 @@
 /// | 39 | SYS_IPC_POLL    |
 /// | 40 | SYS_IPC_BIND    |
 /// | 41 | SYS_IPC_LOOKUP  |
+/// | 42 | SYS_IPC_RECV_TIMEOUT |
+/// | 43 | SYS_IPC_SEND_TIMEOUT |
+/// | 44 | SYS_TIME_EPOCH  |
 
 use core::arch::global_asm;
 
@@ -188,6 +191,10 @@ pub const SYS_IPC_RECV_TIMEOUT: u64 = 42;
 /// a1=ipc_cap_handle, a2=msg_ptr, a3=msg_len, a4=timeout_ms.
 /// Returns 0 on success, or EAGAIN if timeout expires before the ring drains.
 pub const SYS_IPC_SEND_TIMEOUT: u64 = 43;
+/// Return Unix epoch milliseconds (ms since 1970-01-01 00:00:00 UTC).
+/// No arguments.  Anchored from CMOS RTC at boot; advances via APIC tick counter.
+/// Never returns an error sentinel; always a valid u64.
+pub const SYS_TIME_EPOCH: u64 = 44;
 /// Create a UDP socket. No arguments. Returns socket fd (≥ 0) or ENOSYS.
 pub const SYS_SOCKET:   u64 = 50;
 /// Bind a socket to a local UDP port.
@@ -1445,6 +1452,10 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
                 Ok(()) => 0,
                 Err(()) => EAGAIN,
             }
+        }
+
+        SYS_TIME_EPOCH => {
+            crate::time::epoch_ms()
         }
 
         // ── UDP socket API ────────────────────────────────────────────────────────
