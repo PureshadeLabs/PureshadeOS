@@ -72,6 +72,10 @@ name = "lythos"
 version = "0.1.0"
 
 [[package]]
+name = "lythos-abi"
+version = "0.1.0"
+
+[[package]]
 name = "lythos-libc"
 version = "0.1.0"
 
@@ -87,6 +91,13 @@ dependencies = [
 [[package]]
 name = "lythos-rt"
 version = "0.1.0"
+
+[[package]]
+name = "lythos-syscall"
+version = "0.1.0"
+dependencies = [
+ "lythos-abi",
+]
 
 [[package]]
 name = "lythos-unwind"

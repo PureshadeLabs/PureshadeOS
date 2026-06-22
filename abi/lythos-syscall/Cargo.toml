@@ -1,0 +1,10 @@
+[package]
+name    = "lythos-syscall"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "lythos_syscall"
+
+[dependencies]
+lythos-abi = { path = "../lythos-abi" }
