@@ -1,0 +1,14 @@
+[package]
+name    = "lythos-abi"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+
+[lib]
+name = "lythos_abi"
+
+# no_std — compiles for both x86_64-lythos (kernel) and x86_64-oros (userspace)
+# targets with zero dependencies.
+[dependencies]

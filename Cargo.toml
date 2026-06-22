@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "abi/lythos-abi",
     "kernel",
     "userspace/lib/lythos-rt",
     "userspace/lib/lythos-libstd",
