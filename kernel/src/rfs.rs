@@ -935,6 +935,7 @@ pub fn write(fd: u64, buf: &[u8]) -> i64 {
     };
     if buf.is_empty() { return 0; }
     let mut inode = inode;
+    inode.mtime = crate::time::epoch_ms();
     if !append_to_file(ino_num, &mut inode, buf, total_blocks) {
         return ENOSPC;
     }
@@ -973,12 +974,13 @@ pub fn create(path: &[u8]) -> i64 {
         Some(i) => i,
         None    => return ENOSPC,
     };
+    let now = crate::time::epoch_ms();
     let new_inode = Inode {
         flags:        INODE_USED,
         mode:         0o644,
         uid:          0, gid: 0, nlink: 1,
         size:         0, blocks: 0,
-        mtime:        0, ctime: 0,
+        mtime:        now, ctime: now,
         ovfl_block:   0, extent_count: 0,
         extents:      [[0u8; EXTENT_SIZE]; INLINE_EXTENTS],
     };
@@ -1026,12 +1028,13 @@ pub fn mkdir(path: &[u8]) -> i64 {
         Some(i) => i,
         None    => return ENOSPC,
     };
+    let now = crate::time::epoch_ms();
     let new_inode = Inode {
         flags:       INODE_USED | INODE_DIR,
         mode:        0o755,
         uid:         0, gid: 0, nlink: 1,
         size:        0, blocks: 0,
-        mtime:       0, ctime: 0,
+        mtime:       now, ctime: now,
         ovfl_block:  0, extent_count: 0,
         extents:     [[0u8; EXTENT_SIZE]; INLINE_EXTENTS],
     };
