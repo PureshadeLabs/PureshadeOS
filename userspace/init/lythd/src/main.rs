@@ -45,10 +45,83 @@ use lythos_rt::{
     BootInfo,
     ipc::Endpoint,
     println, eprintln,
-    sys_close, sys_ipc_create, sys_open, sys_read_fd, sys_readdir,
-    sys_rollback, sys_stat, sys_task_exit,
+    sys_close, sys_create, sys_ipc_create, sys_open, sys_read_fd, sys_readdir,
+    sys_rollback, sys_stat, sys_task_exit, sys_task_list, sys_task_status, sys_time,
+    sys_time_epoch, sys_nanosleep, sys_write_fd,
+    TaskInfo,
     task::{yield_now, TaskId, TaskStatus},
 };
+
+// ── ABI verification (boot-time, remove after confirming values) ──────────────
+
+fn verify_abis() {
+    // ── Step 2: SYS_TIME_EPOCH (44) from userspace ────────────────────────────
+    let boot_ms    = sys_time();
+    let epoch_ms_a = sys_time_epoch();
+    let epoch_ms_b = sys_time_epoch();
+    println!("[abi-verify] SYS_TIME       (15) boot_ms={}", boot_ms);
+    println!("[abi-verify] SYS_TIME_EPOCH (44) first={} second={}",
+        epoch_ms_a, epoch_ms_b);
+    println!("[abi-verify] SYS_TIME_EPOCH delta_between_calls={}ms",
+        epoch_ms_b.saturating_sub(epoch_ms_a));
+
+    // ── Step 3: rfs mtime/ctime at create; mtime update on write ─────────────
+    // Use a unique path — prior-boot leftover would need unlink, which we skip.
+    let ts_path = "/abi_ts";
+    match sys_create(ts_path) {
+        Ok(fd) => {
+            // Stat BEFORE any write — ctime and mtime both set by create().
+            if let Some(st) = sys_stat(ts_path) {
+                println!("[abi-verify] TIMESTAMP after create (no write): mtime={} ctime={}",
+                    st.mtime, st.ctime);
+            }
+            // Sleep 20 ms so the APIC tick counter advances at least one tick.
+            sys_nanosleep(20_000_000);
+            // Write to the still-open writable fd — write() updates mtime.
+            let _ = sys_write_fd(fd, b"AAAAABBBBBCCCCCDDDDDEEEEEFFFFF0123456");
+            let _ = sys_close(fd);
+            if let Some(st) = sys_stat(ts_path) {
+                println!("[abi-verify] TIMESTAMP after write: mtime={} ctime={}",
+                    st.mtime, st.ctime);
+                println!("[abi-verify] TIMESTAMP size={} flags={:#010x}", st.size, st.flags);
+            }
+        }
+        Err(()) => println!("[abi-verify] TIMESTAMP create failed (stale /abi_ts from prior boot)"),
+    }
+
+    // ── Task B: Stat field layout ─────────────────────────────────────────────
+    let test_path = "/abi_probe";
+    match sys_create(test_path) {
+        Ok(fd) => {
+            let _ = sys_write_fd(fd, b"AAAAABBBBBCCCCCDDDDDEEEEEFFFFF0123456"); // 37 bytes
+            let _ = sys_close(fd);
+            if let Some(st) = sys_stat(test_path) {
+                println!("[abi-verify] FILE stat: size={} flags={:#010x} mode={:#06x} uid={} nlink={}",
+                    st.size, st.flags, st.mode, st.uid, st.nlink);
+            } else {
+                println!("[abi-verify] FILE stat: returned None");
+            }
+        }
+        Err(()) => println!("[abi-verify] FILE create failed"),
+    }
+    if let Some(st) = sys_stat("/etc") {
+        println!("[abi-verify] DIR  stat: size={} flags={:#010x} mode={:#06x}",
+            st.size, st.flags, st.mode);
+    } else {
+        println!("[abi-verify] DIR  stat: returned None");
+    }
+
+    // ── Task A: task state encoding ───────────────────────────────────────────
+    let mut buf = [TaskInfo { id: 0, state: 0, kind: 0, _pad: [0; 7] }; 32];
+    let count = sys_task_list(&mut buf);
+    println!("[abi-verify] task_list returned {} entries:", count);
+    for i in 0..count {
+        let t = &buf[i];
+        let raw_status = sys_task_status(t.id);
+        println!("[abi-verify]   id={} list.state={} task_status_raw={} kind={}",
+            t.id, t.state, raw_status, t.kind);
+    }
+}
 
 // ── Capability handle constants ───────────────────────────────────────────────
 
@@ -498,6 +571,8 @@ pub extern "C" fn _start() -> ! {
     let frames  = { info.free_frames };
     println!("[lythd] lythos init — {} MiB free ({} frames), cpu: {}",
              mem_mib, frames, info.vendor_str());
+
+    verify_abis();
 
     // 2. Create the service registry endpoint.
     let registry = Endpoint::create().expect("lythd: registry endpoint alloc failed");

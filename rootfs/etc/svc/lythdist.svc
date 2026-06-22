@@ -1,5 +1,5 @@
 name=lythdist
-path=/bin/lythdist
+path=/lth/bin/lythdist
 restart=always
 cap=memory
 cap=ipc

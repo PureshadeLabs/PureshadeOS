@@ -1,7 +1,7 @@
-OROS_DIR   := ../RaptorOS
 ROOTFS_BIN := rootfs/lth/bin
-TARGET     := x86_64-oros
-OROS_OUT   := $(OROS_DIR)/target/$(TARGET)/release
+
+# Output dir: workspace-root target/ (cargo always writes here regardless of cwd)
+OROS_OUT := target/x86_64-oros/release
 
 KERNEL_DEBUG   := target/x86_64-lythos/debug/lythos
 KERNEL_RELEASE := target/x86_64-lythos/release/lythos
@@ -17,9 +17,17 @@ QEMU_FLAGS := -serial stdio -display none \
 
 all: oros kernel
 
-## Build OROS userspace binaries and copy to rootfs/lth/bin/
+## Build all userspace binaries.
+## Root .cargo/config.toml provides [target.x86_64-oros] rustflags.
+## -Z flags and --target are passed explicitly so host tools are unaffected.
+OROS_PKGS := -p lythd -p lythdist -p lythmsg -p lysh -p rutils -p rkilo -p rpkg
+OROS_FLAGS := --target targets/x86_64-oros.json \
+              -Z build-std=core,alloc,compiler_builtins \
+              -Z build-std-features=compiler-builtins-mem \
+              -Z json-target-spec
+
 oros:
-	cd $(OROS_DIR) && cargo build --release
+	cargo +nightly build --release -q $(OROS_FLAGS) $(OROS_PKGS)
 	mkdir -p $(ROOTFS_BIN)
 	cp $(OROS_OUT)/lythd     $(ROOTFS_BIN)/lythd
 	cp $(OROS_OUT)/lythdist  $(ROOTFS_BIN)/lythdist
@@ -29,14 +37,18 @@ oros:
 	cp $(OROS_OUT)/rkilo     $(ROOTFS_BIN)/rkilo
 	cp $(OROS_OUT)/rpkg      $(ROOTFS_BIN)/rpkg
 	cp $(OROS_OUT)/lythd     rootfs/lth/system/init
-	cp $(OROS_OUT)/lythmsg   rootfs/bin/lythmsg
 
-## Build the kernel (also runs build.rs → mkrfs → disk.img)
+KERNEL_FLAGS := --target targets/x86_64-lythos.json \
+                -Z build-std=core,alloc,compiler_builtins \
+                -Z build-std-features=compiler-builtins-mem \
+                -Z json-target-spec
+
+## Build the kernel (build.rs also runs mkrfs → disk.img)
 kernel:
-	cargo build
+	cargo +nightly build -q $(KERNEL_FLAGS) -p lythos
 
 kernel-release:
-	cargo build --release
+	cargo +nightly build --release -q $(KERNEL_FLAGS) -p lythos
 
 ## Run debug kernel under QEMU
 run: kernel
@@ -46,7 +58,7 @@ run: kernel
 run-release: kernel-release
 	$(QEMU) -kernel $(KERNEL_RELEASE) $(QEMU_FLAGS)
 
-## Run with graphical display (framebuffer visible)
+## Run with graphical display
 run-gui: kernel
 	$(QEMU) -kernel $(KERNEL_DEBUG) \
 	        -serial stdio \
@@ -62,5 +74,4 @@ debug: kernel
 
 clean:
 	cargo clean
-	cd $(OROS_DIR) && cargo clean
 	rm -f disk.img

@@ -6,7 +6,7 @@
  *
  * Both protocols enter in 32-bit protected mode (flat 4 GiB segments).
  * This stub then:
- *   1. Sets up a temporary 16 KiB stack
+ *   1. Sets up a temporary 128 KiB stack
  *   2. Zeros the three page-table frames and identity-maps the first 1 GiB
  *      using 2 MiB huge pages (P4 → P3 → P2 with PS=1)
  *   3. Enables PAE, loads CR3, sets EFER.LME, enables paging
@@ -190,7 +190,7 @@ p2_table:       .skip 4096
 
 .align 16
 boot_stack_bottom:
-                .skip 16384     /* 16 KiB temporary stack */
+                .skip 131072    /* 128 KiB — debug builds use deep frames during disk I/O + ISR */
 boot_stack_top:
 
 /* Saved at 32-bit entry; read as 64-bit in long mode (upper half stays 0). */

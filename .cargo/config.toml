@@ -1,0 +1,5 @@
+[target.x86_64-oros]
+rustflags = ["-C", "link-arg=-Tuserspace/lib/lythos-rt/userspace.ld"]
+
+[target.x86_64-lythos]
+rustflags = ["-C", "link-arg=-Tkernel/boot/linker/x86_64.ld"]

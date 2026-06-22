@@ -43,9 +43,13 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering as AO};
 
 use crate::pmm;
 use crate::vmm::{PageFlags, VirtAddr, map_page};
+
+/// Set to true to log every alloc/dealloc.
+pub static HEAP_TRACE: AtomicBool = AtomicBool::new(false);
 
 // ── Heap layout constants ─────────────────────────────────────────────────────
 
@@ -61,8 +65,8 @@ pub fn heap_start() -> u64 {
     HEAP_BASE_NOMINAL + crate::kaslr::offset()
 }
 
-/// Number of 4 KiB pages pre-mapped at `init` time: 4 MiB = 1024 pages.
-pub const HEAP_INIT_PAGES: usize = 1024;
+/// Number of 4 KiB pages pre-mapped at `init` time: 16 MiB = 4096 pages.
+pub const HEAP_INIT_PAGES: usize = 4096;
 
 // ── Free-list node ────────────────────────────────────────────────────────────
 
@@ -139,7 +143,13 @@ unsafe impl GlobalAlloc for KernelAllocator {
                 }
 
                 // User data starts right after the header.
-                return (curr as usize + HEADER) as *mut u8;
+                let result = (curr as usize + HEADER) as *mut u8;
+                if HEAP_TRACE.load(AO::Relaxed) {
+                    crate::kprintln!("[alloc] size={} -> {:#x} head_after={:#x}",
+                        size, result as u64,
+                        unsafe { *head_ptr } as u64);
+                }
+                return result;
             }
 
             // Advance: prev_next now points to curr's `next` field.
@@ -147,7 +157,17 @@ unsafe impl GlobalAlloc for KernelAllocator {
             curr     = unsafe { (*curr).next };
         }
 
-        // No suitable block found.
+        // No suitable block found — log the largest free block for diagnosis.
+        let mut largest: usize = 0;
+        let mut count: usize = 0;
+        let mut scan = unsafe { *self.head.get() };
+        while !scan.is_null() {
+            let s = unsafe { (*scan).size };
+            if s > largest { largest = s; }
+            count += 1;
+            scan = unsafe { (*scan).next };
+        }
+        crate::kprintln!("[heap-oom] need={} largest_free={} free_blocks={}", size, largest, count);
         ptr::null_mut()
     }
 
@@ -157,6 +177,12 @@ unsafe impl GlobalAlloc for KernelAllocator {
         // ALIGN and blocks are ALIGN-aligned), this subtraction is exact.
         let block = (ptr as usize - HEADER) as *mut FreeBlock;
         let size  = align_up(layout.size().max(1), ALIGN);
+
+        if HEAP_TRACE.load(AO::Relaxed) {
+            crate::kprintln!("[dealloc] block={:#x} size={} head_before={:#x}",
+                block as u64, size,
+                unsafe { *self.head.get() } as u64);
+        }
 
         unsafe {
             (*block).size = size;
@@ -182,6 +208,36 @@ pub extern "C" fn __rust_alloc_error_handler(size: usize, align: usize) -> ! {
         size, align
     );
     loop { unsafe { core::arch::asm!("hlt") }; }
+}
+
+// ── Diagnostics ──────────────────────────────────────────────────────────────
+
+/// Return the current head pointer as a u64 (for external corruption checks).
+pub fn head_as_u64() -> u64 {
+    (unsafe { *ALLOCATOR.head.get() }) as u64
+}
+
+/// Print the physical address of ALLOCATOR and the head pointer.
+pub fn print_allocator_addr() {
+    let allocator_addr = ptr::addr_of!(ALLOCATOR) as u64;
+    let head_field_addr = unsafe { ALLOCATOR.head.get() } as u64;
+    let head_val = unsafe { *ALLOCATOR.head.get() } as u64;
+    crate::kprintln!("[heap-addr] ALLOCATOR={:#x} head_field={:#x} head_val={:#x}",
+                     allocator_addr, head_field_addr, head_val);
+}
+
+/// Walk the free list and print block count + total free bytes.
+pub fn print_stats(tag: &str) {
+    let mut count: usize = 0;
+    let mut total: usize = 0;
+    let mut scan = unsafe { *ALLOCATOR.head.get() };
+    while !scan.is_null() {
+        let s = unsafe { (*scan).size };
+        total += s + HEADER;
+        count += 1;
+        scan = unsafe { (*scan).next };
+    }
+    crate::kprintln!("[heap-stat] {} blocks={} free_bytes={}", tag, count, total);
 }
 
 // ── Initialisation ────────────────────────────────────────────────────────────

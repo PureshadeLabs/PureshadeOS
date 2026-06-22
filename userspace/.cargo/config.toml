@@ -1,5 +1,5 @@
 [build]
-target = "targets/x86_64-oros.json"
+target = "../targets/x86_64-oros.json"
 
 [target.x86_64-oros]
 rustflags = ["-C", "link-arg=-Tuserspace/lib/lythos-rt/userspace.ld"]

@@ -1,5 +1,5 @@
 name=lythmsg
-path=/bin/lythmsg
+path=/lth/bin/lythmsg
 restart=always
 cap=memory
 cap=ipc
