@@ -85,3 +85,53 @@ writes 0 for both fields at inode creation (`mtime: 0, ctime: 0` in `rfs.rs`
 affects whether the fields contain meaningful values.
 
 **Commit scope:** `kernel/src/rfs.rs` (creation and mutation sites).
+
+---
+
+## 4. lythos-syscall: add aarch64 syscall stubs when second arch is built out
+
+**Why deferred:** `lythos-syscall` stubs are x86_64-only, guarded by
+`#[cfg(target_arch = "x86_64")]` in `abi/lythos-syscall/src/lib.rs`. On any
+other target the crate compiles as an empty module, and any userspace crate
+that depends on `lythos-syscall` will fail to link (functions not found).
+
+**What to change:**
+- Add `abi/lythos-syscall/src/aarch64.rs` (or equivalent) with the aarch64
+  `svc #0` instruction stubs using the same `syscall0`–`syscall6` signatures.
+- Gate with `#[cfg(target_arch = "aarch64")]` in `lib.rs`.
+- Add the aarch64 target JSON and verify the new stubs compile clean.
+
+**Relevant files:**
+- `abi/lythos-syscall/src/lib.rs` — add the `#[cfg(target_arch = "aarch64")]`
+  module declaration alongside the existing x86_64 one.
+- `abi/lythos-syscall/src/aarch64.rs` — new file, mirrors x86_64.rs structure.
+
+**Commit scope:** `abi/lythos-syscall/` + the aarch64 target JSON.
+
+---
+
+## 5. virtio-net — over-allocation latent behind device probe, NOT fixed
+
+**Status:** heap expansion was a workaround, not a fix. Root cause remains.
+
+`net::init()` over-allocates the kernel heap (oversized RX/TX buffers and/or
+kernel task stack), causing a kmain heap-exhaustion panic before lythd spawns.
+`net::init()` is gated inside `if virtio_net::init()` — it runs only when a
+virtio-net device is present.
+
+**Current workaround:** `HEAP_INIT_PAGES` was expanded from 1024 (4 MiB) to
+4096 (16 MiB) in `kernel/src/heap.rs`. This masks the panic but does not fix
+the over-allocation. The over-sized buffers are still present; the larger heap
+absorbs them.
+
+**Trigger:** booting with a virtio-net device runs `net::init()`. The current
+QEMU run target (`make run`) includes `-device virtio-net-pci,netdev=net0`, so
+`net::init()` already runs every boot. If `HEAP_INIT_PAGES` is ever reduced
+back toward 4 MiB the panic will reappear.
+
+**Fix:** determine actual buffer-count × buffer-size in `net::init()`, right-size
+RX/TX buffers and the net task ring, then verify clean init with heap at 4 MiB
+to confirm the root cause is resolved (not just masked).
+
+**Location:** `kernel/src/main.rs:210` — `net::init()` call, guarded by
+`if virtio_net::init()` at line 204.
