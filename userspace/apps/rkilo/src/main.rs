@@ -19,8 +19,9 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use core::fmt::Write as FmtWrite;
 use lythos_rt::{
-    sys_close, sys_create, sys_log, sys_open, sys_read_fd, sys_serial_avail,
-    sys_serial_read, sys_stat, sys_task_exit, sys_time, sys_unlink, sys_write_fd,
+    sys_close, sys_create, sys_log, sys_nanosleep, sys_open, sys_read_fd,
+    sys_serial_avail, sys_serial_read, sys_stat, sys_task_exit, sys_time,
+    sys_unlink, sys_write_fd,
 };
 
 const RKILO_VERSION: &str = "0.1.0";
@@ -685,6 +686,18 @@ fn get_window_size() -> (usize, usize) {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     let (rows, cols) = get_window_size();
+
+    // Both the kernel (for the framebuffer console) and an attached serial
+    // terminal may answer the ESC[6n size query.  The kernel's reply arrives
+    // first (injected synchronously); drain any late duplicate from the
+    // terminal so it isn't read as keystrokes.
+    for _ in 0..2 {
+        sys_nanosleep(20_000_000); // 20 ms
+        let mut b = [0u8; 1];
+        while sys_serial_avail() {
+            let _ = sys_serial_read(&mut b);
+        }
+    }
 
     // rows - 2: reserve 1 row for status bar + 1 for status message
     let mut e = Editor::new(rows.saturating_sub(2).max(1), cols.max(10));

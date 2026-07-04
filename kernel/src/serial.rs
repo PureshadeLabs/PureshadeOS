@@ -81,7 +81,15 @@ impl SerialPort {
             outb(self.base + OFF_DLAB_LO, 0x01); // divisor = 1  →  115200 baud
             outb(self.base + OFF_DLAB_HI, 0x00);
             outb(self.base + OFF_LCR,     0x03); // 8 data bits, no parity, 1 stop; clear DLAB
-            outb(self.base + OFF_FCR,     0x01); // enable FIFO, 1-byte threshold (polls via LSR)
+            // FIFO enable + clear RX/TX + 14-byte RX trigger level (0xC7).
+            // The trigger level matters even though we poll via LSR: QEMU's
+            // serial_can_receive() reports (trigger - fifo_used) as chardev
+            // backpressure capacity.  With a 1-byte trigger, every received
+            // byte drops capacity to 0 and forces the host chardev to
+            // disarm/re-arm its read watch per byte — a churn path that
+            // silently drops RX on macOS.  A 14-byte trigger keeps capacity
+            // positive so the watch stays armed.
+            outb(self.base + OFF_FCR,     0xC7);
             outb(self.base + OFF_MCR,     0x0B); // assert DTR + RTS
         }
     }
@@ -108,6 +116,11 @@ impl SerialPort {
                 None
             }
         }
+    }
+
+    /// TEMP DEBUG: raw LSR value.
+    pub fn lsr_raw(&self) -> u8 {
+        unsafe { inb(self.base + OFF_LSR) }
     }
 
     /// Write a single byte, blocking until the Transmit Holding Register is empty.
@@ -220,6 +233,11 @@ impl<T> core::ops::DerefMut for SpinLockGuard<'_, T> {
 
 pub static SERIAL: SpinLock<SerialPort> = SpinLock::new(SerialPort::new(COM1));
 
+/// TEMP DEBUG: cumulative bytes handed to userspace by SYS_SERIAL_READ.
+/// Reported in the idle diagnostics; remove once serial RX is verified.
+pub static RX_DELIVERED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 /// Initialise COM1.  Must be called once before any `kprint!` / `kprintln!`.
 pub fn init() {
     SERIAL.lock().init();
@@ -227,21 +245,35 @@ pub fn init() {
 
 // ── kprint! / kprintln! ────────────────────────────────────────────────────
 
-/// Print to the kernel serial console without a trailing newline.
+/// Print to the unified kernel log (serial + framebuffer console) without a
+/// trailing newline.  ANSI SGR sequences become glyph colours on the
+/// framebuffer and are stripped from serial output — see `log.rs`.
 #[macro_export]
 macro_rules! kprint {
     ($($arg:tt)*) => {{
-        use core::fmt::Write as _;
-        let _ = $crate::serial::SERIAL.lock().write_fmt(format_args!($($arg)*));
+        $crate::log::write_fmt(format_args!($($arg)*));
     }};
 }
 
-/// Print to the kernel serial console with a `\r\n` line ending.
+/// Print to the unified kernel log with a `\r\n` line ending.
+/// Single `write_fmt` call — the line plus terminator is emitted under one
+/// logger lock, so concurrent tasks cannot interleave mid-line.
 #[macro_export]
 macro_rules! kprintln {
     ()            => { $crate::kprint!("\r\n") };
     ($($arg:tt)*) => {{
-        $crate::kprint!($($arg)*);
-        $crate::kprint!("\r\n");
+        $crate::log::write_fmt(format_args!("{}\r\n", format_args!($($arg)*)));
+    }};
+}
+
+/// Print a diagnostic line to **serial only** (`\r\n`-terminated).  SGR
+/// sequences are stripped exactly as with `kprintln!`; the framebuffer
+/// console is skipped.  For periodic telemetry that would otherwise scroll
+/// the console on an idle machine — boot/status messages belong on both
+/// sinks via `kprintln!`.
+#[macro_export]
+macro_rules! kdiagln {
+    ($($arg:tt)*) => {{
+        $crate::log::write_fmt_serial(format_args!("{}\r\n", format_args!($($arg)*)));
     }};
 }

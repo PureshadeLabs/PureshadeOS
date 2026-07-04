@@ -46,7 +46,7 @@ Errors are returned in RAX as large `u64` values (two's-complement negative
 | `0xFFFF_FFFF_FFFF_FFF5` | -11 | `EEXIST`  | File or directory already exists (SYS_CREATE, SYS_MKDIR, SYS_RENAME) |
 | `0xFFFF_FFFF_FFFF_FFF4` | -12 | `ENOSPC`  | No space left on device (SYS_CREATE, SYS_MKDIR) |
 
-`SYSCALL_MAX = 55`. Syscall numbers above 55 and unassigned numbers 45–49
+`SYSCALL_MAX = 55`. Syscall numbers above 55 and unassigned number 49
 always return `ENOSYS`.
 
 ---
@@ -100,7 +100,11 @@ always return `ENOSYS`.
 | 42 | `SYS_IPC_RECV_TIMEOUT` | IPC recv with millisecond timeout |
 | 43 | `SYS_IPC_SEND_TIMEOUT` | IPC send with millisecond timeout |
 | 44 | `SYS_TIME_EPOCH` | Unix epoch milliseconds (UTC) |
-| 45–49 | *(unassigned)* | Return `ENOSYS` |
+| 45 | `SYS_GETUID` | Return calling task's UID |
+| 46 | `SYS_GETGID` | Return calling task's GID |
+| 47 | `SYS_SETUID` | Set calling task's UID |
+| 48 | `SYS_SETGID` | Set calling task's GID |
+| 49 | *(unassigned)* | Return `ENOSYS` |
 | 50 | `SYS_SOCKET` | Create UDP socket |
 | 51 | `SYS_BIND` | Bind socket to local port |
 | 52 | `SYS_SENDTO` | Send UDP datagram |
@@ -682,7 +686,13 @@ Set or query the program break (heap top) for the calling task.
 - a1 — new break address; 0 = query current break without changing it
 
 **Returns:** new break address on success; highest address actually mapped if
-OOM (partial success); `EINVAL` if `a1` falls within the stack area
+OOM (partial success); `EINVAL` if `a1` falls within the stack area or, on
+shrink, below the heap base (`0x0000_0004_0000_0000`)
+
+Growing maps zeroed anonymous pages up to `round_up(a1, 4096)`.  Shrinking
+(`a1 <= current break`) unmaps and frees every whole page above
+`round_up(a1, 4096)`; pages below that boundary stay mapped.  Requires a
+`Memory` capability with `WRITE` right (`ENOPERM` otherwise).
 
 ---
 
@@ -780,9 +790,47 @@ Return Unix epoch milliseconds since 1970-01-01 00:00:00 UTC.
 
 ---
 
-### Numbers 45–49 — unassigned
+### SYS_GETUID — 45
 
-Return `ENOSYS`. Reserved for future assignment.
+Return the effective user ID of the calling task.
+
+**Arguments:** none  
+**Returns:** `u32` UID in RAX (always 0 / root until `SYS_SETUID` is implemented)
+
+---
+
+### SYS_GETGID — 46
+
+Return the effective group ID of the calling task.
+
+**Arguments:** none  
+**Returns:** `u32` GID in RAX (always 0 / root until `SYS_SETGID` is implemented)
+
+---
+
+### SYS_SETUID — 47
+
+Set the effective user ID of the calling task.
+
+**Arguments:** `a1` = new UID (u32)  
+**Returns:** 0 on success; `ENOPERM` if the calling task is not root and `new_uid ≠ current_uid`
+
+**Security model:** Root (uid=0) may set any uid; non-root tasks may only confirm their own uid (no-op). Call `SYS_SETGID` before `SYS_SETUID` when dropping from root — once uid transitions away from 0, the task loses the right to change gid freely.
+
+---
+
+### SYS_SETGID — 48
+
+Set the effective group ID of the calling task.
+
+**Arguments:** `a1` = new GID (u32)  
+**Returns:** 0 on success; `ENOPERM` if the calling task is not root and `new_gid ≠ current_gid`
+
+---
+
+### Number 49 — unassigned
+
+Returns `ENOSYS`. Reserved for future assignment.
 
 ---
 

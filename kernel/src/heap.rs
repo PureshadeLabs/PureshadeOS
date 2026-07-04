@@ -22,10 +22,10 @@
 /// `alloc` does a first-fit walk.  If the matching block has enough leftover
 /// (≥ `HEADER + ALIGN` bytes) it is split; otherwise the whole block is used.
 ///
-/// `dealloc` reinserts the block at the head of the free list.  Coalescing is
-/// omitted for now; the early kernel workload (a handful of long-lived `Box`
-/// and `Vec` objects) does not create the fragmentation pattern that would
-/// require it.
+/// `dealloc` keeps the free list sorted by block address and coalesces the
+/// freed block with physically adjacent neighbours.  Task-stack and syscall
+/// buffer churn otherwise fragments the heap until large allocations fail
+/// despite ample total free bytes.
 ///
 /// ## Alignment
 ///
@@ -65,8 +65,13 @@ pub fn heap_start() -> u64 {
     HEAP_BASE_NOMINAL + crate::kaslr::offset()
 }
 
-/// Number of 4 KiB pages pre-mapped at `init` time: 16 MiB = 4096 pages.
-pub const HEAP_INIT_PAGES: usize = 4096;
+/// Number of 4 KiB pages pre-mapped at `init` time: 2 MiB = 512 pages.
+///
+/// Idle heap use is ~220 KB (5 task stacks + long-lived kernel objects); boot
+/// peak adds transient ELF copy buffers (≤ 2 × 116 KiB per exec).  The old
+/// 16 MiB value masked free-list fragmentation, fixed by coalescing in
+/// `dealloc` — do not grow this again without checking `[heap-stat]` output.
+pub const HEAP_INIT_PAGES: usize = 512;
 
 // ── Free-list node ────────────────────────────────────────────────────────────
 
@@ -184,11 +189,43 @@ unsafe impl GlobalAlloc for KernelAllocator {
                 unsafe { *self.head.get() } as u64);
         }
 
+        // Address-ordered insert with coalescing.  The list is kept sorted by
+        // block address so that a freed block can be merged with its physical
+        // neighbours; without this, alloc/dealloc churn (task stacks, syscall
+        // scratch buffers) shatters the heap into thousands of small blocks
+        // and large allocations start failing even with plenty of free bytes.
         unsafe {
             (*block).size = size;
-            // Insert at the head of the free list (O(1), no coalescing).
-            (*block).next = *self.head.get();
-            *self.head.get() = block;
+
+            let head_ptr: *mut *mut FreeBlock = self.head.get();
+            let mut prev: *mut FreeBlock = ptr::null_mut();
+            let mut curr = *head_ptr;
+            while !curr.is_null() && (curr as usize) < (block as usize) {
+                prev = curr;
+                curr = (*curr).next;
+            }
+
+            (*block).next = curr;
+            if prev.is_null() {
+                *head_ptr = block;
+            } else {
+                (*prev).next = block;
+            }
+
+            // Merge with the following block if physically adjacent.
+            if !curr.is_null()
+                && block as usize + HEADER + (*block).size == curr as usize
+            {
+                (*block).size += HEADER + (*curr).size;
+                (*block).next = (*curr).next;
+            }
+            // Merge with the preceding block if physically adjacent.
+            if !prev.is_null()
+                && prev as usize + HEADER + (*prev).size == block as usize
+            {
+                (*prev).size += HEADER + (*block).size;
+                (*prev).next = (*block).next;
+            }
         }
     }
 }
@@ -220,24 +257,41 @@ pub fn head_as_u64() -> u64 {
 /// Print the physical address of ALLOCATOR and the head pointer.
 pub fn print_allocator_addr() {
     let allocator_addr = ptr::addr_of!(ALLOCATOR) as u64;
-    let head_field_addr = unsafe { ALLOCATOR.head.get() } as u64;
+    let head_field_addr = ALLOCATOR.head.get() as u64;
     let head_val = unsafe { *ALLOCATOR.head.get() } as u64;
     crate::kprintln!("[heap-addr] ALLOCATOR={:#x} head_field={:#x} head_val={:#x}",
                      allocator_addr, head_field_addr, head_val);
 }
 
 /// Walk the free list and print block count + total free bytes.
+/// Serial only: emitted every ~2000 ticks from the kmain idle loop — on the
+/// framebuffer console it would scroll the screen forever on an idle system.
 pub fn print_stats(tag: &str) {
+    let (count, total, largest) = free_list_stats();
+    crate::kdiagln!("[heap-stat] {} blocks={} free_bytes={} largest={}", tag, count, total, largest);
+}
+
+/// Total free bytes on the heap (including block headers), plus block count
+/// and largest single block.  Used by the sweep_dead leak probe and idle-RAM
+/// diagnostics.
+pub fn free_list_stats() -> (usize, usize, usize) {
     let mut count: usize = 0;
     let mut total: usize = 0;
+    let mut largest: usize = 0;
     let mut scan = unsafe { *ALLOCATOR.head.get() };
     while !scan.is_null() {
         let s = unsafe { (*scan).size };
         total += s + HEADER;
         count += 1;
+        if s > largest { largest = s; }
         scan = unsafe { (*scan).next };
     }
-    crate::kprintln!("[heap-stat] {} blocks={} free_bytes={}", tag, count, total);
+    (count, total, largest)
+}
+
+/// Total free bytes on the heap free list (including headers).
+pub fn free_bytes() -> usize {
+    free_list_stats().1
 }
 
 // ── Initialisation ────────────────────────────────────────────────────────────

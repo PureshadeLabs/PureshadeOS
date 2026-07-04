@@ -61,6 +61,12 @@ impl PageFlags {
     pub const KERNEL_RO: Self = Self(
         PageFlags::PRESENT.0 | PageFlags::NX.0
     );
+    /// Kernel read-write-execute (used for the initial kernel image mapping;
+    /// per-section RX/RW split is deferred until linker section symbols are
+    /// wired through vmm::init()).
+    pub const KERNEL_RWX: Self = Self(
+        PageFlags::PRESENT.0 | PageFlags::WRITABLE.0
+    );
     /// User read-execute (code pages; not executable from kernel mode with SMEP).
     pub const USER_RX: Self = Self(
         PageFlags::PRESENT.0 | PageFlags::USER.0
@@ -126,13 +132,27 @@ struct PageTable([PageTableEntry; 512]);
 /// Physical address of the active PML4.
 static mut PML4_PHYS: u64 = 0;
 
+/// Offset added to a physical address to reach a virtual mapping of it.
+///
+/// Limine base revision ≥ 1 does NOT identity-map lower memory — under the
+/// boot page tables, frames are only reachable through the HHDM.  `init`
+/// sets this to the HHDM offset before the first `alloc_table()` call and
+/// leaves it set afterwards: step 3.5 reproduces the HHDM alias in our own
+/// tables, so the same offset stays valid after the CR3 switch.
+static mut PHYS_OFFSET: u64 = 0;
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// Virtual pointer to the page-table frame at `phys` (via HHDM offset).
+#[inline]
+fn table_ptr(phys: PhysAddr) -> *mut PageTable {
+    (phys.as_u64() + unsafe { PHYS_OFFSET }) as *mut PageTable
+}
 
 /// Allocate a zeroed 4 KiB frame for a page table.
 fn alloc_table() -> PhysAddr {
     let frame = pmm::alloc_frame().expect("vmm: out of memory for page table");
-    // All PMM frames are within the identity-mapped 0→1 GiB range, so phys == virt.
-    unsafe { core::ptr::write_bytes(frame.as_u64() as *mut u8, 0, 4096) };
+    unsafe { core::ptr::write_bytes(table_ptr(frame) as *mut u8, 0, 4096) };
     frame
 }
 
@@ -161,10 +181,10 @@ unsafe fn walk_or_create(pml4: PhysAddr, virt: VirtAddr, user: bool) -> &'static
                 "vmm: map_page hit a huge-page entry — \
                  do not call map_page for addresses in the 0→1 GiB identity range"
             );
-            unsafe { &mut *(entry.address().as_u64() as *mut PageTable) }
+            unsafe { &mut *table_ptr(entry.address()) }
         }};
     }
-    let p4 = unsafe { &mut *(pml4.as_u64() as *mut PageTable) };
+    let p4 = unsafe { &mut *table_ptr(pml4) };
     let p3 = descend!(p4, virt.p4_idx());
     let p2 = descend!(p3, virt.p3_idx());
     let p1 = descend!(p2, virt.p2_idx());
@@ -177,10 +197,10 @@ unsafe fn walk_existing(pml4: PhysAddr, virt: VirtAddr) -> Option<&'static mut P
         ($parent:expr, $idx:expr) => {{
             let entry = &$parent.0[$idx];
             if !entry.is_present() { return None; }
-            unsafe { &mut *(entry.address().as_u64() as *mut PageTable) }
+            unsafe { &mut *table_ptr(entry.address()) }
         }};
     }
-    let p4 = unsafe { &mut *(pml4.as_u64() as *mut PageTable) };
+    let p4 = unsafe { &mut *table_ptr(pml4) };
     let p3 = descend!(p4, virt.p4_idx());
     let p2 = descend!(p3, virt.p3_idx());
     let p1 = descend!(p2, virt.p2_idx());
@@ -256,6 +276,26 @@ pub fn unmap_page(virt: VirtAddr) {
     crate::apic::send_tlb_shootdown_ipi();
 }
 
+/// Remove the mapping for `virt` in `pml4`, returning the physical frame that
+/// backed it (or `None` if it was not mapped).  The caller decides whether to
+/// free the frame.  Invalidates the TLB entry — `pml4` may be the active CR3
+/// (SYS_BRK shrink runs on the calling task's own page table).
+pub fn unmap_page_in(pml4: PhysAddr, virt: VirtAddr) -> Option<PhysAddr> {
+    let entry = unsafe { walk_existing(pml4, virt) }?;
+    if !entry.is_present() { return None; }
+    let pa = entry.address();
+    entry.clear();
+    unsafe {
+        core::arch::asm!(
+            "invlpg [{va}]",
+            va = in(reg) virt.as_u64(),
+            options(nostack, preserves_flags),
+        );
+    }
+    crate::apic::send_tlb_shootdown_ipi();
+    Some(pa)
+}
+
 /// Free all frames owned by a user process's page table, then free the table
 /// frames themselves.
 ///
@@ -269,18 +309,18 @@ pub fn unmap_page(virt: VirtAddr) {
 /// `create_user_page_table` and must not be the currently active CR3.
 pub fn free_user_page_table(pml4: PhysAddr) {
     // Locate the shared identity-map PD so we can skip it.
-    let kern_p4     = unsafe { &*(PML4_PHYS as *const PageTable) };
-    let kern_p3     = unsafe { &*(kern_p4.0[0].address().as_u64() as *const PageTable) };
+    let kern_p4     = unsafe { &*table_ptr(PhysAddr(PML4_PHYS)) };
+    let kern_p3     = unsafe { &*table_ptr(kern_p4.0[0].address()) };
     let shared_p2   = kern_p3.0[0].address();
 
-    let p4 = unsafe { &*(pml4.as_u64() as *const PageTable) };
+    let p4 = unsafe { &*table_ptr(pml4) };
 
     // Walk user-half PML4 entries only.
     for i in 0..256 {
         let p4e = p4.0[i];
         if !p4e.is_present() { continue; }
         let p3_phys = p4e.address();
-        let p3      = unsafe { &*(p3_phys.as_u64() as *const PageTable) };
+        let p3      = unsafe { &*table_ptr(p3_phys) };
 
         for j in 0..512 {
             let p3e = p3.0[j];
@@ -290,7 +330,7 @@ pub fn free_user_page_table(pml4: PhysAddr) {
             // Skip the shared identity-map PD.
             if p2_phys == shared_p2 { continue; }
 
-            let p2 = unsafe { &*(p2_phys.as_u64() as *const PageTable) };
+            let p2 = unsafe { &*table_ptr(p2_phys) };
 
             for k in 0..512 {
                 let p2e = p2.0[k];
@@ -301,7 +341,7 @@ pub fn free_user_page_table(pml4: PhysAddr) {
                     continue;
                 }
                 let p1_phys = p2e.address();
-                let p1      = unsafe { &*(p1_phys.as_u64() as *const PageTable) };
+                let p1      = unsafe { &*table_ptr(p1_phys) };
                 for l in 0..512 {
                     let p1e = p1.0[l];
                     if p1e.is_present() {
@@ -332,20 +372,20 @@ pub fn kernel_pml4() -> PhysAddr {
 /// - `[256..511]` copied from the kernel PML4 (heap, IPC window, etc.).
 pub fn create_user_page_table() -> PhysAddr {
     // Locate the kernel's identity-map PD by reading PML4[0] → PDPT[0].
-    let kern_p4  = unsafe { &*(PML4_PHYS as *const PageTable) };
+    let kern_p4  = unsafe { &*table_ptr(PhysAddr(PML4_PHYS)) };
     let p3_phys  = kern_p4.0[0].address();
-    let kern_p3  = unsafe { &*(p3_phys.as_u64() as *const PageTable) };
+    let kern_p3  = unsafe { &*table_ptr(p3_phys) };
     let p2_phys  = kern_p3.0[0].address();
 
     // New per-process PDPT: slot 0 → shared identity-map PD (no U/S —
     // kernel identity map is not user-accessible).
     let user_p3_phys = alloc_table();
-    let user_p3      = unsafe { &mut *(user_p3_phys.as_u64() as *mut PageTable) };
+    let user_p3      = unsafe { &mut *table_ptr(user_p3_phys) };
     user_p3.0[0]     = PageTableEntry::table(p2_phys);
 
     // New PML4.
     let new_pml4_phys = alloc_table();
-    let new_p4        = unsafe { &mut *(new_pml4_phys.as_u64() as *mut PageTable) };
+    let new_p4        = unsafe { &mut *table_ptr(new_pml4_phys) };
 
     // PML4[0] → user PDPT with U/S so walk_or_create can add user entries.
     new_p4.0[0] = PageTableEntry(user_p3_phys.as_u64() | 0x7); // P | W | U/S
@@ -385,17 +425,33 @@ pub fn update_page_flags_in(pml4: PhysAddr, virt: VirtAddr, flags: PageFlags) {
     }
 }
 
-/// Clear a page mapping in `pml4`.  No-op if not present.  No `invlpg`.
-pub fn unmap_page_in(pml4: PhysAddr, virt: VirtAddr) {
-    if let Some(entry) = unsafe { walk_existing(pml4, virt) } {
-        entry.clear();
-    }
-}
-
 /// Initialise the VMM.
 ///
+/// `kernel_phys_base` / `kernel_virt_base` come from Limine's
+/// KernelAddressResponse.  `kernel_phys_end` is the physical end of the
+/// kernel image (computed in kmain from KERNEL_END − KERNEL_START + phys_base).
+/// `hhdm_off` is Limine's HHDM offset (HhdmResponse.offset).  Limine places
+/// the initial stack in the HHDM range; we re-map 0→1 GiB there so the stack
+/// and other Limine-allocated structures remain accessible after our CR3 is loaded.
+///
 /// Must be called once, after `pmm::init()`, before any `map_page` calls.
-pub fn init() {
+macro_rules! dbg_byte {
+    ($b:expr) => {
+        unsafe {
+            core::arch::asm!(
+                "mov dx, 0x3F8", "out dx, al",
+                in("al") $b as u8, out("dx") _, options(nostack, nomem, preserves_flags)
+            );
+        }
+    };
+}
+
+pub fn init(kernel_phys_base: u64, kernel_virt_base: u64, kernel_phys_end: u64, hhdm_off: u64) {
+    dbg_byte!(b'1');  // entered init
+    // Limine base revision ≥ 1 provides no identity map of lower memory —
+    // page-table frames are only reachable through the HHDM.  Must be set
+    // before the first alloc_table() below.
+    unsafe { PHYS_OFFSET = hhdm_off; }
     // ── 1. Enable NXE in EFER ─────────────────────────────────────────────
     // IA32_EFER MSR = 0xC000_0080; NXE is bit 11.
     // Without NXE, bit 63 of a PTE is a reserved bit — setting it causes #PF.
@@ -419,64 +475,97 @@ pub fn init() {
         );
     }
 
+    dbg_byte!(b'2');  // NXE done
     // ── 2. Allocate PML4 and record it ────────────────────────────────────
-    // All table frames come from the PMM while the boot page tables (which
-    // identity-map 0→1 GiB with 2 MiB huge pages) are still in CR3, so
-    // every physical address is directly accessible.
+    // Table frames come from the PMM while Limine's page tables are still in
+    // CR3; they are written through the HHDM (PHYS_OFFSET above).
     let pml4_phys = alloc_table();
     unsafe { PML4_PHYS = pml4_phys.as_u64(); }
 
+    dbg_byte!(b'3');  // PML4 allocated
     // ── 3. Identity-map 0→1 GiB with 2 MiB huge pages ────────────────────
     // Only three frames needed (PML4, PDPT, PD); no PT level.
     // Flags: present (bit 0) | writable (bit 1) | PS (bit 7) = 0x83.
     // NX is intentionally NOT set: kernel code executes from this range.
-    {
+    // p2_phys is kept for the HHDM alias in step 3.5.
+    let p2_phys = {
         let p3_phys = alloc_table();
         let p2_phys = alloc_table();
 
         // PML4[0] → PDPT
-        let p4 = pml4_phys.as_u64() as *mut PageTable;
+        let p4 = table_ptr(pml4_phys);
         unsafe { (*p4).0[0] = PageTableEntry::table(p3_phys); }
 
         // PDPT[0] → PD
-        let p3 = p3_phys.as_u64() as *mut PageTable;
+        let p3 = table_ptr(p3_phys);
         unsafe { (*p3).0[0] = PageTableEntry::table(p2_phys); }
 
         // PD[0..512]: 2 MiB huge pages, physical = i × 2 MiB
-        let p2 = p2_phys.as_u64() as *mut PageTable;
+        let p2 = table_ptr(p2_phys);
         for i in 0..512_usize {
             let base = (i as u64) * 2 * 1024 * 1024;
             unsafe { (*p2).0[i] = PageTableEntry(base | 0x83); }
         }
-    }
+        p2_phys
+    };
 
-    // ── 4. Higher-half kernel window (4 KiB pages, NX) ───────────────────
-    // Maps the kernel image at 0xFFFF_8000_0000_0000 + physical_address.
-    // Execution from higher-half is deferred; NX is set (data mapping).
-    unsafe extern "C" {
-        static KERNEL_START: u8;
-        static KERNEL_END:   u8;
-    }
-    let kstart = &raw const KERNEL_START as u64;
-    let kend   = (&raw const KERNEL_END as u64 + FRAME_SIZE - 1) & !(FRAME_SIZE - 1);
-
-    const HIGHER_HALF: u64 = 0xFFFF_8000_0000_0000;
+    dbg_byte!(b'4');  // identity map done
+    // ── 3.5: HHDM alias — re-map 0→1 GiB at hhdm_off ────────────────────
+    // Limine places the boot stack and other runtime structures at
+    // `hhdm_off + phys`.  Without this alias those addresses are unmapped
+    // in our new CR3, causing an immediate stack-access fault on the first
+    // `ret` after `mov cr3`.
+    // We share the same PD (p2_phys) already set up in step 3.
     {
-        let mut pa = kstart;
-        while pa < kend {
-            map_page(VirtAddr(HIGHER_HALF + pa), PhysAddr(pa), PageFlags::KERNEL_RW);
-            pa += FRAME_SIZE;
+        let hhdm_p4_idx = ((hhdm_off >> 39) & 0x1FF) as usize;
+        // Only needed when HHDM base is in a different PML4 slot than identity.
+        if hhdm_p4_idx != 0 {
+            let hhdm_p3_phys = alloc_table();
+            let hhdm_p3 = table_ptr(hhdm_p3_phys);
+            // hhdm_off is always 1-GiB aligned (Limine guarantee),
+            // so PDPT index 0 covers the full first GiB of HHDM.
+            unsafe { (*hhdm_p3).0[0] = PageTableEntry::table(p2_phys); }
+            let p4 = table_ptr(pml4_phys);
+            unsafe { (*p4).0[hhdm_p4_idx] = PageTableEntry::table(hhdm_p3_phys); }
         }
     }
 
+    dbg_byte!(b'5');  // HHDM alias done
+    // ── 4. Map kernel at its higher-half virtual address ──────────────────
+    // The kernel is linked at 0xFFFFFFFF80100000+ (higher half, Limine v5+
+    // requirement).  Limine placed the kernel at kernel_phys_base physically
+    // and mapped it to kernel_virt_base virtually.  We must reproduce that
+    // mapping in our new PML4 so execution continues after CR3 is loaded.
+    {
+        let kernel_phys_end_aligned = (kernel_phys_end + FRAME_SIZE - 1) & !(FRAME_SIZE - 1);
+        let mut pa = kernel_phys_base;
+        let mut va = kernel_virt_base;
+        while pa < kernel_phys_end_aligned {
+            map_page(VirtAddr(va), PhysAddr(pa), PageFlags::KERNEL_RWX);
+            pa += FRAME_SIZE;
+            va += FRAME_SIZE;
+        }
+    }
+
+    dbg_byte!(b'6');  // kernel mapped
     // ── 5. Load new CR3 ───────────────────────────────────────────────────
-    // Flushes the TLB; execution continues from the identity-mapped
-    // physical addresses (same mapping as before, now via huge pages).
+    // Flushes the TLB; execution continues from the kernel higher-half mapping.
+    // The HHDM alias (step 3.5) keeps the Limine boot stack accessible.
     unsafe {
         core::arch::asm!(
+            // Debug: write 'P' to COM1 (0x3F8) just before CR3 swap
+            "mov dx, 0x3F8",
+            "mov al, 0x50",  // 'P'
+            "out dx, al",
             "mov cr3, {pml4}",
+            // Debug: write 'Q' to COM1 just after CR3 swap (stack must be accessible)
+            "mov dx, 0x3F8",
+            "mov al, 0x51",  // 'Q'
+            "out dx, al",
             pml4 = in(reg) pml4_phys.as_u64(),
             options(nostack),
+            out("eax") _,
+            out("edx") _,
         );
     }
 }

@@ -49,9 +49,9 @@ Do not state x86_64 or aarch64 behavior from memory. Verify against the SDM or A
 | `src/task.rs` | task struct, round-robin scheduler, context switch, `block_and_yield`, `wake_task` |
 | `src/vmm.rs` | 4-level paging, `map_page`/`unmap_page` |
 | `src/pmm.rs` | physical memory manager, bitmap allocator |
-| `src/heap.rs` | kernel heap (`HEAP_INIT_PAGES = 4096`, 16 MiB — see below) |
+| `src/heap.rs` | kernel heap (coalescing free list; `HEAP_INIT_PAGES = 512`, 2 MiB) |
 | `src/elf.rs` | ELF64 loader, `exec()`, user stack allocation |
-| `src/virtio_net.rs` | virtio-net driver — **root cause of heap landmine** |
+| `src/virtio_net.rs` | virtio-net driver (PMM-backed rings and buffers, device-sized queues) |
 
 ---
 
@@ -88,9 +88,11 @@ x86_64-specific code lives in `src/arch/x86_64/`. aarch64 support is stubbed/inc
 
 See `docs/plans/followup-code-tasks.md` — read it before declaring something a bug to fix. Items to avoid rediscovering:
 
-**`net::init` over-allocation (active landmine):** `HEAP_INIT_PAGES = 4096` (16 MiB) in `src/heap.rs` masks a kmain heap-exhaustion panic. Root cause: `net::init()` (called at `src/main.rs:210`, guarded by `if virtio_net::init()`) over-allocates RX/TX buffers. The QEMU target always attaches a virtio-net device, so `net::init()` runs every boot. Shrinking `HEAP_INIT_PAGES` back toward 4 MiB reproduces the panic. **Do not reduce it without fixing the buffer sizing in `src/virtio_net.rs`.**
+**Heap sizing (resolved 2026-07-02):** the old 16 MiB `HEAP_INIT_PAGES` masked free-list fragmentation, not a virtio-net heap over-allocation (the driver is PMM-backed). `dealloc` now coalesces; `HEAP_INIT_PAGES = 512` (2 MiB). Post-mortem: `docs/plans/followup-code-tasks.md` item 5.
 
-**`sweep_dead` stack leak:** task stacks are not freed when a task exits. A dedicated stack allocator is needed before this is safe.
+**`sweep_dead` stack leak (stale — verified fixed):** `sweep_dead` frees the kernel stack Vec, restores the guard page, and frees the user page table. The `[sweep]`/`[sweep-user]` boot probes in `src/main.rs` measure 0 B heap / 0 frames PMM leaked per spawn/reap and exec/reap cycle; they are feature-gated behind `boot-tests` (build with `make kernel-tests`) since 2026-07-03 — run them before scheduler/PMM/heap changes.
+
+**Sustained RX untested:** the virtio-net ring rework (device-sized queues, packed RX pool) has only been verified for boot + light traffic. Exercise >32 in-flight RX packets when a userspace network workload exists.
 
 **aarch64 syscall stubs:** `abi/lythos-syscall` is x86_64 only — `#[cfg(target_arch = "x86_64")]` guard; aarch64 compiles as an empty module, breaking any userspace link targeting aarch64.
 

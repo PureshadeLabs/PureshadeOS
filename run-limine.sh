@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# run-limine.sh — launch Lythos under QEMU + OVMF (Limine UEFI boot).
+#
+# Usage:  ./run-limine.sh [OVMF_CODE.fd [OVMF_VARS.fd]]
+#         KERNEL=<path>          override kernel (default: debug build)
+#         EXTRA_QEMU_FLAGS=...   append extra flags (e.g. "-d int,cpu_reset")
+#
+# OVMF firmware:
+#   QEMU 5.2+ (nix, brew): ships edk2-x86_64-code.fd in its share/qemu dir.
+#   If OVMF_CODE is provided, explicit pflash drives are used.
+#   If OVMF_CODE is empty (default), QEMU auto-loads firmware from its share dir
+#   (QEMU 6+ Q35 machine detects edk2-x86_64-code.fd automatically).
+#
+# Prerequisites:
+#   limine.img  — created by `make limine.img` (requires mtools + Limine EFI)
+#     nix:       NIXPKGS_ALLOW_UNSUPPORTED_SYSTEM=1 nix-shell -p mtools
+#     Linux:     nix-shell -p limine ovmf mtools  (or apt/pacman equivalents)
+set -e
+
+LYTHOS="$(cd "$(dirname "$0")" && pwd)"
+KERNEL="${KERNEL:-$LYTHOS/target/x86_64-lythos/debug/lythos}"
+DISK_IMG="$LYTHOS/disk.img"
+BOOT_IMG="$LYTHOS/limine.img"
+SOCK="/tmp/lythos-serial-$$.sock"
+
+# OVMF_CODE / OVMF_VARS: explicit paths override auto-detection.
+# Leave empty to let QEMU's Q35 machine auto-load firmware from its share dir.
+OVMF_CODE="${1:-${OVMF_CODE:-}}"
+OVMF_VARS="${2:-${OVMF_VARS:-}}"
+
+# ── Pre-flight checks ──────────────────────────────────────────────────────────
+if [ ! -f "$BOOT_IMG" ]; then
+    echo "error: $BOOT_IMG not found — run \`make limine.img\` first"
+    exit 1
+fi
+if [ ! -f "$DISK_IMG" ]; then
+    echo "warning: $DISK_IMG not found — virtio-blk and RFS will be absent"
+    DISK_FLAGS=""
+else
+    DISK_FLAGS="-drive file=$DISK_IMG,format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0"
+fi
+
+cleanup() {
+    kill "$QPID" 2>/dev/null || true
+    rm -f "$SOCK" "$BRIDGE" /tmp/lythos-ovmf-vars.fd
+}
+trap cleanup EXIT
+
+# ── OVMF pflash configuration ──────────────────────────────────────────────────
+# QEMU 6+ Q35 auto-loads edk2-x86_64-code.fd from its share dir; explicit
+# pflash drives conflict with that auto-config.  Only add -drive if=pflash
+# when the user explicitly provides OVMF_CODE (non-default installs).
+if [ -n "$OVMF_CODE" ] && [ -f "$OVMF_CODE" ]; then
+    cp "${OVMF_VARS:-$OVMF_CODE}" /tmp/lythos-ovmf-vars.fd
+    chmod 644 /tmp/lythos-ovmf-vars.fd
+    OVMF_FLAGS="-drive if=pflash,format=raw,unit=0,file=${OVMF_CODE},readonly=on \
+                -drive if=pflash,format=raw,unit=1,file=/tmp/lythos-ovmf-vars.fd"
+else
+    OVMF_FLAGS=""
+fi
+
+# ── Launch QEMU ────────────────────────────────────────────────────────────────
+qemu-system-x86_64 \
+    -machine q35,usb=on \
+    $OVMF_FLAGS \
+    -drive  file="$BOOT_IMG",format=raw,if=none,id=esp \
+    -device usb-storage,drive=esp \
+    $DISK_FLAGS \
+    -netdev user,id=net0 \
+    -device virtio-net-pci,netdev=net0 \
+    -chardev socket,id=s0,path="$SOCK",server=on,wait=on \
+    -serial  chardev:s0 \
+    -display none \
+    ${EXTRA_QEMU_FLAGS:-} \
+    "$@" &
+QPID=$!
+
+for i in $(seq 1 50); do
+    [ -S "$SOCK" ] && break
+    sleep 0.1
+done
+
+if [ ! -S "$SOCK" ]; then
+    echo "[run-limine.sh] error: QEMU socket not created" >&2
+    exit 1
+fi
+
+BRIDGE="$(mktemp)"
+cat > "$BRIDGE" <<'PYEOF'
+import socket, sys, os, select, termios
+
+path = sys.argv[1]
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(path)
+
+old_attrs = termios.tcgetattr(0)
+new_attrs = termios.tcgetattr(0)
+new_attrs[0] &= ~(termios.IGNBRK | termios.BRKINT | termios.PARMRK |
+                  termios.ISTRIP | termios.INLCR | termios.IGNCR |
+                  termios.ICRNL | termios.IXON)
+new_attrs[1] |=  termios.OPOST | termios.ONLCR
+new_attrs[2] &= ~termios.CSIZE
+new_attrs[2] |=  termios.CS8
+new_attrs[3] &= ~(termios.ECHO | termios.ECHONL | termios.ICANON | termios.IEXTEN)
+new_attrs[3] |=  termios.ISIG
+new_attrs[6][termios.VMIN]  = 1
+new_attrs[6][termios.VTIME] = 0
+termios.tcsetattr(0, termios.TCSADRAIN, new_attrs)
+
+try:
+    while True:
+        r, _, _ = select.select([0, sock], [], [])
+        if 0 in r:
+            data = os.read(0, 256)
+            if not data:
+                break
+            sock.sendall(data)
+        if sock in r:
+            data = sock.recv(4096)
+            if not data:
+                break
+            os.write(1, data)
+except (KeyboardInterrupt, BrokenPipeError, OSError):
+    pass
+finally:
+    termios.tcsetattr(0, termios.TCSADRAIN, old_attrs)
+PYEOF
+
+python3 "$BRIDGE" "$SOCK"

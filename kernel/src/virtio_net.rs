@@ -8,10 +8,15 @@
 //! - Queue 0 (RX): pre-populated with receive buffers. Device writes packets in.
 //! - Queue 1 (TX): driver submits frames. Device reads and sends them.
 //!
-//! Each RX descriptor points to a 4 KiB frame. The first 10 bytes are a
+//! Ring sizes come from the device (`REG_QUEUE_NUM`, legacy interface) — the
+//! device computes its used-ring offset and index modulus from that value, so
+//! the driver must use it too.  RX buffers are decoupled from the ring size:
+//! `NUM_RX_BUFS` MTU-sized buffers packed at `RX_BUF_STRIDE` intervals in one
+//! contiguous physical pool.  The first 10 bytes of each buffer are a
 //! `VirtioNetHdr`; bytes 10..10+frame_len are the Ethernet frame.
 //!
-//! TX uses two descriptors per packet: a 10-byte zero header + the frame data.
+//! TX uses two descriptors per packet (10-byte zero header + frame data),
+//! both pointing into a single shared page.
 
 use core::arch::global_asm;
 use core::sync::atomic::{self, Ordering};
@@ -92,20 +97,27 @@ const VIRTQ_DESC_F_WRITE: u16 = 2;
 
 // ── Sizing ────────────────────────────────────────────────────────────────────
 
-/// Virtqueue depth for both RX and TX queues.
-const QUEUE_SIZE: usize = 64;
-
-/// Pages for one virtqueue's descriptor table + available + used rings.
-const QUEUE_PAGES: usize = 4;
-
 /// Size of the VirtIO net header (legacy, no VIRTIO_NET_F_MRG_RXBUF).
 pub const NET_HDR_SIZE: usize = 10;
 
 /// Maximum Ethernet frame size (without FCS).
 pub const MAX_FRAME: usize = 1514;
 
-/// Buffer size for each RX slot.
-const RX_BUF_SIZE: usize = NET_HDR_SIZE + MAX_FRAME;
+/// Buffer size for each RX slot: net header + one full Ethernet frame.
+const RX_BUF_SIZE: usize = NET_HDR_SIZE + MAX_FRAME; // 1524
+
+/// Number of RX buffers pre-posted to the device.  Independent of the ring
+/// size: only this many descriptors are ever in flight.  32 × 1.5 KiB absorbs
+/// a full RX_FIFO worth of backlog before the device starts dropping.
+const NUM_RX_BUFS: usize = 32;
+
+/// Spacing of RX buffers inside the contiguous pool.  2 KiB keeps each
+/// 1524-byte buffer within aligned bounds → pool = 16 pages for 32 buffers
+/// (previously 64 buffers × one full 4 KiB page each = 64 pages).
+const RX_BUF_STRIDE: usize = 2048;
+
+/// Pages for the RX buffer pool.
+const RX_POOL_PAGES: usize = NUM_RX_BUFS * RX_BUF_STRIDE / 4096;
 
 // ── Kernel RX FIFO ────────────────────────────────────────────────────────────
 //
@@ -201,17 +213,31 @@ unsafe fn inl(port: u16) -> u32 {
 }
 
 // ── Virtqueue helpers ─────────────────────────────────────────────────────────
+//
+// Legacy layout for a queue of size `qsz` (virtio 0.9.5 / legacy interface):
+//   offset 0                — descriptor table, 16 × qsz bytes
+//   offset 16·qsz           — avail ring: flags u16, idx u16, ring[qsz] u16
+//   align↑4096              — used ring:  flags u16, idx u16, ring[qsz] × 8 B
 
 #[inline] fn desc_pa(vq: u64, i: u16) -> u64 { vq + i as u64 * 16 }
-#[inline] fn avail_pa(vq: u64)         -> u64 { vq + QUEUE_SIZE as u64 * 16 }
-#[inline] fn avail_idx_pa(vq: u64)     -> u64 { avail_pa(vq) + 2 }
-#[inline] fn avail_ring_pa(vq: u64, slot: u16) -> u64 {
-    avail_pa(vq) + 4 + slot as u64 * 2
+#[inline] fn avail_pa(vq: u64, qsz: u16)     -> u64 { vq + qsz as u64 * 16 }
+#[inline] fn avail_idx_pa(vq: u64, qsz: u16) -> u64 { avail_pa(vq, qsz) + 2 }
+#[inline] fn avail_ring_pa(vq: u64, qsz: u16, slot: u16) -> u64 {
+    avail_pa(vq, qsz) + 4 + slot as u64 * 2
 }
-#[inline] fn used_pa(vq: u64)          -> u64 { vq + QUEUE_PAGES as u64 * 4096 / 2 }
-#[inline] fn used_idx_pa(vq: u64)      -> u64 { used_pa(vq) + 2 }
-#[inline] fn used_ring_pa(vq: u64, slot: u16) -> u64 {
-    used_pa(vq) + 4 + slot as u64 * 8
+#[inline] fn used_pa(vq: u64, qsz: u16) -> u64 {
+    let avail_end = avail_pa(vq, qsz) + 4 + qsz as u64 * 2;
+    (avail_end + 4095) & !4095
+}
+#[inline] fn used_idx_pa(vq: u64, qsz: u16) -> u64 { used_pa(vq, qsz) + 2 }
+#[inline] fn used_ring_pa(vq: u64, qsz: u16, slot: u16) -> u64 {
+    used_pa(vq, qsz) + 4 + slot as u64 * 8
+}
+
+/// Total pages needed for one legacy virtqueue of size `qsz`.
+fn queue_pages(qsz: u16) -> usize {
+    let end = used_pa(0, qsz) + 4 + qsz as u64 * 8;
+    ((end + 4095) / 4096) as usize
 }
 
 // ── Driver state ──────────────────────────────────────────────────────────────
@@ -222,16 +248,18 @@ struct VirtioNetDev {
 
     // RX virtqueue
     rx_vq:      u64,   // phys base of RX virtqueue pages
-    rx_bufs:    [u64; QUEUE_SIZE], // phys of each RX frame buffer
+    rx_qsz:     u16,   // ring size reported by the device
+    rx_bufs:    [u64; NUM_RX_BUFS], // phys of each RX buffer (packed pool)
     rx_avail:   u16,   // next avail.idx to produce
     rx_used:    u16,   // last used.idx consumed
 
     // TX virtqueue
     tx_vq:      u64,   // phys base of TX virtqueue pages
+    tx_qsz:     u16,   // ring size reported by the device
     tx_avail:   u16,   // next avail.idx to produce
     tx_used:    u16,   // last used.idx consumed
-    tx_hdr:     u64,   // phys of 10-byte TX header frame
-    tx_dat:     u64,   // phys of TX data frame (1514 bytes max)
+    tx_hdr:     u64,   // phys of 10-byte TX header (offset 0 of shared page)
+    tx_dat:     u64,   // phys of TX data (offset 16 of the same page)
 }
 
 impl VirtioNetDev {
@@ -250,17 +278,23 @@ impl VirtioNetDev {
         loop {
             atomic::fence(Ordering::Acquire);
             let used_idx = unsafe {
-                (used_idx_pa(self.rx_vq) as *const u16).read_volatile()
+                (used_idx_pa(self.rx_vq, self.rx_qsz) as *const u16).read_volatile()
             };
             if self.rx_used == used_idx { break; }
 
-            let slot = self.rx_used % QUEUE_SIZE as u16;
-            let used_elem_pa = used_ring_pa(self.rx_vq, slot);
+            let slot = self.rx_used % self.rx_qsz;
+            let used_elem_pa = used_ring_pa(self.rx_vq, self.rx_qsz, slot);
             let desc_id = unsafe { (used_elem_pa as *const u32).read_volatile() } as usize;
             let bytes   = unsafe { ((used_elem_pa + 4) as *const u32).read_volatile() } as usize;
 
+            self.rx_used = self.rx_used.wrapping_add(1);
+
+            // Only descriptors 0..NUM_RX_BUFS are ever posted; anything else
+            // is device misbehaviour — drop it rather than index out of range.
+            if desc_id >= NUM_RX_BUFS { continue; }
+
             // Frame data starts after the 10-byte virtio net header.
-            let buf_phys = self.rx_bufs[desc_id % QUEUE_SIZE];
+            let buf_phys = self.rx_bufs[desc_id];
             let frame_start = buf_phys as usize + NET_HDR_SIZE;
             let frame_len   = bytes.saturating_sub(NET_HDR_SIZE).min(MAX_FRAME);
 
@@ -272,18 +306,16 @@ impl VirtioNetDev {
             }
 
             // Recycle: put this descriptor back into the available ring.
-            let avail_slot = self.rx_avail % QUEUE_SIZE as u16;
+            let avail_slot = self.rx_avail % self.rx_qsz;
             unsafe {
-                (avail_ring_pa(self.rx_vq, avail_slot) as *mut u16)
+                (avail_ring_pa(self.rx_vq, self.rx_qsz, avail_slot) as *mut u16)
                     .write_volatile(desc_id as u16);
                 self.rx_avail = self.rx_avail.wrapping_add(1);
                 atomic::fence(Ordering::Release);
-                (avail_idx_pa(self.rx_vq) as *mut u16)
+                (avail_idx_pa(self.rx_vq, self.rx_qsz) as *mut u16)
                     .write_volatile(self.rx_avail);
             }
             unsafe { outw(self.io_base + REG_QUEUE_NOTIFY, 0) };
-
-            self.rx_used = self.rx_used.wrapping_add(1);
         }
     }
 
@@ -308,12 +340,12 @@ impl VirtioNetDev {
             self.write_desc(self.tx_vq, 1, self.tx_dat, len as u32, 0, 0);
         }
 
-        let slot = self.tx_avail % QUEUE_SIZE as u16;
+        let slot = self.tx_avail % self.tx_qsz;
         unsafe {
-            (avail_ring_pa(self.tx_vq, slot) as *mut u16).write_volatile(0);
+            (avail_ring_pa(self.tx_vq, self.tx_qsz, slot) as *mut u16).write_volatile(0);
             self.tx_avail = self.tx_avail.wrapping_add(1);
             atomic::fence(Ordering::Release);
-            (avail_idx_pa(self.tx_vq) as *mut u16).write_volatile(self.tx_avail);
+            (avail_idx_pa(self.tx_vq, self.tx_qsz) as *mut u16).write_volatile(self.tx_avail);
         }
         unsafe { outw(self.io_base + REG_QUEUE_NOTIFY, 1) };
 
@@ -321,7 +353,7 @@ impl VirtioNetDev {
         let deadline = crate::apic::ticks() + 500;
         loop {
             atomic::fence(Ordering::Acquire);
-            let used_idx = unsafe { (used_idx_pa(self.tx_vq) as *const u16).read_volatile() };
+            let used_idx = unsafe { (used_idx_pa(self.tx_vq, self.tx_qsz) as *const u16).read_volatile() };
             if self.tx_used != used_idx {
                 self.tx_used = self.tx_used.wrapping_add(1);
                 return true;
@@ -349,15 +381,19 @@ fn dev_ref() -> Option<&'static VirtioNetDev> {
 
 // ── Virtqueue setup helper ────────────────────────────────────────────────────
 
-fn setup_queue(io: u16, queue_idx: u16) -> Option<u64> {
+fn setup_queue(io: u16, queue_idx: u16) -> Option<(u64, u16)> {
     unsafe { outw(io + REG_QUEUE_SEL, queue_idx) };
     let q_num = unsafe { inl(io + REG_QUEUE_NUM) } as u16;
     if q_num == 0 { return None; }
 
-    let vq_phys = crate::pmm::alloc_frames_contiguous(QUEUE_PAGES)?.as_u64();
-    unsafe { core::ptr::write_bytes(vq_phys as *mut u8, 0, QUEUE_PAGES * 4096) };
+    // Legacy interface: the ring size is fixed by the device and the device
+    // derives its used-ring offset and index modulus from it — allocate and
+    // index exactly to q_num.
+    let pages = queue_pages(q_num);
+    let vq_phys = crate::pmm::alloc_frames_contiguous(pages)?.as_u64();
+    unsafe { core::ptr::write_bytes(vq_phys as *mut u8, 0, pages * 4096) };
     unsafe { outl(io + REG_QUEUE_PFN, (vq_phys / 4096) as u32) };
-    Some(vq_phys)
+    Some((vq_phys, q_num))
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -389,52 +425,56 @@ pub fn init() -> bool {
     }
 
     // ── Setup RX queue (queue 0) ──────────────────────────────────────────────
-    let rx_vq = match setup_queue(io, 0) {
+    let (rx_vq, rx_qsz) = match setup_queue(io, 0) {
         Some(v) => v,
         None    => { unsafe { outb(io + REG_DEVICE_STATUS, 0x80) }; return false; }
     };
 
-    // Allocate RX buffers (one page each) and pre-fill available ring.
-    let mut rx_bufs = [0u64; QUEUE_SIZE];
-    for (i, buf) in rx_bufs.iter_mut().enumerate() {
-        *buf = match crate::pmm::alloc_frame() {
-            Some(pa) => pa.as_u64(),
-            None     => { unsafe { outb(io + REG_DEVICE_STATUS, 0x80) }; return false; }
-        };
+    // RX buffer pool: NUM_RX_BUFS MTU-sized buffers packed at RX_BUF_STRIDE
+    // in one contiguous physical run.  Never post more buffers than the ring
+    // can hold (rx_qsz is ≥ 256 on QEMU, so this is a formality).
+    let n_bufs = NUM_RX_BUFS.min(rx_qsz as usize);
+    let rx_pool = match crate::pmm::alloc_frames_contiguous(RX_POOL_PAGES) {
+        Some(pa) => pa.as_u64(),
+        None     => { unsafe { outb(io + REG_DEVICE_STATUS, 0x80) }; return false; }
+    };
+    unsafe { (rx_pool as *mut u8).write_bytes(0, RX_POOL_PAGES * 4096) };
+
+    let mut rx_bufs = [0u64; NUM_RX_BUFS];
+    for (i, buf) in rx_bufs.iter_mut().enumerate().take(n_bufs) {
+        *buf = rx_pool + (i * RX_BUF_STRIDE) as u64;
         // Write descriptor: WRITE (device writes into this buffer), no NEXT.
         let desc_base = desc_pa(rx_vq, i as u16) as *mut u8;
         unsafe {
-            (*buf as *mut u8).write_bytes(0, RX_BUF_SIZE);
             (desc_base        as *mut u64).write_volatile(*buf);
             (desc_base.add(8) as *mut u32).write_volatile(RX_BUF_SIZE as u32);
             (desc_base.add(12) as *mut u16).write_volatile(VIRTQ_DESC_F_WRITE);
             (desc_base.add(14) as *mut u16).write_volatile(0);
-            // Add to available ring.
-            (avail_ring_pa(rx_vq, i as u16) as *mut u16).write_volatile(i as u16);
+            // Add to available ring (i < n_bufs ≤ rx_qsz, no wrap needed).
+            (avail_ring_pa(rx_vq, rx_qsz, i as u16) as *mut u16).write_volatile(i as u16);
         }
     }
     // Publish all RX descriptors.
     unsafe {
         atomic::fence(Ordering::Release);
-        (avail_idx_pa(rx_vq) as *mut u16).write_volatile(QUEUE_SIZE as u16);
+        (avail_idx_pa(rx_vq, rx_qsz) as *mut u16).write_volatile(n_bufs as u16);
         outw(io + REG_QUEUE_NOTIFY, 0);
     }
 
     // ── Setup TX queue (queue 1) ──────────────────────────────────────────────
-    let tx_vq = match setup_queue(io, 1) {
+    let (tx_vq, tx_qsz) = match setup_queue(io, 1) {
         Some(v) => v,
         None    => { unsafe { outb(io + REG_DEVICE_STATUS, 0x80) }; return false; }
     };
 
-    // TX DMA buffers: one frame for the header, one for the payload.
-    let tx_hdr = match crate::pmm::alloc_frame() {
+    // TX DMA buffers: header at offset 0 and payload at offset 16 of one
+    // shared page (10 + 1514 bytes fit with room to spare).
+    let tx_page = match crate::pmm::alloc_frame() {
         Some(pa) => pa.as_u64(),
         None     => { unsafe { outb(io + REG_DEVICE_STATUS, 0x80) }; return false; }
     };
-    let tx_dat = match crate::pmm::alloc_frame() {
-        Some(pa) => pa.as_u64(),
-        None     => { unsafe { outb(io + REG_DEVICE_STATUS, 0x80) }; return false; }
-    };
+    let tx_hdr = tx_page;
+    let tx_dat = tx_page + 16;
 
     // ── Signal DRIVER_OK ──────────────────────────────────────────────────────
     unsafe { outb(io + REG_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK) };
@@ -448,15 +488,15 @@ pub fn init() -> bool {
     unsafe {
         *DEV.0.get() = Some(VirtioNetDev {
             io_base: io, mac,
-            rx_vq, rx_bufs, rx_avail: QUEUE_SIZE as u16, rx_used: 0,
-            tx_vq, tx_avail: 0, tx_used: 0, tx_hdr, tx_dat,
+            rx_vq, rx_qsz, rx_bufs, rx_avail: n_bufs as u16, rx_used: 0,
+            tx_vq, tx_qsz, tx_avail: 0, tx_used: 0, tx_hdr, tx_dat,
         });
     }
 
     // ── Wire IRQ ──────────────────────────────────────────────────────────────
     crate::idt::register_irq(VECTOR_VIRTIO_NET, virtio_net_isr_stub as *const () as u64);
     crate::ioapic::map_irq(
-        pci.irq_line,
+        pci.irq_line as u32,
         VECTOR_VIRTIO_NET,
         crate::ioapic::IRQ_LEVEL | crate::ioapic::IRQ_ACTIVE_LO,
     );

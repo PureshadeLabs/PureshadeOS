@@ -30,6 +30,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "limine"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29363c0f37e66e18575fadf7141c56ee7ea04ae5fecbeb25eff303f77af203a9"
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -70,6 +76,9 @@ dependencies = [
 [[package]]
 name = "lythos"
 version = "0.1.0"
+dependencies = [
+ "limine",
+]
 
 [[package]]
 name = "lythos-abi"
@@ -134,6 +143,10 @@ checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "rfs2"
+version = "0.1.0"
 
 [[package]]
 name = "rkilo"

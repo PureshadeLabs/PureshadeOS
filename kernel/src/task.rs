@@ -136,6 +136,10 @@ pub struct Task {
     /// Current program break (top of the contiguous heap region).
     /// 0 means uninitialized; initialized to USERSPACE_HEAP_BASE on first SYS_BRK call.
     pub brk: u64,
+    /// Effective user ID. 0 = root. Changed by SYS_SETUID (not yet implemented).
+    pub uid: u32,
+    /// Effective group ID. 0 = root. Changed by SYS_SETGID (not yet implemented).
+    pub gid: u32,
 }
 
 fn make_name(s: &str) -> [u8; 16] {
@@ -189,6 +193,41 @@ unsafe fn get_sched() -> &'static mut Scheduler {
     unsafe { (*SCHED.0.get()).as_mut().expect("task: scheduler not initialised") }
 }
 
+/// Save RFLAGS and disable interrupts.  Pair with [`irq_restore`].
+///
+/// Any code that scans or mutates `sched.tasks` outside a syscall entry
+/// (where FMASK guarantees IF=0) must hold interrupts off for the duration:
+/// the APIC timer ISR calls `yield_task` → `sweep_dead`, which removes
+/// entries from the Vec — a scan interleaved with that is an out-of-bounds
+/// index or a dangling `Box<Task>` read.
+#[inline]
+fn irq_save_disable() -> u64 {
+    let rflags: u64;
+    unsafe {
+        core::arch::asm!(
+            "pushfq",
+            "pop {f}",
+            "cli",
+            f = out(reg) rflags,
+            options(nostack),
+        );
+    }
+    rflags
+}
+
+/// Restore RFLAGS previously saved by [`irq_save_disable`].
+#[inline]
+fn irq_restore(rflags: u64) {
+    unsafe {
+        core::arch::asm!(
+            "push {f}",
+            "popfq",
+            f = in(reg) rflags,
+            options(nostack),
+        );
+    }
+}
+
 /// Find the next Ready task to run, starting from `start_idx` (wrapping).
 /// Scans in priority order (high→normal→low) to ensure higher-priority tasks
 /// preempt lower ones; within a priority tier the round-robin start index
@@ -230,6 +269,8 @@ pub fn init() {
         page_table:     None,
         vma_list:       Vec::new(),
         brk:            0,
+        uid:            0,
+        gid:            0,
     });
 
     let mut tasks = Vec::new();
@@ -299,6 +340,8 @@ pub fn spawn_kernel_task(entry: fn() -> !) -> TaskId {
         page_table:     None,
         vma_list:       Vec::new(),
         brk:            0,
+        uid:            0,
+        gid:            0,
     }));
 
     id
@@ -360,17 +403,8 @@ fn sweep_dead(sched: &mut Scheduler) {
     // inside free_user_page_table (which iterates thousands of frames), the
     // re-entrant sweep sees the same dead task with page_table still set and
     // calls free_user_page_table a second time → double free.  CLI prevents
-    // this; POPFQ restores the original IF state when we are done.
-    let rflags: u64;
-    unsafe {
-        core::arch::asm!(
-            "pushfq",
-            "pop {f}",
-            "cli",
-            f = out(reg) rflags,
-            options(nostack),
-        );
-    }
+    // this; the restore below reinstates the original IF state when done.
+    let rflags = irq_save_disable();
 
     let mut i = 0;
     while i < sched.tasks.len() {
@@ -405,14 +439,7 @@ fn sweep_dead(sched: &mut Scheduler) {
         }
     }
 
-    unsafe {
-        core::arch::asm!(
-            "push {f}",
-            "popfq",
-            f = in(reg) rflags,
-            options(nostack),
-        );
-    }
+    irq_restore(rflags);
 }
 
 // ── Public API (continued) ────────────────────────────────────────────────────
@@ -421,6 +448,15 @@ fn sweep_dead(sched: &mut Scheduler) {
 /// in round-robin order.  Returns when this task is switched back to.
 /// No-op if there are no other ready tasks.  Frees any Dead tasks first.
 pub fn yield_task() {
+    // Interrupts stay off for the whole scheduler critical section — from
+    // before the sweep until switch_context (or an early return).  The old
+    // code re-enabled IF after sweep_dead and only cli'd again just before
+    // switch_cr3; a timer ISR in that window re-enters yield_task, and its
+    // sweep_dead shrinks sched.tasks mid-scan — observed as an
+    // index-out-of-bounds panic inside find_next_ready, and it also leaves
+    // the local `n`/`current` snapshots below stale.
+    let rflags = irq_save_disable();
+
     let sched = unsafe { get_sched() };
     check_stack_canary(&sched.tasks[sched.current]);
     sweep_dead(sched);
@@ -428,13 +464,13 @@ pub fn yield_task() {
     let n       = sched.tasks.len();
     let current = sched.current;
 
-    if n <= 1 { return; }
+    if n <= 1 { irq_restore(rflags); return; }
 
     let next = match find_next_ready(sched, (current + 1) % n) {
         Some(idx) => idx,
-        None      => return,
+        None      => { irq_restore(rflags); return; }
     };
-    if next == current { return; }
+    if next == current { irq_restore(rflags); return; }
 
     // Capture raw pointers to both TaskContexts *before* mutating state.
     // Box<Task> is heap-allocated; the Task address is stable across Vec ops.
@@ -445,13 +481,12 @@ pub fn yield_task() {
     sched.tasks[next].state    = TaskState::Running;
     sched.current              = next;
 
-    // Disable interrupts before switch_cr3 so the APIC timer cannot fire
-    // between switch_cr3 (which sets RSP0 = next's stack) and switch_context.
-    // If it fired there the ISR would run on next's stack; its yield_task would
-    // overwrite next.context.rsp (making to_ctx stale) and sweep_dead could
-    // free current's stack (making from_ctx dangling). The sti below re-enables
-    // interrupts when this task is next resumed.
-    unsafe { core::arch::asm!("cli", options(nostack)) };
+    // IF is already 0 (held since function entry), so the APIC timer cannot
+    // fire between switch_cr3 (which sets RSP0 = next's stack) and
+    // switch_context.  If it fired there the ISR would run on next's stack;
+    // its yield_task would overwrite next.context.rsp (making to_ctx stale)
+    // and sweep_dead could free current's stack (making from_ctx dangling).
+    // The sti below re-enables interrupts when this task is next resumed.
     switch_cr3(sched.tasks[next].page_table, sched.tasks[next]._stack_top);
     // After this call returns we are back in `current`'s context.
     unsafe { switch_context(from_ctx, to_ctx); }
@@ -464,20 +499,25 @@ pub fn yield_task() {
 /// Terminate the current task.  Marks it Dead, switches to the next ready task,
 /// and never returns.  If no other task is ready, halts the CPU.
 pub fn task_exit() -> ! {
+    // Disable interrupts before marking ourselves Dead and keep them off
+    // through switch_context (task_exit never returns, so no restore).
+    //
+    // Two races this kills:
+    // - After `state = Dead`, a timer ISR's yield_task → sweep_dead would
+    //   reap the *current* task: free the kernel stack the ISR is running
+    //   on and leave sched.current pointing at the wrong slot.
+    // - SpinLock::lock below saves RFLAGS and does cli; its drop does popfq,
+    //   which restores the RFLAGS captured at lock time.  With IF=0 already
+    //   held here, the drop keeps interrupts off through the switch instead
+    //   of re-enabling them.
+    unsafe { core::arch::asm!("cli", options(nostack)) };
+
     let sched = unsafe { get_sched() };
     check_stack_canary(&sched.tasks[sched.current]);
     let current = sched.current;
     let dying_id = sched.tasks[current].id;
 
     sched.tasks[current].state = TaskState::Dead;
-
-    // Disable interrupts now so the APIC timer cannot fire between here and
-    // switch_context.  SpinLock::lock saves RFLAGS and does cli; its drop does
-    // popfq — which restores the RFLAGS we save here (IF=0), keeping interrupts
-    // off through the switch.  Without this cli the lock-drop re-enables
-    // interrupts, yield_task runs sweep_dead, frees the dying stack, and
-    // switch_context returns into freed memory.
-    unsafe { core::arch::asm!("cli", options(nostack)) };
 
     // Wake any tasks blocked in wait_for_task on this task.
     {
@@ -510,12 +550,11 @@ pub fn task_exit() -> ! {
     sched.tasks[next].state = TaskState::Running;
     sched.current           = next;
 
-    // Disable interrupts so the APIC cannot fire between switch_cr3 and
-    // switch_context (same race as yield_task — see comment there). Interrupts
-    // stay disabled until the new task executes sti in its yield_task/
-    // block_and_yield continuation, or until iretq restores RFLAGS on the
-    // ISR path. task_exit never returns so no matching sti is needed here.
-    unsafe { core::arch::asm!("cli", options(nostack)) };
+    // IF has been 0 since function entry, so the APIC cannot fire between
+    // switch_cr3 and switch_context (same race as yield_task — see comment
+    // there).  Interrupts stay disabled until the new task executes sti in
+    // its yield_task/block_and_yield continuation, or until iretq restores
+    // RFLAGS on the ISR path.  task_exit never returns so no sti is needed.
     switch_cr3(sched.tasks[next].page_table, sched.tasks[next]._stack_top);
     unsafe { switch_context(from_ctx, to_ctx); }
 
@@ -542,8 +581,13 @@ pub fn set_bootstrap_cap_table(table: crate::cap::CapabilityTable) {
 /// Returns `false` once the task has been reaped by `sweep_dead`.  Used by
 /// the Step 14 smoke test to wait for userspace tasks to complete.
 pub fn task_exists(id: TaskId) -> bool {
+    // Callable from kmain loops with IF=1 — hold interrupts off so a timer
+    // ISR's sweep_dead cannot mutate the Vec mid-scan (see irq_save_disable).
+    let rflags = irq_save_disable();
     let sched = unsafe { get_sched() };
-    sched.tasks.iter().any(|t| t.id == id)
+    let found = sched.tasks.iter().any(|t| t.id == id);
+    irq_restore(rflags);
+    found
 }
 
 /// Return the raw task status for `SYS_TASK_STATUS`:
@@ -551,8 +595,9 @@ pub fn task_exists(id: TaskId) -> bool {
 /// - `1` — task is Running or Ready
 /// - `2` — task is Blocked
 pub fn task_status_raw(id: TaskId) -> u64 {
+    let rflags = irq_save_disable();
     let sched = unsafe { get_sched() };
-    match sched.tasks.iter().find(|t| t.id == id) {
+    let status = match sched.tasks.iter().find(|t| t.id == id) {
         None    => 0,
         Some(t) => match t.state {
             TaskState::Dead    => 0,
@@ -560,7 +605,9 @@ pub fn task_status_raw(id: TaskId) -> u64 {
             TaskState::Ready   => 2,
             TaskState::Blocked => 3,
         },
-    }
+    };
+    irq_restore(rflags);
+    status
 }
 
 /// Iterate live (non-Dead) tasks, calling `f(index, id, state_raw, kind)` for each.
@@ -571,6 +618,9 @@ pub fn for_each_task<F>(mut f: F) -> usize
 where
     F: FnMut(usize, TaskId, u64, u8),
 {
+    // Called from the kmain idle loop with IF=1 — hold interrupts off so a
+    // timer ISR's sweep_dead cannot mutate the Vec under the iterator.
+    let rflags = irq_save_disable();
     let sched = unsafe { get_sched() };
     let mut idx = 0;
     for t in sched.tasks.iter() {
@@ -585,6 +635,7 @@ where
         f(idx, t.id, state_raw, kind);
         idx += 1;
     }
+    irq_restore(rflags);
     idx
 }
 
@@ -650,6 +701,26 @@ pub fn current_task_id() -> TaskId {
     sched.tasks[sched.current].id
 }
 
+pub fn current_task_uid() -> u32 {
+    let sched = unsafe { get_sched() };
+    sched.tasks[sched.current].uid
+}
+
+pub fn current_task_gid() -> u32 {
+    let sched = unsafe { get_sched() };
+    sched.tasks[sched.current].gid
+}
+
+pub fn set_current_task_uid(uid: u32) {
+    let sched = unsafe { get_sched() };
+    sched.tasks[sched.current].uid = uid;
+}
+
+pub fn set_current_task_gid(gid: u32) {
+    let sched = unsafe { get_sched() };
+    sched.tasks[sched.current].gid = gid;
+}
+
 /// Return the name of the currently running task as a `&str` (valid for the call duration).
 pub fn current_task_name() -> &'static str {
     let sched = unsafe { get_sched() };
@@ -664,6 +735,8 @@ pub fn for_each_task_ps<F>(mut f: F) -> usize
 where
     F: FnMut(usize, TaskId, u64, u8, u8, &[u8; 16]),
 {
+    // Same Vec-mutation hazard as for_each_task (see irq_save_disable).
+    let rflags = irq_save_disable();
     let sched = unsafe { get_sched() };
     let mut idx = 0;
     for t in sched.tasks.iter() {
@@ -678,6 +751,7 @@ where
         f(idx, t.id, state_raw, kind, t.priority, &t.name);
         idx += 1;
     }
+    irq_restore(rflags);
     idx
 }
 
@@ -726,6 +800,10 @@ pub fn spawn_userspace_task(
         p.add(7).write(0);               // padding
     }
 
+    // Read parent uid/gid before taking the mutable sched reference.
+    let parent_uid = current_task_uid();
+    let parent_gid = current_task_gid();
+
     let sched = unsafe { get_sched() };
     let id    = sched.next_id;
     sched.next_id += 1;
@@ -756,6 +834,8 @@ pub fn spawn_userspace_task(
         page_table:     Some(page_table),
         vma_list:       Vec::new(),
         brk:            0,
+        uid:            parent_uid,
+        gid:            parent_gid,
     }));
 
     id

@@ -1,9 +1,6 @@
 /*
  * isr_stubs.s — GDT flush, ISR stubs for vectors 0–31, common dispatcher
  * AT&T syntax (included with options(att_syntax)).
- *
- * NOTE: boot.s ends with .section .bss; this file is processed in the same
- * LLVM translation unit, so we must reset to .text explicitly.
  */
 .section .text
 

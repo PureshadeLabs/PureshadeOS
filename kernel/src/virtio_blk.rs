@@ -289,7 +289,10 @@ impl VirtioBlkDev {
     /// Submit a single-sector read or write.
     ///
     /// Returns `true` on success (device status byte == 0).
-    fn submit(&mut self, sector: u64, write: bool) -> bool {
+    /// Submit one request transferring `count` sectors (1..=8, one DMA frame)
+    /// starting at `sector`.  Blocks until completion.
+    fn submit(&mut self, sector: u64, count: u32, write: bool) -> bool {
+        debug_assert!(count >= 1 && count as usize * SECTOR_SIZE <= 4096);
         let rflags: u64;
         unsafe { core::arch::asm!("pushfq; pop {0}", out(reg) rflags, options(nomem)) };
 
@@ -325,7 +328,7 @@ impl VirtioBlkDev {
         };
         unsafe {
             self.write_desc(0, self.hdr_phys,  16,          VIRTQ_DESC_F_NEXT, 1);
-            self.write_desc(1, self.dat_phys,  SECTOR_SIZE as u32, data_flags,  2);
+            self.write_desc(1, self.dat_phys,  count * SECTOR_SIZE as u32, data_flags, 2);
             self.write_desc(2, status_pa,      1,           VIRTQ_DESC_F_WRITE, 0);
         }
 
@@ -350,14 +353,28 @@ impl VirtioBlkDev {
 
         // ── Poll status byte for completion ───────────────────────────────────
         // Status byte was poisoned with 0xFF above; any other value = done.
-        // `hlt` yields to QEMU's event loop so AIO completions can fire.
+        //
+        // Two-phase wait: spin first — QEMU (and real NVMe-class hardware
+        // behind virtio) completes small requests in microseconds, and the
+        // old hlt-immediately loop serialised every request behind the next
+        // interrupt (≥1 ms APIC tick when the virtio IRQ is quiet), which
+        // measured ~7 ms per sector during boot.  Only after the spin budget
+        // is exhausted fall back to sti;hlt so a genuinely slow request
+        // doesn't burn the CPU.
         let expected = self.last_used.wrapping_add(1);
         let status_ptr = status_pa as *const u8;
         let deadline = crate::apic::ticks() + 5000; // 5 s timeout
+        let mut spins: u32 = 0;
+        const SPIN_BUDGET: u32 = 500_000; // ~sub-millisecond on any modern CPU
         loop {
             atomic::fence(Ordering::Acquire);
             let s = unsafe { status_ptr.read_volatile() };
             if s != 0xFF { break; }
+            if spins < SPIN_BUDGET {
+                spins += 1;
+                core::hint::spin_loop();
+                continue;
+            }
             if crate::apic::ticks() >= deadline {
                 crate::kprintln!("[virtio-blk] timeout waiting for sector {}", sector);
                 unsafe { core::arch::asm!("push {0}; popfq", in(reg) rflags, options(nomem)) };
@@ -511,7 +528,7 @@ pub fn init() -> bool {
         virtio_blk_isr_stub as *const () as u64,
     );
     crate::ioapic::map_irq(
-        pci.irq_line,
+        pci.irq_line as u32,
         VECTOR_VIRTIO_BLK,
         crate::ioapic::IRQ_LEVEL | crate::ioapic::IRQ_ACTIVE_LO,
     );
@@ -519,45 +536,66 @@ pub fn init() -> bool {
     true
 }
 
-/// Read one 512-byte sector from the disk into `buf`.
+/// Read `buf.len() / 512` sectors (1..=8, i.e. up to one 4 KiB DMA frame in
+/// a single request) starting at `sector` into `buf`.
 ///
-/// Returns `true` on success, `false` on device error or if no device is present.
-pub fn read_sector(sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> bool {
+/// `buf.len()` must be a non-zero multiple of `SECTOR_SIZE` no larger than
+/// 4096.  Returns `true` on success.
+pub fn read_sectors(sector: u64, buf: &mut [u8]) -> bool {
+    let count = (buf.len() / SECTOR_SIZE) as u32;
+    if count == 0 || buf.len() > 4096 || buf.len() % SECTOR_SIZE != 0 { return false; }
     let dev = match dev_mut() {
         Some(d) => d,
         None    => return false,
     };
-    if sector >= dev.capacity { return false; }
-    if !dev.submit(sector, false) { return false; }
+    if sector + count as u64 > dev.capacity { return false; }
+    if !dev.submit(sector, count, false) { return false; }
     // Copy from DMA buffer to caller.
     unsafe {
         core::ptr::copy_nonoverlapping(
             dev.dat_phys as *const u8,
             buf.as_mut_ptr(),
-            SECTOR_SIZE,
+            buf.len(),
         );
     }
     true
+}
+
+/// Write `buf.len() / 512` sectors (1..=8, one request) starting at `sector`.
+///
+/// `buf.len()` must be a non-zero multiple of `SECTOR_SIZE` no larger than
+/// 4096.  Returns `true` on success.
+pub fn write_sectors(sector: u64, buf: &[u8]) -> bool {
+    let count = (buf.len() / SECTOR_SIZE) as u32;
+    if count == 0 || buf.len() > 4096 || buf.len() % SECTOR_SIZE != 0 { return false; }
+    let dev = match dev_mut() {
+        Some(d) => d,
+        None    => return false,
+    };
+    if sector + count as u64 > dev.capacity { return false; }
+    // Copy from caller into DMA buffer before submitting.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            buf.as_ptr(),
+            dev.dat_phys as *mut u8,
+            buf.len(),
+        );
+    }
+    dev.submit(sector, count, true)
+}
+
+/// Read one 512-byte sector from the disk into `buf`.
+///
+/// Returns `true` on success, `false` on device error or if no device is present.
+pub fn read_sector(sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> bool {
+    read_sectors(sector, buf)
 }
 
 /// Write one 512-byte sector from `buf` to the disk.
 ///
 /// Returns `true` on success, `false` on device error or if no device is present.
 pub fn write_sector(sector: u64, buf: &[u8; SECTOR_SIZE]) -> bool {
-    let dev = match dev_mut() {
-        Some(d) => d,
-        None    => return false,
-    };
-    if sector >= dev.capacity { return false; }
-    // Copy from caller into DMA buffer before submitting.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            buf.as_ptr(),
-            dev.dat_phys as *mut u8,
-            SECTOR_SIZE,
-        );
-    }
-    dev.submit(sector, true)
+    write_sectors(sector, buf)
 }
 
 /// Return the disk capacity in 512-byte sectors, or 0 if no device.

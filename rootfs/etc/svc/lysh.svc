@@ -1,3 +1,7 @@
 name=lysh
 path=/lth/bin/lysh
-restart=on-failure:3
+restart=always
+# memory: lysh needs brk growth itself (ELF images load into heap buffers
+# before exec; pipe buffers are heap-backed). Delegated per-exec only to
+# allowlisted apps (see MEM_CAP_APPS in lysh) — generic children get no caps.
+cap=memory

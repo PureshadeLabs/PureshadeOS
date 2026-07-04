@@ -132,4 +132,4 @@ These are not caught by `cargo check`. Moving or editing them produces errors th
 
 `docs/plans/followup-code-tasks.md` tracks all deferred items. **Critical landmine to know now:**
 
-**Heap / `net::init` over-allocation:** `HEAP_INIT_PAGES = 4096` (16 MiB) in `kernel/src/heap.rs` is a workaround that masks a heap-exhaustion panic from `net::init()` over-allocating RX/TX buffers. The root cause is in `kernel/src/virtio_net.rs`. The current QEMU target always attaches a virtio-net device (`-device virtio-net-pci,netdev=net0`), so `net::init()` runs on every boot. **Do not reduce `HEAP_INIT_PAGES` without first fixing the over-allocation in `virtio_net.rs`.** Reducing it back toward 4 MiB will reproduce a kmain panic.
+**Heap sizing (resolved 2026-07-02):** the old 16 MiB `HEAP_INIT_PAGES` workaround masked heap free-list fragmentation (no coalescing), not a virtio-net over-allocation. `dealloc` now coalesces and `HEAP_INIT_PAGES = 512` (2 MiB). If `[heap-oom]` reappears, check the `[heap-stat]` idle diagnostics (block count and largest free block) before growing the heap. See `docs/plans/followup-code-tasks.md` item 5 for the full post-mortem.

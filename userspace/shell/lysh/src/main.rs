@@ -31,9 +31,27 @@ use lythos_rt::{
     print, println,
     pipe_capture_start, pipe_capture_end, pipe_stdin_set, pipe_stdin_clear,
     pipe_stdin_active, pipe_stdin_read_all,
-    sys_serial_avail, sys_serial_read, sys_stat, sys_task_exit, sys_yield,
+    sys_serial_avail, sys_serial_read, sys_setgid, sys_setuid,
+    sys_stat, sys_task_exit, sys_yield,
     sys_open, sys_read_fd, sys_close, sys_create, sys_write_fd, sys_unlink,
 };
+
+/// Memory capability handle — first `cap=` entry in `/etc/svc/lysh.svc`.
+/// lysh holds it for its own heap growth (ELF images are read into heap
+/// buffers before SYS_EXEC, and the pipe buffers are heap-backed) and
+/// delegates it per-exec to the apps in [`MEM_CAP_APPS`].
+const MEM_CAP: u64 = 0;
+
+/// Binaries (by basename) that receive the Memory capability when exec'd.
+/// Everything else runs on the 64 KiB bootstrap arena only — SYS_BRK
+/// returns ENOPERM for them.
+const MEM_CAP_APPS: &[&str] = &["rkilo"];
+
+/// Capability set to forward for an exec of `path`.
+fn exec_caps(path: &str) -> &'static [u64] {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    if MEM_CAP_APPS.contains(&base) { &[MEM_CAP] } else { &[] }
+}
 
 const RESET:     &str = "\x1b[0m";
 const BOLD_GRN:  &str = "\x1b[1;32m";
@@ -43,8 +61,8 @@ const CLEAR_SCREEN: &str = "\x1b[2J\x1b[H";
 
 const BUILTINS: &[&str] = &[
     "cat", "cd", "clear", "cp", "echo", "exec", "exit", "free", "groupadd",
-    "groupdel", "groups", "help", "id", "kill", "ls", "mkdir", "poweroff", "ps", "rm",
-    "uptime", "useradd", "userdel", "whoami",
+    "groupdel", "groups", "help", "id", "kill", "ls", "mkdir", "passwd", "poweroff",
+    "ps", "rm", "su", "uptime", "useradd", "userdel", "whoami",
 ];
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -52,21 +70,99 @@ const BUILTINS: &[&str] = &[
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     println!();
-    println!("lysh 0.4 — OROS interactive shell");
-    println!("Type 'help' for available commands.");
+    println!("PureshadeOS 0.1 — Lythos/{}", env!("CARGO_PKG_VERSION"));
     println!();
+
+    let mut current_user = do_login();
 
     let mut history: Vec<String> = Vec::new();
     let mut cwd = String::from("/");
 
     loop {
-        print!("{}lysh{}:{}{}{} $ ", BOLD_GRN, RESET, BOLD_BLU, cwd, RESET);
+        print!(
+            "{}{}{}:{}{}{} $ ",
+            BOLD_GRN, current_user, RESET,
+            BOLD_BLU, cwd, RESET,
+        );
         let line = read_line(&history, &cwd);
         if !line.is_empty() {
             if history.last().map(|s| s.as_str()) != Some(line.as_str()) {
                 history.push(line.clone());
             }
-            dispatch(&line, &mut cwd);
+            dispatch(&line, &mut cwd, &mut current_user);
+        }
+    }
+}
+
+// ── Login ─────────────────────────────────────────────────────────────────────
+
+fn read_password() -> String {
+    let mut buf  = String::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match sys_serial_read(&mut byte) {
+            Ok(0) | Err(_) => { sys_yield(); continue; }
+            Ok(_) => {}
+        }
+        match byte[0] {
+            b'\r' | b'\n' => { println!(); return buf; }
+            0x7F | 0x08   => {
+                if !buf.is_empty() { buf.pop(); print!("\x08 \x08"); }
+            }
+            0x20..=0x7E   => { buf.push(byte[0] as char); print!("*"); }
+            _ => {}
+        }
+    }
+}
+
+fn do_login() -> String {
+    loop {
+        print!("lythos login: ");
+        let username = read_bare_line();
+        let username = username.trim_end();
+        if username.is_empty() { continue; }
+        if !rutils::user_exists(username) {
+            print!("Password: ");
+            let _ = read_password(); // consume input without hint
+            println!("Login incorrect.");
+            continue;
+        }
+        print!("Password: ");
+        let pw = read_password();
+        if rutils::verify_password(username, &pw) {
+            // Drop privileges to the logged-in user's uid/gid (gid first, then uid).
+            if let Some((uid, gid)) = rutils::lookup_uid_gid(username) {
+                sys_setgid(gid);
+                sys_setuid(uid);
+            }
+            println!("Welcome, {}.", username);
+            println!("Type 'help' for available commands.");
+            println!();
+            return String::from(username);
+        }
+        println!("Login incorrect.");
+    }
+}
+
+/// Read a line with echo but no history or tab completion (for login username prompt).
+fn read_bare_line() -> String {
+    let mut buf  = String::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match sys_serial_read(&mut byte) {
+            Ok(0) | Err(_) => { sys_yield(); continue; }
+            Ok(_) => {}
+        }
+        match byte[0] {
+            b'\r' | b'\n' => { println!(); return buf; }
+            0x7F | 0x08   => {
+                if !buf.is_empty() { buf.pop(); print!("\x08 \x08"); }
+            }
+            0x20..=0x7E => {
+                buf.push(byte[0] as char);
+                print!("{}", byte[0] as char);
+            }
+            _ => {}
         }
     }
 }
@@ -154,10 +250,10 @@ fn parse_redirects(line: &str) -> (String, Option<String>, Option<String>) {
 /// Splits on `|`, runs each stage left-to-right: every stage except the last
 /// has its stdout captured; the captured bytes become the next stage's piped
 /// stdin.  The final stage runs normally (output goes to serial).
-fn dispatch(line: &str, cwd: &mut String) {
+fn dispatch(line: &str, cwd: &mut String, current_user: &mut String) {
     let stages: Vec<&str> = line.split('|').collect();
     if stages.len() == 1 {
-        dispatch_single(line.trim(), cwd);
+        dispatch_single(line.trim(), cwd, current_user);
         return;
     }
     let mut piped: Option<alloc::vec::Vec<u8>> = None;
@@ -167,18 +263,18 @@ fn dispatch(line: &str, cwd: &mut String) {
             pipe_stdin_set(data);
         }
         if is_last {
-            dispatch_single(stage.trim(), cwd);
+            dispatch_single(stage.trim(), cwd, current_user);
             pipe_stdin_clear();
         } else {
             pipe_capture_start();
-            dispatch_single(stage.trim(), cwd);
+            dispatch_single(stage.trim(), cwd, current_user);
             pipe_stdin_clear();
             piped = Some(pipe_capture_end());
         }
     }
 }
 
-fn dispatch_single(line: &str, cwd: &mut String) {
+fn dispatch_single(line: &str, cwd: &mut String, current_user: &mut String) {
     // Parse I/O redirections first.
     let (cleaned, stdin_redir, stdout_redir) = parse_redirects(line);
     let line = cleaned.as_str();
@@ -238,13 +334,19 @@ fn dispatch_single(line: &str, cwd: &mut String) {
         "uptime" => rutils::cmd_uptime(),
         "free"   => rutils::cmd_free(),
         "kill"   => rutils::cmd_kill(&args),
-        "whoami"   => rutils::cmd_whoami(),
-        "id"       => rutils::cmd_id(),
-        "groups"   => rutils::cmd_groups(&args),
+        "whoami"   => rutils::cmd_whoami(current_user.as_str()),
+        "id"       => rutils::cmd_id(current_user.as_str()),
+        "groups"   => rutils::cmd_groups(&args, current_user.as_str()),
         "useradd"  => rutils::cmd_useradd(&args),
         "userdel"  => rutils::cmd_userdel(&args),
         "groupadd" => rutils::cmd_groupadd(&args),
         "groupdel" => rutils::cmd_groupdel(&args),
+        "passwd"   => rutils::cmd_passwd(&args, current_user.as_str()),
+        "su"       => {
+            if let Some(new_user) = rutils::cmd_su(&args) {
+                *current_user = new_user;
+            }
+        }
 
         "ls" => {
             let path = resolve(cwd, args.first().copied().unwrap_or("."));
@@ -276,8 +378,11 @@ fn dispatch_single(line: &str, cwd: &mut String) {
             None    => println!("usage: mkdir <path>"),
         },
         "exec" => match args.first() {
-            Some(p) => rutils::cmd_exec(&resolve(cwd, p)),
-            None    => println!("usage: exec <path>"),
+            Some(p) => {
+                let path = resolve(cwd, p);
+                rutils::cmd_exec_with_caps(&path, exec_caps(&path));
+            }
+            None => println!("usage: exec <path>"),
         },
 
         other => {
@@ -286,7 +391,7 @@ fn dispatch_single(line: &str, cwd: &mut String) {
             for dir in &["/lth/bin", "/bin", "/sbin"] {
                 let path = alloc::format!("{}/{}", dir, other);
                 if lythos_rt::sys_stat(&path).map(|s| !s.is_dir()).unwrap_or(false) {
-                    rutils::cmd_exec(&path);
+                    rutils::cmd_exec_with_caps(&path, exec_caps(&path));
                     found = true;
                     break;
                 }

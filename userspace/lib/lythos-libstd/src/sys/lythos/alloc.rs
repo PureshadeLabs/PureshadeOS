@@ -1,7 +1,8 @@
 // PAL — memory allocation.
 //
-// The global allocator is provided by lythos-std (a 4 MiB static free-list
-// heap).  This module adds the ability to map additional pages from the kernel
+// The global allocator is provided by lythos-rt (64 KiB static bootstrap
+// arena + on-demand SYS_BRK growth for tasks holding a Memory capability).
+// This module adds the ability to map additional pages from the kernel
 // via SYS_MMAP for larger allocations.
 
 /// Map `npages` anonymous pages at `virt` (must be page-aligned).

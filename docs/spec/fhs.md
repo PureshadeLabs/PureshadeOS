@@ -2,9 +2,10 @@
 
 ## Overview
 
-OROS uses a RFS subvolume-based structure split into two domains:
+OROS uses a RFS subvolume-based structure split into three domains:
 
 - **`/lth/`** — system-owned, managed by `rpkg` and the kernel, immutable at runtime
+- **`/r/`** — reserved OS-wide for the rpkg store services (store, generations, GC roots, cache); canonical spec is `docs/rpkg/02-store.md`
 - **Root-level** — standard POSIX paths, user-adjacent and mutable
 
 Subvolumes are snapshots atomically together during updates. Config always rolls back with the system.
@@ -20,21 +21,19 @@ Subvolumes are snapshots atomically together during updates. Config always rolls
 │   │   ├── /lth/system/boot/       (Lythos kernel binary, UEFI stub)
 │   │   ├── /lth/system/lib/        (core system libraries — musl, Lythos stdlib)
 │   │   └── /lth/system/init        (lythd binary — PID 1)
-│   ├── /lth/store/                 (@store subvolume, read-only)
-│   │   ├── /lth/store/*-hash/      (content-addressed store entries)
-│   │   │   ├── bin/                (compiled binaries)
-│   │   │   ├── lib/                (compiled libraries)
-│   │   │   └── share/              (data files, man pages)
-│   │   └── /lth/store/.manifest    (rpkg manifest: installed packages and versions)
-│   └── /lth/bin/                   (symlinks, managed by rpkg)
-│       ├── lythd → /lth/store/...-hash/bin/lythd
-│       ├── lythdist → /lth/store/...-hash/bin/lythdist
-│       ├── lythmsg → /lth/store/...-hash/bin/lythmsg
-│       ├── rpkg → /lth/store/...-hash/bin/rpkg
-│       ├── rpview → /lth/store/...-hash/bin/rpview
-│       ├── rpbreak → /lth/store/...-hash/bin/rpbreak
-│       ├── lysh → /lth/store/...-hash/bin/lysh
-│       └── (other system tools)
+│   └── /lth/bin → /r/gen/current/profile/bin
+│                                   (single symlink into the active rpkg
+│                                    generation — docs/rpkg/02-store.md §6)
+│
+├── /r/                              (reserved OS-wide for rpkg store services —
+│   │                                canonical layout: docs/rpkg/02-store.md §1)
+│   ├── /r/store/                   (input-addressed store: <digest>-<name>-<version>)
+│   ├── /r/db/                      (store metadata: valid set, references)
+│   ├── /r/gen/                     (generations + `current` activation symlink)
+│   ├── /r/roots/                   (GC roots)
+│   ├── /r/cache/                   (fetch cache — supersedes /var/cache/rpkg)
+│   ├── /r/build/                   (transient build directories)
+│   └── /r/log/                     (build logs)
 │
 ├── /cfg/                            (@cfg subvolume, read-write)
 │   ├── /cfg/lythos/                (CASK kernel configuration)
@@ -85,8 +84,8 @@ Subvolumes are snapshots atomically together during updates. Config always rolls
 │   │   ├── /var/log/lythmsg.log
 │   │   ├── /var/log/kernel.log
 │   │   └── (service logs)
-│   ├── /var/cache/                 (transient caches)
-│   │   └── /var/cache/rpkg/        (rpkg build cache, cleared on update)
+│   ├── /var/cache/                 (transient caches — rpkg caches live under
+│   │                                /r/cache/, not here)
 │   └── /var/tmp/                   (temporary files)
 │
 ├── /tmp/                            (user temporary files — tmpfs, world-writable)
@@ -127,13 +126,18 @@ Subvolumes are snapshots atomically together during updates. Config always rolls
 | Path          | Subvolume                      | Writable | Snapshots | Purpose                                 |
 | ------------- | ------------------------------ | -------- | --------- | --------------------------------------- |
 | `/lth/system` | `@core`                        | No       | Yes       | Kernel and `lythd` binary               |
-| `/lth/store`  | `@store`                       | No\*     | Yes       | Content-addressed binary cache          |
+| `/r`          | (directory on root RFS, v1)\*  | No\*\*   | No        | rpkg store, generations, GC roots       |
 | `/cfg`        | `@cfg`                         | Yes      | Yes       | System config, snapshotted with `@core` |
 | `/user`       | `@home`                        | Yes      | No        | User data, persistent across updates    |
 | `/var`        | (separate, tmpfs or small vol) | Yes      | No        | Logs, runtime state, transient          |
 | `/tmp`        | tmpfs                          | Yes      | No        | Ephemeral, world-writable               |
 
-\*`rpkg` mounts `/lth/store` read-write transiently during installs.
+\*Whether `/r/` becomes its own subvolume once RFS v2 subvolumes are
+specified is an open decision — `docs/rpkg/02-store.md` §1.
+
+\*\*`/r/store`, `/r/db`, `/r/gen` are writable only by the store services;
+`/r/cache`, `/r/build`, `/r/log` are working areas. See
+`docs/rpkg/02-store.md` §1.
 
 ---
 
@@ -161,42 +165,48 @@ Subvolumes are snapshots atomically together during updates. Config always rolls
 
 ## Snapshot Atomicity
 
-Before every `rpkg` update:
+Package-level atomicity is the rpkg generation mechanism
+(`docs/rpkg/02-store.md` §5–6): every install/remove/rollback creates a new
+generation under `/r/gen/`, and activation is one atomic symlink flip of
+`/r/gen/current`. Rollback is flipping back to a prior generation's manifest.
+
+Boot-critical updates additionally arm the boot rollback protocol:
 
 ```
-rpkg snapshot @core → @core.snapshot
-rpkg snapshot @cfg  → @cfg.snapshot
-rpkg set rollback flag → /cfg/lythos/rollback
+rpkg writes previous generation number → /cfg/lythos/rollback
 ```
 
-On next boot, if critical daemon fails within 30 seconds:
+On next boot, if a critical daemon fails within 30 seconds:
 
 ```
-lythd rollback → @core.snapshot → @core
-lythd rollback → @cfg.snapshot  → @cfg
+lythd re-points /r/gen/current → recorded generation (same atomic flip)
 lythd reboot
 ```
 
 If 30 seconds pass cleanly:
 
 ```
-lythd delete @core.snapshot
-lythd delete @cfg.snapshot
 lythd rm /cfg/lythos/rollback
 ```
 
-Config and system kernel are **never out of sync**.
+Kernel/config snapshot atomicity (`@core` + `@cfg` snapshotted together) is
+deferred until RFS v2 specifies subvolume snapshots; the generation manifest
+is the intended integration point (`docs/rpkg/02-store.md` §6.3).
 
 ---
 
 ## Key Invariants
 
 - **`/lth/` is immutable at runtime** — no mutations except by `rpkg` on update
+- **`/r/` is reserved OS-wide for the rpkg store services** — store paths are
+  immutable once registered; only the store services write `/r/store`, `/r/db`,
+  `/r/gen` (`docs/rpkg/02-store.md`)
 - **`/cfg` rolls back with `/lth/system`** — atomically snapshotted together
 - **`/user` never rolls back** — user data is persistent across updates
 - **`/var` is ephemeral** — cleared or reset on reboot
 - **Symlinks in `/bin`, `/sbin`, `/lib`** allow POSIX-compliant tools to find binaries and libraries
-- **All user-facing tools are in `/lth/bin`** — discovered via symlinks for compatibility
+- **All user-facing tools are reached via `/lth/bin`** — a single symlink to
+  `/r/gen/current/profile/bin`, flipped atomically per generation
 
 ---
 

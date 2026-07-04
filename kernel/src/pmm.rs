@@ -2,10 +2,9 @@
 ///
 /// Initialisation flow:
 ///   1. All frames start marked *used*.
-///   2. Parse the Multiboot1 or Multiboot2 memory map; mark available
-///      (type = 1) regions as *free*.
+///   2. Walk the Limine memory-map entries; mark type 0 (USABLE) regions free.
 ///   3. Re-mark frames occupied by the kernel image as *used*.
-///   4. Re-mark physical frame 0 (BIOS data area) as *used*.
+///   4. Re-mark physical frame 0 (real-mode IVT / BIOS data area) as *used*.
 ///
 /// Convention: bit = 0 → free, bit = 1 → used.
 ///
@@ -20,24 +19,14 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub const FRAME_SIZE: u64 = 4096;
 
-/// Physical address where `run.sh` loads the lythd ELF via QEMU's
-/// `-device loader,addr=LYTHD_MODULE_ADDR,force-raw=on`.
-/// The PMM reserves this range so no allocator can reclaim the frames before
-/// `kmain` copies the ELF to the heap.
-pub const LYTHD_MODULE_ADDR: u64   = 0x0040_0000; // 4 MiB
-/// Maximum size reserved for the lythd ELF.  Currently ~92 KiB; 512 KiB
-/// gives generous headroom.
-pub const LYTHD_MODULE_MAX:  usize = 512 * 1024;  // 512 KiB
-
 /// Maximum supported physical address space: 4 GiB.
 const MAX_FRAMES: usize = (4 * 1024 * 1024 * 1024u64 / FRAME_SIZE) as usize; // 1 M frames
 
 /// One bit per frame; 1 M frames / 64 bits = 16384 u64 words = 128 KiB.
 const BITMAP_WORDS: usize = MAX_FRAMES / 64;
 
-// Multiboot boot-loader magics.
-const MB1_MAGIC: u32 = 0x2BADB002;
-const MB2_MAGIC: u32 = 0x36D76289;
+// Limine memory-map type constants (per Limine protocol spec §5.4).
+const LIMINE_MMAP_USABLE: u64 = 0;
 
 // ── PhysAddr ─────────────────────────────────────────────────────────────────
 
@@ -54,7 +43,7 @@ impl PhysAddr {
 // ── Bitmap storage ───────────────────────────────────────────────────────────
 
 /// Placed in .bss; zero-initialised (all frames appear free before init).
-/// init() overwrites this to all-ones before parsing the memory map.
+/// init_from_limine() overwrites this to all-ones before parsing the memory map.
 static mut BITMAP: [u64; BITMAP_WORDS] = [0u64; BITMAP_WORDS];
 
 /// Number of currently free frames.
@@ -123,116 +112,24 @@ unsafe fn mark_range_used(start: u64, end: u64) {
     }
 }
 
-// ── Multiboot1 parser ────────────────────────────────────────────────────────
-
-/// MB1 mmap entry field offsets (relative to the entry base, which IS the
-/// `size` field itself).
-const MB1_E_BASE: u64 = 4;  // u64
-const MB1_E_LEN:  u64 = 12; // u64
-const MB1_E_TYPE: u64 = 20; // u32
-
-unsafe fn parse_mb1(mb_info: u64) {
-    let flags = unsafe { *(mb_info as *const u32) };
-
-    // Try the detailed mmap first (flag bit 6).  QEMU's a.out-kludge MB1 path
-    // sets bit 6 but may leave mmap_length = 0; treat that as "no mmap".
-    let mut used_mmap = false;
-    if flags & (1 << 6) != 0 {
-        let mmap_len  = unsafe { *((mb_info + 40) as *const u32) } as u64;
-        let mmap_addr = unsafe { *((mb_info + 44) as *const u32) } as u64;
-
-        if mmap_len > 0 {
-            let mut offset = 0u64;
-            while offset < mmap_len {
-                let entry = mmap_addr + offset;
-                // `size` does not count itself; total entry size = size + 4.
-                let size      = unsafe { *(entry as *const u32) } as u64;
-                let base_addr = unsafe { *((entry + MB1_E_BASE) as *const u64) };
-                let length    = unsafe { *((entry + MB1_E_LEN)  as *const u64) };
-                let typ       = unsafe { *((entry + MB1_E_TYPE) as *const u32) };
-
-                if typ == 1 {
-                    unsafe { mark_range_free(base_addr, base_addr + length) };
-                }
-
-                offset += size + 4;
-            }
-            used_mmap = true;
-        }
-    }
-
-    // Fall back to mem_lower / mem_upper (flag bit 0) if the mmap was absent
-    // or empty.  mem_lower is conventional memory (< 1 MiB); mem_upper is
-    // extended memory starting at 1 MiB — both reported in KiB.
-    if !used_mmap && flags & 1 != 0 {
-        let mem_lower_kb = unsafe { *((mb_info + 4) as *const u32) } as u64;
-        let mem_upper_kb = unsafe { *((mb_info + 8) as *const u32) } as u64;
-
-        // Conventional memory: 0x1000..mem_lower*1024 (skip frame 0).
-        if mem_lower_kb > 0 {
-            unsafe { mark_range_free(0x1000, mem_lower_kb * 1024) };
-        }
-        // Extended memory: 1 MiB..1 MiB + mem_upper*1024.
-        if mem_upper_kb > 0 {
-            let base = 0x10_0000u64;
-            unsafe { mark_range_free(base, base + mem_upper_kb * 1024) };
-        }
-    }
-}
-
-// ── Multiboot2 parser ────────────────────────────────────────────────────────
-
-const MB2_TAG_MMAP: u32 = 6;
-const MB2_TAG_END:  u32 = 0;
-
-unsafe fn parse_mb2(mb_info: u64) {
-    let total_size = unsafe { *(mb_info as *const u32) } as u64;
-    let info_end   = mb_info + total_size;
-    let mut tag_addr = mb_info + 8; // skip total_size + reserved
-
-    loop {
-        if tag_addr + 8 > info_end {
-            break;
-        }
-        let tag_type = unsafe { *(tag_addr as *const u32) };
-        let tag_size = unsafe { *((tag_addr + 4) as *const u32) } as u64;
-
-        if tag_type == MB2_TAG_END {
-            break;
-        }
-
-        if tag_type == MB2_TAG_MMAP {
-            let entry_size    = unsafe { *((tag_addr + 8) as *const u32) } as u64;
-            // entry_version at tag_addr + 12 (ignored — always 0).
-            let entries_start = tag_addr + 16;
-            let entries_end   = tag_addr + tag_size;
-
-            let mut e = entries_start;
-            while e + entry_size <= entries_end {
-                let base_addr = unsafe { *(e as *const u64) };
-                let length    = unsafe { *((e + 8) as *const u64) };
-                let typ       = unsafe { *((e + 16) as *const u32) };
-
-                if typ == 1 {
-                    unsafe { mark_range_free(base_addr, base_addr + length) };
-                }
-
-                e += entry_size;
-            }
-            break; // memory map found; done
-        }
-
-        // Advance to next tag, 8-byte aligned.
-        tag_addr += (tag_size + 7) & !7;
-    }
-}
-
 // ── Public API ───────────────────────────────────────────────────────────────
 
-/// Initialise the PMM from the Multiboot info pointer.
+/// Initialise the PMM from the Limine memory map.
+///
+/// `entries` is a slice of `(base, length, type)` tuples copied from the
+/// Limine memory-map response before `vmm::init()` replaced CR3.
+/// Only type `0` (USABLE) entries are freed; all others remain marked used.
+///
+/// `kernel_phys_base`/`kernel_phys_end` are the physical address range of the
+/// kernel image (from Limine's KernelAddressResponse).  These frames are
+/// re-marked used even if they fall inside a USABLE mmap region.
 ///
 /// Must be called exactly once, before any `alloc_frame` / `free_frame`.
-pub fn init(mb_magic: u32, mb_info: u64) {
+pub fn init_from_limine(
+    entries: &[(u64, u64, u64)],
+    kernel_phys_base: u64,
+    kernel_phys_end: u64,
+) {
     // 1. Mark all frames used.
     unsafe {
         let p = ptr::addr_of_mut!(BITMAP) as *mut u64;
@@ -241,35 +138,20 @@ pub fn init(mb_magic: u32, mb_info: u64) {
         }
     }
 
-    // 2. Mark available RAM from the bootloader memory map.
-    match mb_magic {
-        MB1_MAGIC => unsafe { parse_mb1(mb_info) },
-        MB2_MAGIC => unsafe { parse_mb2(mb_info) },
-        other => panic!("pmm::init: unknown bootloader magic {:#010x}", other),
+    // 2. Free only USABLE regions (type 0).
+    for &(base, length, typ) in entries {
+        if typ == LIMINE_MMAP_USABLE {
+            unsafe { mark_range_free(base, base + length) };
+        }
     }
 
-    // 3. Re-mark the kernel image as used (it sits inside available RAM).
-    unsafe extern "C" {
-        static KERNEL_START: u8;
-        static KERNEL_END:   u8;
-    }
-    let kstart = &raw const KERNEL_START as u64;
-    let kend   = &raw const KERNEL_END   as u64;
-    unsafe { mark_range_used(kstart, kend) };
+    // 3. Re-mark the kernel image as used (it sits inside usable RAM).
+    unsafe { mark_range_used(kernel_phys_base, kernel_phys_end) };
 
-    // 4. Always reserve physical frame 0 (BIOS data area / real-mode IVT).
+    // 4. Always reserve physical frame 0 (real-mode IVT / BIOS data area).
     unsafe { set_used(0) };
 
-    // 5. Reserve the lythd ELF region.
-    //    QEMU's a.out-kludge MB1 path does not populate the MB1 modules list,
-    //    so lythd is loaded by `run.sh` via:
-    //      -device loader,file=lythd,addr=LYTHD_MODULE_ADDR,force-raw=on
-    //    This writes raw bytes to a fixed physical address before the CPU
-    //    starts.  Marking those frames as used here prevents the PMM from
-    //    handing them out before kmain has copied the ELF to the heap.
-    unsafe { mark_range_used(LYTHD_MODULE_ADDR, LYTHD_MODULE_ADDR + LYTHD_MODULE_MAX as u64) };
-
-    // 6. Count free frames.
+    // 5. Count free frames.
     let free: usize = unsafe {
         let p = ptr::addr_of!(BITMAP) as *const u64;
         (0..BITMAP_WORDS).map(|i| (*p.add(i)).count_zeros() as usize).sum()

@@ -12,6 +12,7 @@ members = [
     "userspace/apps/rkilo",
     "userspace/apps/rutils",
     "pkg/rpkg",
+    "fs/rfs2",
     "tools/orox-pack",
     "tools/lythos-toolchain/lythos-libc",
     "tools/lythos-toolchain/lythos-unwind",
@@ -28,6 +29,7 @@ exclude = [
 default-members = [
     "tools/orox-pack",
     "tools/lythos-toolchain/sysroot-builder",
+    "fs/rfs2", # no_std+alloc lib, host-compilable; tests run on host
 ]
 resolver = "2"
 

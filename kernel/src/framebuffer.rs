@@ -4,16 +4,14 @@ use crate::{pmm, pci, vmm};
 // Kernel VA for the linear framebuffer mapping (above IPC window at 0xFFFF_D000_...)
 const FB_VA_BASE: u64 = 0xFFFF_E000_0000_0000;
 
-const MB1_MAGIC: u32 = 0x2BADB002;
-const MB2_MAGIC: u32 = 0x36D76289;
-const MB2_TAG_FB: u32 = 8;
-
 static FB_VIRT:   AtomicU64 = AtomicU64::new(0);
 static FB_PITCH:  AtomicU32 = AtomicU32::new(0);
 static FB_WIDTH:  AtomicU32 = AtomicU32::new(0);
 static FB_HEIGHT: AtomicU32 = AtomicU32::new(0);
 
 // ── Bochs VBE (QEMU stdvga PCI 0x1234:0x1111) ────────────────────────────────
+// Kept as a fallback for `-vga std` QEMU sessions where Limine may not supply
+// a framebuffer response (e.g., headless BIOS-mode runs).
 
 const VBE_INDEX: u16 = 0x01CE;
 const VBE_DATA:  u16 = 0x01CF;
@@ -34,7 +32,7 @@ fn vbe_write(index: u16, value: u16) {
 }
 
 /// Probe for QEMU stdvga, program 1024×768×32 via Bochs VBE I/O ports,
-/// and return (phys_addr, pitch, width, height, bpp).
+/// and return `(phys_addr, pitch, width, height, bpp)`.
 fn init_bochs_vbe() -> Option<(u64, u32, u32, u32, u8)> {
     let (bus, dev) = pci::find(0x1234, 0x1111)?;
     pci::enable_io_mem(bus, dev);
@@ -59,24 +57,9 @@ fn init_bochs_vbe() -> Option<(u64, u32, u32, u32, u8)> {
     Some((fb_phys, 1024 * 4, 1024, 768, 32))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Mapping helper ────────────────────────────────────────────────────────────
 
-/// Parse framebuffer info from Multiboot or Bochs VBE, then map it into
-/// kernel virtual space.  Returns true on success.  Must be called after `vmm::init()`.
-pub fn init(mb_magic: u32, mb_info: u64) -> bool {
-    let (phys_addr, pitch, width, height, bpp) =
-        match mb_magic {
-            MB1_MAGIC => parse_mb1(mb_info),
-            MB2_MAGIC => parse_mb2(mb_info),
-            _ => None,
-        }
-        .or_else(init_bochs_vbe)
-        .unwrap_or_else(|| return (0, 0, 0, 0, 0));
-
-    if phys_addr == 0 { return false; }
-
-    if bpp != 32 || width == 0 || height == 0 { return false; }
-
+fn map_and_store(phys_addr: u64, pitch: u32, width: u32, height: u32) {
     let fb_bytes = pitch as u64 * height as u64;
     let pages = (fb_bytes + 4095) / 4096;
 
@@ -91,76 +74,59 @@ pub fn init(mb_magic: u32, mb_info: u64) -> bool {
         );
     }
 
-    FB_PITCH.store(pitch,  Ordering::Relaxed);
-    FB_WIDTH.store(width,  Ordering::Relaxed);
+    FB_PITCH.store(pitch,   Ordering::Relaxed);
+    FB_WIDTH.store(width,   Ordering::Relaxed);
     FB_HEIGHT.store(height, Ordering::Relaxed);
-    // Release: makes the three stores above visible before the virt pointer is published.
+    // Release: makes the three stores visible before the virt pointer is published.
     FB_VIRT.store(FB_VA_BASE, Ordering::Release);
-    true
 }
 
-// ── Multiboot parsers ─────────────────────────────────────────────────────────
+// ── Public init API ───────────────────────────────────────────────────────────
 
-fn parse_mb1(mb_info: u64) -> Option<(u64, u32, u32, u32, u8)> {
-    // MB1 info structure offsets (per spec):
-    //   +0   flags (u32)         — bit 12 = framebuffer info present
-    //   +88  framebuffer_addr (u64)
-    //   +96  framebuffer_pitch (u32)
-    //   +100 framebuffer_width (u32)
-    //   +104 framebuffer_height (u32)
-    //   +108 framebuffer_bpp (u8)
-    //   +109 framebuffer_type (u8)  — 1 = RGB direct-colour
-    let flags = unsafe { *(mb_info as *const u32) };
-    if flags & (1 << 12) == 0 { return None; }
-
-    let addr   = unsafe { *((mb_info + 88)  as *const u64) };
-    let pitch  = unsafe { *((mb_info + 96)  as *const u32) };
-    let width  = unsafe { *((mb_info + 100) as *const u32) };
-    let height = unsafe { *((mb_info + 104) as *const u32) };
-    let bpp    = unsafe { *((mb_info + 108) as *const u8)  };
-    let ftype  = unsafe { *((mb_info + 109) as *const u8)  };
-
-    if ftype != 1 { return None; } // only RGB direct-colour
-    Some((addr, pitch, width, height, bpp))
-}
-
-fn parse_mb2(mb_info: u64) -> Option<(u64, u32, u32, u32, u8)> {
-    // MB2 tag type 8 = framebuffer info
-    //   +8   addr (u64)
-    //   +16  pitch (u32)
-    //   +20  width (u32)
-    //   +24  height (u32)
-    //   +28  bpp (u8)
-    //   +29  type (u8)
-    let total  = unsafe { *(mb_info as *const u32) } as u64;
-    let end    = mb_info + total;
-    let mut p  = mb_info + 8;
-
-    while p + 8 <= end {
-        let tag_type = unsafe { *(p as *const u32) };
-        let tag_size = unsafe { *((p + 4) as *const u32) } as u64;
-        if tag_type == 0 { break; }
-
-        if tag_type == MB2_TAG_FB {
-            let addr   = unsafe { *((p + 8)  as *const u64) };
-            let pitch  = unsafe { *((p + 16) as *const u32) };
-            let width  = unsafe { *((p + 20) as *const u32) };
-            let height = unsafe { *((p + 24) as *const u32) };
-            let bpp    = unsafe { *((p + 28) as *const u8)  };
-            let ftype  = unsafe { *((p + 29) as *const u8)  };
-            if ftype == 1 {
-                return Some((addr, pitch, width, height, bpp));
-            }
-            break;
+/// Initialise the framebuffer from a Limine framebuffer response.
+///
+/// `phys` is the physical address of the framebuffer MMIO region, recovered by
+/// subtracting the HHDM offset from Limine's virtual `address` field before
+/// `vmm::init()` discarded the Limine page tables.
+///
+/// Falls back to the Bochs VBE probe if `phys` is zero (no Limine response).
+/// Returns `true` if a framebuffer was successfully mapped.
+///
+/// Must be called after `vmm::init()`.
+pub fn init_from_limine(phys: u64, pitch: u64, width: u64, height: u64, bpp: u16) -> bool {
+    let (phys, pitch, width, height, bpp) = if phys != 0 {
+        (phys, pitch as u32, width as u32, height as u32, bpp as u8)
+    } else {
+        match init_bochs_vbe() {
+            Some((p, pi, w, h, b)) => (p, pi, w, h, b),
+            None => return false,
         }
-        p += (tag_size + 7) & !7;
-    }
-    None
+    };
+
+    if bpp != 32 || width == 0 || height == 0 { return false; }
+
+    map_and_store(phys, pitch, width, height);
+    true
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub fn is_active() -> bool { FB_VIRT.load(Ordering::Relaxed) != 0 }
+
+/// Raw framebuffer parameters for the console: `(virt, pitch, width, height)`.
+/// `None` until a framebuffer has been mapped.
+pub(crate) fn raw() -> Option<(u64, u64, u32, u32)> {
+    // Acquire pairs with the Release store in map_and_store: once the virt
+    // pointer is visible, pitch/width/height are too.
+    let virt = FB_VIRT.load(Ordering::Acquire);
+    if virt == 0 { return None; }
+    Some((
+        virt,
+        FB_PITCH.load(Ordering::Relaxed) as u64,
+        FB_WIDTH.load(Ordering::Relaxed),
+        FB_HEIGHT.load(Ordering::Relaxed),
+    ))
+}
 pub fn width()  -> u32 { FB_WIDTH.load(Ordering::Relaxed) }
 pub fn height() -> u32 { FB_HEIGHT.load(Ordering::Relaxed) }
 pub fn dimensions() -> (u32, u32) { (width(), height()) }

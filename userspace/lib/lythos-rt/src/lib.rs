@@ -3,7 +3,8 @@
 //! Mirrors the structure of Rust's `std` for programs targeting the Lythos
 //! microkernel ABI.  Link this crate to get:
 //!
-//! - A 4 MiB heap (`Vec`, `String`, `Box`, `Arc`, …).
+//! - A heap (`Vec`, `String`, `Box`, `Arc`, …): 64 KiB static bootstrap arena,
+//!   grown on demand via SYS_BRK when the task holds a Memory capability.
 //! - `print!` / `println!` / `eprint!` / `eprintln!` macros.
 //! - `io::{Read, Write, BufWriter, Cursor, …}`
 //! - `sync::{Mutex, RwLock, OnceLock, Arc}`
@@ -38,7 +39,7 @@ extern crate alloc;
 
 // ── Modules ───────────────────────────────────────────────────────────────────
 
-mod allocator;         // GlobalAlloc — 4 MiB static free-list heap
+mod allocator;         // GlobalAlloc — 64 KiB static arena + brk growth
 
 pub mod io;            // Read, Write, Stdout, BufWriter, Cursor, …
 pub mod sync;          // Mutex, RwLock, OnceLock, Arc
@@ -186,6 +187,15 @@ pub fn sys_munmap(virt: u64) -> Result<(), SysError> {
     if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(()) }
 }
 
+/// Set or query the program break (heap top). `new_brk = 0` queries.
+/// Returns the resulting break. Requires a Memory capability with WRITE
+/// right; tasks without one get `ENOPERM` and are limited to the static
+/// bootstrap heap in `allocator`.
+pub fn sys_brk(new_brk: u64) -> Result<u64, SysError> {
+    let r = unsafe { syscall1(SYS_BRK, new_brk) };
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(r) }
+}
+
 /// Grant a derived capability to another task.
 ///
 /// `rights` — bitmask from `cap_rights`: READ=1, WRITE=2, GRANT=4, REVOKE=8.
@@ -280,15 +290,20 @@ pub fn sys_exec(elf: &[u8], caps: &[u64]) -> Result<u64, SysError> {
 // separate process needed — the scheduler is cooperative and commands are
 // library calls inside the shell process.
 //
-// PIPE_BUF_SIZE must be a power-of-two multiple of 4096 and fit in BSS.
+// The buffers are heap-backed and allocated on first use: a fixed
+// [u8; PIPE_BUF_SIZE] static here would land in every linking binary's BSS,
+// and the ELF loader eagerly frames all of p_memsz — 64 KiB per task, idle
+// or not.  Only the shell ever pipes, so only the shell pays.  Note this
+// means the pipe API effectively requires a Memory capability: the buffer
+// exceeds the 64 KiB bootstrap arena, so allocation needs SYS_BRK.
+//
 // 64 KiB covers virtually all command outputs; the buffer silently truncates
 // anything larger (only a problem for `cat bigfile | …` which is unusual).
 
 const PIPE_BUF_SIZE: usize = 64 * 1024;
 
 struct PipeBuf {
-    buf: core::cell::UnsafeCell<[u8; PIPE_BUF_SIZE]>,
-    len: core::cell::UnsafeCell<usize>,
+    buf: core::cell::UnsafeCell<alloc::vec::Vec<u8>>,
     pos: core::cell::UnsafeCell<usize>,
 }
 // SAFETY: single-threaded userspace process; no concurrent access.
@@ -296,8 +311,7 @@ unsafe impl Sync for PipeBuf {}
 impl PipeBuf {
     const fn new() -> Self {
         Self {
-            buf: core::cell::UnsafeCell::new([0; PIPE_BUF_SIZE]),
-            len: core::cell::UnsafeCell::new(0),
+            buf: core::cell::UnsafeCell::new(alloc::vec::Vec::new()),
             pos: core::cell::UnsafeCell::new(0),
         }
     }
@@ -316,16 +330,16 @@ static STDIN: PipeBuf = PipeBuf::new();
 /// Output is silently truncated at `PIPE_BUF_SIZE` (64 KiB).
 /// Call [`pipe_capture_end`] to stop capturing and retrieve the buffer.
 pub fn pipe_capture_start() {
-    unsafe { *CAPTURE.len.get() = 0; }
+    // Reserve the full buffer up front so the sys_log capture path never
+    // allocates (an alloc panic mid-log would re-enter capture).
+    unsafe { *CAPTURE.buf.get() = alloc::vec::Vec::with_capacity(PIPE_BUF_SIZE); }
     CAPTURE_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Stop capturing and return the bytes written since [`pipe_capture_start`].
 pub fn pipe_capture_end() -> alloc::vec::Vec<u8> {
     CAPTURE_ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
-    let len = unsafe { *CAPTURE.len.get() };
-    let buf = unsafe { &(&*CAPTURE.buf.get())[..len] };
-    alloc::vec::Vec::from(buf)
+    unsafe { core::mem::take(&mut *CAPTURE.buf.get()) }
 }
 
 /// Feed `data` as the stdin source for the next pipeline stage.
@@ -336,8 +350,7 @@ pub fn pipe_capture_end() -> alloc::vec::Vec<u8> {
 pub fn pipe_stdin_set(data: &[u8]) {
     let n = data.len().min(PIPE_BUF_SIZE);
     unsafe {
-        (&mut *STDIN.buf.get())[..n].copy_from_slice(&data[..n]);
-        *STDIN.len.get() = n;
+        *STDIN.buf.get() = alloc::vec::Vec::from(&data[..n]);
         *STDIN.pos.get() = 0;
     }
     STDIN_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
@@ -354,16 +367,19 @@ pub fn pipe_stdin_active() -> bool {
 /// Resets the stdin state; subsequent calls return an empty string.
 pub fn pipe_stdin_read_all() -> alloc::string::String {
     STDIN_ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
-    let len = unsafe { *STDIN.len.get() };
-    let pos = unsafe { *STDIN.pos.get() };
-    unsafe { *STDIN.pos.get() = len; }
-    let buf = unsafe { &(&*STDIN.buf.get())[pos..len] };
-    alloc::string::String::from(core::str::from_utf8(buf).unwrap_or(""))
+    let buf = unsafe { core::mem::take(&mut *STDIN.buf.get()) };
+    let pos = unsafe { core::mem::replace(&mut *STDIN.pos.get(), 0) };
+    let bytes = buf.get(pos..).unwrap_or(&[]);
+    alloc::string::String::from(core::str::from_utf8(bytes).unwrap_or(""))
 }
 
-/// Reset piped stdin state without consuming the data.
+/// Reset piped stdin state and release the buffer.
 pub fn pipe_stdin_clear() {
     STDIN_ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
+    unsafe {
+        *STDIN.buf.get() = alloc::vec::Vec::new();
+        *STDIN.pos.get() = 0;
+    }
 }
 
 /// Write a UTF-8 string to the kernel serial console.
@@ -374,15 +390,19 @@ pub fn pipe_stdin_clear() {
 /// than 4096 bytes.  Prefer `print!` / `println!` unless you need raw access.
 pub fn sys_log(s: &str) {
     if CAPTURE_ACTIVE.load(core::sync::atomic::Ordering::Relaxed) {
-        let b       = s.as_bytes();
-        let cur_len = unsafe { *CAPTURE.len.get() };
-        let space   = PIPE_BUF_SIZE - cur_len;
-        let copy_n  = b.len().min(space);
-        if copy_n > 0 {
-            unsafe {
-                (&mut *CAPTURE.buf.get())[cur_len..cur_len + copy_n]
-                    .copy_from_slice(&b[..copy_n]);
-                *CAPTURE.len.get() = cur_len + copy_n;
+        let b = s.as_bytes();
+        unsafe {
+            let v = &mut *CAPTURE.buf.get();
+            // Alloc-free append into the capacity reserved by
+            // pipe_capture_start — extend_from_slice would drag the
+            // allocator (and its 64 KiB arena) into every binary that
+            // merely prints.
+            let space  = PIPE_BUF_SIZE.min(v.capacity()).saturating_sub(v.len());
+            let copy_n = b.len().min(space);
+            if copy_n > 0 {
+                let old = v.len();
+                core::ptr::copy_nonoverlapping(b.as_ptr(), v.as_mut_ptr().add(old), copy_n);
+                v.set_len(old + copy_n);
             }
         }
         return;
@@ -450,6 +470,30 @@ pub fn sys_nanosleep(ns: u64) {
 #[inline]
 pub fn sys_time_epoch() -> u64 {
     unsafe { syscall0(SYS_TIME_EPOCH) }
+}
+
+/// Return the UID of the calling task. Returns 0 (root) until SYS_SETUID is implemented.
+#[inline]
+pub fn sys_getuid() -> u32 {
+    unsafe { syscall0(SYS_GETUID) as u32 }
+}
+
+/// Return the GID of the calling task.
+#[inline]
+pub fn sys_getgid() -> u32 {
+    unsafe { syscall0(SYS_GETGID) as u32 }
+}
+
+/// Set the UID of the calling task. Returns true on success, false if not permitted.
+#[inline]
+pub fn sys_setuid(uid: u32) -> bool {
+    unsafe { syscall1(SYS_SETUID, uid as u64) == 0 }
+}
+
+/// Set the GID of the calling task. Returns true on success, false if not permitted.
+#[inline]
+pub fn sys_setgid(gid: u32) -> bool {
+    unsafe { syscall1(SYS_SETGID, gid as u64) == 0 }
 }
 
 /// Return the liveness status of a task by `task_id`.
@@ -782,10 +826,11 @@ macro_rules! print {
 }
 
 /// Print to the kernel serial console with a trailing newline.
+/// Uses `\r\n` so the cursor returns to column 0 in QEMU raw-terminal mode.
 #[macro_export]
 macro_rules! println {
-    ()            => { $crate::print!("\n") };
-    ($($arg:tt)*) => { $crate::print!("{}\n", ::core::format_args!($($arg)*)) };
+    ()            => { $crate::print!("\r\n") };
+    ($($arg:tt)*) => { $crate::print!("{}\r\n", ::core::format_args!($($arg)*)) };
 }
 
 /// Print to the kernel serial console (stderr) without a trailing newline.
@@ -798,8 +843,8 @@ macro_rules! eprint {
 /// Print to the kernel serial console (stderr) with a trailing newline.
 #[macro_export]
 macro_rules! eprintln {
-    ()            => { $crate::eprint!("\n") };
-    ($($arg:tt)*) => { $crate::eprint!("{}\n", ::core::format_args!($($arg)*)) };
+    ()            => { $crate::eprint!("\r\n") };
+    ($($arg:tt)*) => { $crate::eprint!("{}\r\n", ::core::format_args!($($arg)*)) };
 }
 
 // ── BootInfo ──────────────────────────────────────────────────────────────────

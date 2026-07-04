@@ -2,3 +2,11 @@
 name = "lythos"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+limine = "0.6.5"
+
+[features]
+# Run the userspace-entry / ELF / integration / sweep boot test suite in
+# kmain (costs seconds per boot). Enabled by `make kernel-tests`.
+boot-tests = []

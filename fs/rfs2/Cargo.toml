@@ -1,0 +1,7 @@
+[package]
+name = "rfs2"
+version = "0.1.0"
+edition = "2021"
+description = "RFS V2 — COW filesystem per docs/rfs-v2 (crypto stubbed behind the BlockTransform seam)"
+
+[dependencies]

@@ -69,6 +69,10 @@
 /// | 42 | SYS_IPC_RECV_TIMEOUT |
 /// | 43 | SYS_IPC_SEND_TIMEOUT |
 /// | 44 | SYS_TIME_EPOCH  |
+/// | 45 | SYS_GETUID      |
+/// | 46 | SYS_GETGID      |
+/// | 47 | SYS_SETUID      |
+/// | 48 | SYS_SETGID      |
 
 use core::arch::global_asm;
 
@@ -195,6 +199,14 @@ pub const SYS_IPC_SEND_TIMEOUT: u64 = 43;
 /// No arguments.  Anchored from CMOS RTC at boot; advances via APIC tick counter.
 /// Never returns an error sentinel; always a valid u64.
 pub const SYS_TIME_EPOCH: u64 = 44;
+/// Return the UID of the calling task. Returns u32 (always 0 until SYS_SETUID exists).
+pub const SYS_GETUID:   u64 = 45;
+/// Return the GID of the calling task. Returns u32.
+pub const SYS_GETGID:   u64 = 46;
+/// Set the UID of the calling task (root only, or setting own uid). Returns 0 or ENOPERM.
+pub const SYS_SETUID:   u64 = 47;
+/// Set the GID of the calling task (root only, or setting own gid). Returns 0 or ENOPERM.
+pub const SYS_SETGID:   u64 = 48;
 /// Create a UDP socket. No arguments. Returns socket fd (≥ 0) or ENOSYS.
 pub const SYS_SOCKET:   u64 = 50;
 /// Bind a socket to a local UDP port.
@@ -433,6 +445,34 @@ where
 ///
 /// Rejects: null pointers, arithmetic overflow, and addresses at or above the
 /// user/kernel split (`0x0000_8000_0000_0000`).  Zero-length ranges are
+/// Check DAC permission. `bits`: 0x4=read, 0x2=write, 0x1=execute.
+/// Root (uid=0) always passes. Returns true if access is permitted.
+#[inline]
+fn dac_check(mode: u16, inode_uid: u32, inode_gid: u32, task_uid: u32, task_gid: u32, bits: u16) -> bool {
+    if task_uid == 0 { return true; }
+    let eff = if task_uid == inode_uid {
+        (mode >> 6) & 0x7
+    } else if task_gid == inode_gid {
+        (mode >> 3) & 0x7
+    } else {
+        mode & 0x7
+    };
+    (eff & bits) == bits
+}
+
+/// Return the parent directory path of `path` as a byte vec.
+/// `/foo/bar` → `/foo`, `/foo` → `/`, `/` → `/`.
+fn parent_of(path: &[u8]) -> alloc::vec::Vec<u8> {
+    let s = match core::str::from_utf8(path) {
+        Ok(s)  => s,
+        Err(_) => return alloc::vec![b'/'],
+    };
+    match s.rfind('/') {
+        None | Some(0) => alloc::vec![b'/'],
+        Some(i)        => s[..i].as_bytes().to_vec(),
+    }
+}
+
 /// accepted for any non-null pointer (no bytes are dereferenced).
 #[inline]
 fn valid_user_range(ptr: u64, len: u64) -> bool {
@@ -519,21 +559,13 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             let virt = crate::vmm::VirtAddr(frame.a1);
             match crate::task::current_page_table() {
                 Some(pml4) => {
-                    let pml4_phys = crate::pmm::PhysAddr(pml4);
-                    // Free the backing frame before clearing the PTE.
-                    if let Some(phys) = crate::vmm::query_page_in(pml4_phys, virt) {
+                    // unmap_page_in clears the PTE, invalidates the TLB
+                    // (local + shootdown), and returns the backing frame.
+                    if let Some(phys) = crate::vmm::unmap_page_in(
+                        crate::pmm::PhysAddr(pml4), virt,
+                    ) {
                         crate::pmm::free_frame(phys);
                     }
-                    crate::vmm::unmap_page_in(pml4_phys, virt);
-                    // Invalidate local TLB and shoot down all other CPUs.
-                    unsafe {
-                        core::arch::asm!(
-                            "invlpg [{va}]",
-                            va = in(reg) virt.as_u64(),
-                            options(nostack, preserves_flags),
-                        );
-                    }
-                    crate::apic::send_tlb_shootdown_ipi();
                 }
                 None => crate::vmm::unmap_page(virt),
             }
@@ -811,7 +843,14 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
                 if let Some(b) = crate::keyboard::try_read() {
                     tmp[n] = b; n += 1; break;
                 }
-                match crate::serial::SERIAL.lock().try_read_byte() {
+                // Bind the read result in a `let` so the SERIAL guard drops at
+                // the semicolon.  Matching on `SERIAL.lock().try_read_byte()`
+                // directly keeps the scrutinee temporary — the lock — alive
+                // through the whole match, i.e. across yield_task(): any other
+                // task that then printed would spin on SERIAL with interrupts
+                // off, deadlocking the CPU.
+                let byte = crate::serial::SERIAL.lock().try_read_byte();
+                match byte {
                     Some(b) => { tmp[n] = b; n += 1; break; }
                     None    => unsafe {
                         core::arch::asm!("sti", options(nostack));
@@ -825,7 +864,8 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
                 if let Some(b) = crate::keyboard::try_read() {
                     tmp[n] = b; n += 1;
                 } else {
-                    match crate::serial::SERIAL.lock().try_read_byte() {
+                    let byte = crate::serial::SERIAL.lock().try_read_byte();
+                    match byte {
                         Some(b) => { tmp[n] = b; n += 1; }
                         None    => break,
                     }
@@ -835,6 +875,9 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             unsafe { with_user_access(|| {
                 core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf_ptr, n);
             }) };
+            // TEMP DEBUG: track RX delivery for the idle diagnostics.
+            crate::serial::RX_DELIVERED
+                .fetch_add(n as u64, core::sync::atomic::Ordering::Relaxed);
             n as u64
         }
         SYS_IPC_RECV_CAP => {
@@ -919,12 +962,14 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             crate::pmm::free_frame_count() as u64
         }
         SYS_TASK_KILL => {
-            // a1 = TaskId to kill.
+            // a1 = TaskId to kill. Only root may kill arbitrary tasks.
+            if crate::task::current_task_uid() != 0 { return ENOPERM; }
             let target = frame.a1;
             if crate::task::kill_task(target) { 0 } else { EINVAL }
         }
         SYS_BLK_READ => {
             // a1 = sector (u64), a2 = buf_ptr (user VA, *mut u8, 512 bytes)
+            if crate::task::current_task_uid() != 0 { return ENOPERM; }
             if !crate::virtio_blk::is_present() { return ENOSYS; }
             let sector  = frame.a1;
             let buf_ptr = frame.a2;
@@ -946,6 +991,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         }
         SYS_BLK_WRITE => {
             // a1 = sector (u64), a2 = buf_ptr (user VA, *const u8, 512 bytes)
+            if crate::task::current_task_uid() != 0 { return ENOPERM; }
             if !crate::virtio_blk::is_present() { return ENOSYS; }
             let sector  = frame.a1;
             let buf_ptr = frame.a2;
@@ -974,6 +1020,11 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             unsafe { with_user_access(|| core::ptr::copy_nonoverlapping(
                 frame.a1 as *const u8, kpath.as_mut_ptr(), path_len,
             )); }
+            let mut stat = crate::rfs::Stat::default();
+            if !crate::rfs::stat_path(&kpath, &mut stat) { return ENOENT; }
+            let uid = crate::task::current_task_uid();
+            let gid = crate::task::current_task_gid();
+            if !dac_check(stat.mode, stat.uid, stat.gid, uid, gid, 0x4) { return ENOPERM; }
             let fd = crate::rfs::open(&kpath);
             fd as u64
         }
@@ -1081,7 +1132,13 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             unsafe { with_user_access(|| core::ptr::copy_nonoverlapping(
                 frame.a1 as *const u8, kpath.as_mut_ptr(), path_len,
             )); }
-            crate::rfs::create(&kpath) as u64
+            let uid = crate::task::current_task_uid();
+            let gid = crate::task::current_task_gid();
+            let parent = parent_of(&kpath);
+            let mut pstat = crate::rfs::Stat::default();
+            if !crate::rfs::stat_path(&parent, &mut pstat) { return ENOENT; }
+            if !dac_check(pstat.mode, pstat.uid, pstat.gid, uid, gid, 0x2) { return ENOPERM; }
+            crate::rfs::create(&kpath, uid, gid) as u64
         }
         SYS_UNLINK => {
             // a1=path_ptr, a2=path_len
@@ -1092,6 +1149,12 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             unsafe { with_user_access(|| core::ptr::copy_nonoverlapping(
                 frame.a1 as *const u8, kpath.as_mut_ptr(), path_len,
             )); }
+            let uid = crate::task::current_task_uid();
+            let gid = crate::task::current_task_gid();
+            let parent = parent_of(&kpath);
+            let mut pstat = crate::rfs::Stat::default();
+            if !crate::rfs::stat_path(&parent, &mut pstat) { return ENOENT; }
+            if !dac_check(pstat.mode, pstat.uid, pstat.gid, uid, gid, 0x2) { return ENOPERM; }
             crate::rfs::unlink(&kpath) as u64
         }
         SYS_MKDIR => {
@@ -1103,7 +1166,13 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             unsafe { with_user_access(|| core::ptr::copy_nonoverlapping(
                 frame.a1 as *const u8, kpath.as_mut_ptr(), path_len,
             )); }
-            crate::rfs::mkdir(&kpath) as u64
+            let uid = crate::task::current_task_uid();
+            let gid = crate::task::current_task_gid();
+            let parent = parent_of(&kpath);
+            let mut pstat = crate::rfs::Stat::default();
+            if !crate::rfs::stat_path(&parent, &mut pstat) { return ENOENT; }
+            if !dac_check(pstat.mode, pstat.uid, pstat.gid, uid, gid, 0x2) { return ENOPERM; }
+            crate::rfs::mkdir(&kpath, uid, gid) as u64
         }
         SYS_SERIAL_AVAIL => {
             if crate::keyboard::data_ready() || crate::serial::SERIAL.lock().data_ready() { 1 } else { 0 }
@@ -1148,6 +1217,15 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
                 core::ptr::copy_nonoverlapping(frame.a1 as *const u8, old_path.as_mut_ptr(), old_len);
                 core::ptr::copy_nonoverlapping(frame.a3 as *const u8, new_path.as_mut_ptr(), new_len);
             }); }
+            let uid = crate::task::current_task_uid();
+            let gid = crate::task::current_task_gid();
+            let old_parent = parent_of(&old_path);
+            let new_parent = parent_of(&new_path);
+            let mut pstat = crate::rfs::Stat::default();
+            if !crate::rfs::stat_path(&old_parent, &mut pstat) { return ENOENT; }
+            if !dac_check(pstat.mode, pstat.uid, pstat.gid, uid, gid, 0x2) { return ENOPERM; }
+            if !crate::rfs::stat_path(&new_parent, &mut pstat) { return ENOENT; }
+            if !dac_check(pstat.mode, pstat.uid, pstat.gid, uid, gid, 0x2) { return ENOPERM; }
             crate::rfs::rename(&old_path, &new_path) as u64
         }
 
@@ -1220,11 +1298,32 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             };
 
             let new_brk = frame.a1;
-            if new_brk == 0 || new_brk <= cur_brk {
-                // Query or shrink request — just return the current break.
-                // We don't unmap pages on shrink; they stay allocated.
+            if new_brk == 0 {
+                // Query — return the current break.
                 crate::task::set_current_task_brk(cur_brk);
                 return cur_brk;
+            }
+            if new_brk <= cur_brk {
+                // Shrink: unmap and free every whole page above the new break.
+                // Pages below round_up(new_brk) stay mapped (may be partially
+                // in use by the caller's heap).
+                if new_brk < HEAP_BASE { return EINVAL; }
+                let keep_top = (new_brk + 0xFFF) & !0xFFF;
+                let old_top  = (cur_brk + 0xFFF) & !0xFFF;
+                if let Some(pml4) = crate::task::current_page_table() {
+                    let mut va = keep_top;
+                    while va < old_top {
+                        if let Some(pa) = crate::vmm::unmap_page_in(
+                            crate::pmm::PhysAddr(pml4),
+                            crate::vmm::VirtAddr(va),
+                        ) {
+                            crate::pmm::free_frame(pa);
+                        }
+                        va += 0x1000;
+                    }
+                }
+                crate::task::set_current_task_brk(new_brk);
+                return new_brk;
             }
             if new_brk >= STACK_GUARD { return EINVAL; }
 
@@ -1456,6 +1555,27 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
 
         SYS_TIME_EPOCH => {
             crate::time::epoch_ms()
+        }
+
+        SYS_GETUID => crate::task::current_task_uid() as u64,
+
+        SYS_GETGID => crate::task::current_task_gid() as u64,
+
+        SYS_SETUID => {
+            let new_uid = frame.a1 as u32;
+            let cur_uid = crate::task::current_task_uid();
+            if cur_uid != 0 && new_uid != cur_uid { return ENOPERM; }
+            crate::task::set_current_task_uid(new_uid);
+            0
+        }
+
+        SYS_SETGID => {
+            let new_gid = frame.a1 as u32;
+            let cur_uid = crate::task::current_task_uid();
+            let cur_gid = crate::task::current_task_gid();
+            if cur_uid != 0 && new_gid != cur_gid { return ENOPERM; }
+            crate::task::set_current_task_gid(new_gid);
+            0
         }
 
         // ── UDP socket API ────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@
 //! Source of truth: the spec table (Nr column).
 //! Cross-checked against `kernel/src/syscall.rs` — all 42 numbers match.
 //!
-//! Gaps: 45–49 are unassigned and always return ENOSYS.
+//! Gap: 49 is unassigned and always returns ENOSYS.
 //! SYSCALL_MAX = 55 (SYS_POWEROFF).
 
 // ── Process / task management ─────────────────────────────────────────────────
@@ -86,6 +86,16 @@ pub const SYS_TIME:              u64 = 15;
 /// Unix epoch milliseconds since 1970-01-01 00:00:00 UTC.
 /// Anchored from CMOS RTC at boot; advances via APIC tick counter.
 pub const SYS_TIME_EPOCH:        u64 = 44;
+/// Return the UID of the calling task.
+pub const SYS_GETUID:            u64 = 45;
+/// Return the GID of the calling task.
+pub const SYS_GETGID:            u64 = 46;
+/// Set the UID of the calling task. Root (uid=0) may set any uid; others may only set own uid.
+/// Returns 0 on success, ENOPERM if not permitted.
+pub const SYS_SETUID:            u64 = 47;
+/// Set the GID of the calling task. Root may set any gid; others may only set own gid.
+/// Returns 0 on success, ENOPERM if not permitted.
+pub const SYS_SETGID:            u64 = 48;
 /// Sleep for at least a1 nanoseconds (rounded up to next ms tick).
 pub const SYS_NANOSLEEP:         u64 = 33;
 
@@ -176,5 +186,5 @@ pub const SYS_POWEROFF:          u64 = 55;
 // ── Bookkeeping ───────────────────────────────────────────────────────────────
 
 /// Highest assigned syscall number. Calls above this return ENOSYS.
-/// Numbers 45–49 are unassigned gaps and also return ENOSYS.
+/// Number 49 is an unassigned gap and also returns ENOSYS.
 pub const SYSCALL_MAX:           u64 = SYS_POWEROFF;

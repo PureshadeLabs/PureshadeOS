@@ -22,7 +22,7 @@
 //!    `ioapic::map_irq(gsi, vector, flags)` to unmask the line.
 //! 3. Every ISR must call `apic::eoi()` before returning.
 
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 // ── Physical / virtual addresses ──────────────────────────────────────────────
 
@@ -57,6 +57,9 @@ pub const IRQ_ACTIVE_LO: u32 = 1 << 13;
 
 /// Maximum redirection entry index (entries = this + 1). Set during `init`.
 static MAX_ENTRY: AtomicU8 = AtomicU8::new(0);
+
+/// GSI number of redirection entry 0 (from the ACPI MADT; 0 on QEMU).
+static GSI_BASE: AtomicU32 = AtomicU32::new(0);
 
 // ── MMIO helpers ──────────────────────────────────────────────────────────────
 
@@ -100,12 +103,26 @@ fn redir_lo_reg(gsi: u8) -> u8 {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Override the I/O APIC physical base address before calling `init`.
-///
-/// Only needed when the ACPI MADT reports a non-default address.
-/// Must be called before `ioapic::init()`.
-pub fn set_phys_base(phys: u64) {
+/// Override the I/O APIC physical base address and GSI base before calling
+/// `init`, with values from the ACPI MADT.
+pub fn set_phys_base(phys: u64, gsi_base: u32) {
     IOAPIC_PHYS.store(phys, Ordering::Relaxed);
+    GSI_BASE.store(gsi_base, Ordering::Relaxed);
+}
+
+/// The I/O APIC physical base address in use.
+pub fn phys_base() -> u64 {
+    IOAPIC_PHYS.load(Ordering::Relaxed)
+}
+
+/// Translate a GSI to this I/O APIC's redirection entry index.
+/// Returns `None` if the GSI is outside this I/O APIC's range.
+fn gsi_to_entry(gsi: u32) -> Option<u8> {
+    let base = GSI_BASE.load(Ordering::Relaxed);
+    let max  = MAX_ENTRY.load(Ordering::Relaxed);
+    gsi.checked_sub(base)
+        .filter(|&e| e <= max as u32)
+        .map(|e| e as u8)
 }
 
 /// Initialise the I/O APIC.
@@ -140,33 +157,40 @@ pub fn init() {
 ///
 /// # Arguments
 ///
-/// * `gsi`    — Global System Interrupt (0-based). Must be within `entry_count()`.
+/// * `gsi`    — Global System Interrupt. Translated through this I/O APIC's
+///              GSI base; out-of-range GSIs are ignored.
 /// * `vector` — IDT vector to deliver on this GSI. Register the handler with
 ///              `idt::register_irq(vector, handler)` before calling this.
 /// * `flags`  — Bitwise OR of `IRQ_LEVEL`, `IRQ_ACTIVE_LO`, etc.
 ///              `IRQ_MASKED` in `flags` is ignored — this call always unmasks.
 ///
-/// Delivery mode is Fixed; destination is the BSP (physical APIC ID 0).
-/// ISA IRQs (0–15) are active-high edge-triggered; pass `flags = 0`.
+/// Delivery mode is Fixed; destination is the calling CPU's Local APIC ID in
+/// physical mode (drivers arm IRQs from the BSP at boot, so this targets the
+/// BSP without assuming its APIC ID is 0).
+/// ISA IRQs are active-high edge-triggered; pass `flags = 0` unless an ACPI
+/// Interrupt Source Override says otherwise (see `acpi::isa_irq_route`).
 /// PCI IRQs are active-low level-triggered; pass `IRQ_LEVEL | IRQ_ACTIVE_LO`.
-pub fn map_irq(gsi: u8, vector: u8, flags: u32) {
+pub fn map_irq(gsi: u32, vector: u8, flags: u32) {
+    let Some(entry) = gsi_to_entry(gsi) else { return };
     let lo = (vector as u32) | (flags & !IRQ_MASKED); // mask bit clear → unmasked
-    let hi = 0u32; // physical mode, destination APIC ID 0 (BSP)
+    let hi = (crate::apic::lapic_id() as u32) << 24;  // physical mode, dest [63:56]
 
-    ioapic_write(redir_lo_reg(gsi),     lo);
-    ioapic_write(redir_lo_reg(gsi) + 1, hi);
+    ioapic_write(redir_lo_reg(entry),     lo);
+    ioapic_write(redir_lo_reg(entry) + 1, hi);
 }
 
 /// Mask one GSI — stop delivering its interrupts.
-pub fn mask_irq(gsi: u8) {
-    let reg = redir_lo_reg(gsi);
+pub fn mask_irq(gsi: u32) {
+    let Some(entry) = gsi_to_entry(gsi) else { return };
+    let reg = redir_lo_reg(entry);
     let lo = ioapic_read(reg);
     ioapic_write(reg, lo | IRQ_MASKED);
 }
 
 /// Unmask one GSI — resume delivering its interrupts.
-pub fn unmask_irq(gsi: u8) {
-    let reg = redir_lo_reg(gsi);
+pub fn unmask_irq(gsi: u32) {
+    let Some(entry) = gsi_to_entry(gsi) else { return };
+    let reg = redir_lo_reg(entry);
     let lo = ioapic_read(reg);
     ioapic_write(reg, lo & !IRQ_MASKED);
 }

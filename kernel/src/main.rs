@@ -7,11 +7,15 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use core::panic::PanicInfo;
-use crate::serial::{OK, RST, STAT, TAG, VRB, WIN};
+use crate::serial::{OK, RST, STAT, TAG, VRB};
+#[cfg(feature = "boot-tests")]
+use crate::serial::WIN;
 
 pub mod acpi;
 pub mod apic;
 pub mod cap;
+pub mod console;
+pub mod font8x16;
 pub mod framebuffer;
 pub mod kaslr;
 pub mod keyboard;
@@ -27,6 +31,7 @@ mod gdt;
 pub mod heap;
 mod idt;
 pub mod ipc;
+pub mod log;
 pub mod pmm;
 pub mod serial;
 pub mod rfs;
@@ -36,18 +41,131 @@ pub mod time;
 pub mod tss;
 pub mod vmm;
 
-// Boot stub: Multiboot headers + 32-bit → 64-bit long-mode transition.
-global_asm!(include_str!("arch/x86_64/boot.s"), options(att_syntax));
-
 // ISR stubs for vectors 0–31, gdt_flush helper, isr_stub_table.
 global_asm!(include_str!("arch/x86_64/isr_stubs.s"), options(att_syntax));
 
-/// Kernel entry point — called by the boot stub in 64-bit long mode.
+// ── Limine boot protocol ──────────────────────────────────────────────────────
+//
+// Request statics tell Limine which responses to fill before jumping to
+// kernel_main.  They must live in specific ELF sections so the bootloader
+// can locate them; the linker script maps those sections at fixed addresses.
+//
+// ALL response pointers become invalid after vmm::init() installs a new CR3
+// (which discards Limine's page tables).  kernel_main copies every needed
+// value out of the responses BEFORE calling pmm::init_from_limine / vmm::init.
+
+use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
+use limine::request::{
+    ExecutableAddressRequest, FramebufferRequest, HhdmRequest, MemmapRequest, RsdpRequest,
+};
+
+#[used] #[unsafe(link_section = ".requests_start")]
+static REQUESTS_START: RequestsStartMarker = RequestsStartMarker::new();
+
+#[used] #[unsafe(link_section = ".requests")]
+static BASE_REVISION: BaseRevision = BaseRevision::new();
+
+#[used] #[unsafe(link_section = ".requests")]
+static FRAMEBUFFER_REQ: FramebufferRequest = FramebufferRequest::new();
+
+#[used] #[unsafe(link_section = ".requests")]
+static MEMMAP_REQ: MemmapRequest = MemmapRequest::new();
+
+#[used] #[unsafe(link_section = ".requests")]
+static HHDM_REQ: HhdmRequest = HhdmRequest::new();
+
+#[used] #[unsafe(link_section = ".requests")]
+static RSDP_REQ: RsdpRequest = RsdpRequest::new();
+
+#[used] #[unsafe(link_section = ".requests")]
+static KERNEL_ADDR_REQ: ExecutableAddressRequest = ExecutableAddressRequest::new();
+
+#[used] #[unsafe(link_section = ".requests_end")]
+static REQUESTS_END: RequestsEndMarker = RequestsEndMarker::new();
+
+// ── Copied framebuffer info ───────────────────────────────────────────────────
+
+/// Framebuffer fields copied from the Limine response before vmm::init().
+struct BootFb {
+    phys:   u64,
+    pitch:  u64,
+    width:  u64,
+    height: u64,
+    bpp:    u16,
+}
+
+// ── Kernel entry point ────────────────────────────────────────────────────────
+
+/// Kernel entry point — called by Limine in 64-bit long mode.
 ///
-/// `mb_magic`: Multiboot magic (0x2BADB002 for MB1, 0x36D76289 for MB2).
-/// `mb_info`:  Physical address of the Multiboot info structure.
+/// On entry (Limine protocol guarantees):
+///   - Interrupts disabled; SSE/SSE2 enabled.
+///   - CR3: Limine's PML4 (identity 0→4 GiB + HHDM + kernel at ELF VAs).
+///   - RSP: top of a ≥ 64 KiB stack in reclaimable memory.
+///   - All request response pointers filled before this call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
+pub extern "C" fn kernel_main() -> ! {
+    // ── Collect all Limine responses ─────────────────────────────────────────
+    //
+    // vmm::init() will install a new CR3, discarding Limine's page tables.
+    // Every response pointer dereference must complete here, before pmm init.
+
+    // HHDM offset: maps physical_addr → Limine virtual_addr via
+    //   virt = hhdm_offset + phys  ⟹  phys = virt − hhdm_offset
+    let hhdm_off: u64 = HHDM_REQ
+        .response()
+        .map(|r| r.offset)          // public field on Response<HhdmRespData>
+        .unwrap_or_else(|| panic!("limine: no HHDM response — is the kernel in a Limine image?"));
+
+    // Memory map: copy entries to a stack buffer (max 256; real systems have < 30).
+    // r.entries() returns &[&Entry] — a slice of references already, no raw pointer needed.
+    const MAX_MMAP: usize = 256;
+    let mut mmap_entries = [(0u64, 0u64, 0u64); MAX_MMAP];
+    let mmap_len: usize = {
+        let r = MEMMAP_REQ
+            .response()
+            .unwrap_or_else(|| panic!("limine: no memory-map response"));
+        let slice = r.entries();
+        let n = slice.len().min(MAX_MMAP);
+        for (i, e) in slice.iter().take(n).enumerate() {
+            mmap_entries[i] = (e.base, e.length, e.type_ as u64);
+        }
+        n
+    };
+
+    // Framebuffer: copy fields; convert Limine's HHDM virtual address to physical.
+    // fb.address() is a method returning the HHDM virtual address of the FB MMIO.
+    let boot_fb: Option<BootFb> = FRAMEBUFFER_REQ.response().and_then(|r| {
+        r.framebuffers().first().map(|fb| BootFb {
+            phys:   fb.address() as u64 - hhdm_off,
+            pitch:  fb.pitch,
+            width:  fb.width,
+            height: fb.height,
+            bpp:    fb.bpp,
+        })
+    });
+
+    // RSDP: physical address for the ACPI/MADT parser (acpi::init below).
+    // Limine hands the RSDP out as an HHDM virtual address on older base
+    // revisions and a physical address on newer ones — normalise to physical.
+    let rsdp_phys: u64 = RSDP_REQ
+        .response()
+        .map(|r| {
+            let addr = r.address as u64;
+            if addr >= hhdm_off { addr - hhdm_off } else { addr }
+        })
+        .unwrap_or(0);
+
+    // Kernel address: physical and virtual base of the first LOAD segment.
+    // Used by pmm::init_from_limine (to re-mark kernel frames as used) and
+    // vmm::init (to re-map the kernel at its higher-half VA in the new PML4).
+    let (kernel_phys_base, kernel_virt_base) = KERNEL_ADDR_REQ
+        .response()
+        .map(|r| (r.physical_base, r.virtual_base))
+        .unwrap_or_else(|| panic!("limine: no kernel address response"));
+
+    // ── All Limine data copied.  Safe to replace CR3 after pmm::init. ───────
+
     serial::init();
     kprintln!();
     kprintln!("{TAG}  ██╗      ██╗   ██╗████████╗██╗  ██╗ ██████╗ ███████╗{RST}");
@@ -56,9 +174,14 @@ pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
     kprintln!("{TAG}  ██║        ╚██╔╝     ██║   ██╔══██║██║   ██║╚════██║{RST}");
     kprintln!("{TAG}  ███████╗    ██║      ██║   ██║  ██║╚██████╔╝███████║{RST}");
     kprintln!("{TAG}  ╚══════╝    ╚═╝      ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚══════╝{RST}");
-    kprintln!("  {VRB}x86_64 microkernel · capability-aware{RST}");
+    kprintln!("  {VRB}x86_64 microkernel · capability-aware · Limine protocol{RST}");
     kprintln!();
     kprintln!("{TAG}lythos{RST} kernel initializing...");
+
+    // Sanity-check that our BASE_REVISION request was honoured.
+    if !BASE_REVISION.is_supported() {
+        panic!("limine: bootloader does not support the requested base revision — update Limine");
+    }
 
     kaslr::init();
 
@@ -68,15 +191,19 @@ pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
     idt::init();
     kprintln!("{TAG}[idt]{RST} loaded {VRB}- exceptions active{RST}");
 
-    // ── Physical memory manager ──────────────────────────────────────────
-    pmm::init(mb_magic, mb_info);
+    // ── Physical memory manager ──────────────────────────────────────────────
+    // Kernel physical range: [kernel_phys_base, kernel_phys_base + (KERNEL_END - KERNEL_START)).
+    unsafe extern "C" { static KERNEL_START: u8; static KERNEL_END: u8; }
+    let kernel_phys_end = kernel_phys_base
+        + (&raw const KERNEL_END as u64).saturating_sub(&raw const KERNEL_START as u64);
+    pmm::init_from_limine(&mmap_entries[..mmap_len], kernel_phys_base, kernel_phys_end);
     kprintln!(
         "{TAG}[pmm]{RST} initialized — {STAT}{}{RST} free frames ({STAT}{} MiB{RST})",
         pmm::free_frame_count(),
         pmm::free_frame_count() * 4 / 1024
     );
 
-    // ── Smoke-test: alloc 1000 frames, free, re-alloc, verify same addrs ─
+    // ── Smoke-test: alloc 1000 frames, free, re-alloc, verify same addrs ────
     let mut frames = [pmm::PhysAddr(0); 1000];
     for f in frames.iter_mut() {
         *f = pmm::alloc_frame().expect("pmm smoke-test: out of frames");
@@ -94,11 +221,13 @@ pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
     }
     kprintln!("{TAG}[pmm]{RST} smoke-test {OK}passed{RST}");
 
-    // ── Virtual memory manager ────────────────────────────────────────────
-    vmm::init();
+    // ── Virtual memory manager ────────────────────────────────────────────────
+    // Installs a new PML4 (identity 0→1 GiB + kernel at its higher-half VA).
+    // After this call, Limine's page tables are gone; use only our own mappings.
+    vmm::init(kernel_phys_base, kernel_virt_base, kernel_phys_end, hhdm_off);
     kprintln!("{TAG}[vmm]{RST} paging active {VRB}— identity 0–4MiB, higher-half kernel mapped{RST}");
 
-    // ── VMM smoke-test: map a scratch page, write to it, unmap it ─────────
+    // ── VMM smoke-test: map a scratch page, write to it, unmap it ─────────────
     {
         let test_virt = vmm::VirtAddr(0xFFFF_A000_0001_0000); // higher-half scratch VA
         let test_phys = pmm::alloc_frame().expect("vmm smoke-test: no frame");
@@ -118,16 +247,31 @@ pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
     }
     kprintln!("{TAG}[vmm]{RST} smoke-test {OK}passed{RST}");
 
-    // ── Framebuffer ───────────────────────────────────────────────────────
-    if framebuffer::init(mb_magic, mb_info) {
-        let (fw, fh) = framebuffer::dimensions();
-        kprintln!("{TAG}[fb]{RST} {STAT}{}×{}{RST} linear framebuffer mapped", fw, fh);
-        framebuffer::draw_splash();
-    } else {
-        kprintln!("{VRB}[fb] no framebuffer — run `make run-gui` for display{RST}");
+    // ── Framebuffer ───────────────────────────────────────────────────────────
+    // Uses the pre-copied BootFb (physical address + dimensions).
+    // Falls back to Bochs VBE probe if Limine supplied no framebuffer response.
+    {
+        let (phys, pitch, width, height, bpp) = boot_fb
+            .map(|f| (f.phys, f.pitch, f.width, f.height, f.bpp))
+            .unwrap_or((0, 0, 0, 0, 0));
+
+        if framebuffer::init_from_limine(phys, pitch, width, height, bpp) {
+            let (fw, fh) = framebuffer::dimensions();
+            let fpitch = pitch;
+            kprintln!(
+                "{TAG}[fb]{RST} {STAT}{}×{}{RST} px  pitch={STAT}{}{RST}  bpp={STAT}{}{RST}  phys={STAT}{:#x}{RST}",
+                fw, fh, fpitch, bpp, phys
+            );
+            console::init();
+            let (cc, cr) = console::dimensions();
+            println!("PureshadeOS — Lythos kernel");
+            println!("fb console {}x{} cells ({}x{} px)", cc, cr, fw, fh);
+        } else {
+            kprintln!("{VRB}[fb] no framebuffer — run with a Limine virtio-gpu or -vga std for display{RST}");
+        }
     }
 
-    // ── Heap allocator ────────────────────────────────────────────────────
+    // ── Heap allocator ────────────────────────────────────────────────────────
     heap::init();
     kprintln!(
         "{TAG}[heap]{RST} initialized — {STAT}{} KiB{RST} pre-mapped at {STAT}{:#x}{RST}",
@@ -135,7 +279,7 @@ pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
         heap::heap_start(),
     );
 
-    // ── Heap smoke-test ───────────────────────────────────────────────────
+    // ── Heap smoke-test ───────────────────────────────────────────────────────
     {
         // Box<T>: single heap allocation, dealloc on drop.
         let b = Box::new(0xDEAD_BEEF_u64);
@@ -153,7 +297,7 @@ pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
     }
     kprintln!("{TAG}[heap]{RST} smoke-test {OK}passed{RST}");
 
-    // ── Scheduler ─────────────────────────────────────────────────────────
+    // ── Scheduler ─────────────────────────────────────────────────────────────
     task::init();
     kprintln!("{TAG}[sched]{RST} initialized");
 
@@ -169,21 +313,55 @@ pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
     }
     kprintln!("{TAG}[sched]{RST} smoke-test {OK}passed{RST}");
 
-    // ── APIC + preemptive timer ───────────────────────────────────────────
-    apic::init();
-    kprintln!("{TAG}[apic]{RST} timer active {VRB}— preemptive scheduling enabled{RST}");
+    // ── ACPI MADT — interrupt controller discovery ────────────────────────────
+    // Reads RSDP → R/XSDT → MADT through the identity map. Supplies the
+    // I/O APIC base + GSI base and any ISA Interrupt Source Overrides.
+    if acpi::init(rsdp_phys) {
+        match acpi::lapic_phys() {
+            Some(base) => kprintln!("{TAG}[acpi]{RST} MADT: LAPIC base {STAT}{:#x}{RST}", base),
+            None       => kprintln!("{VRB}[acpi] MADT: no LAPIC base entry{RST}"),
+        }
+        match acpi::ioapic_info() {
+            Some((base, gsi0)) => kprintln!(
+                "{TAG}[acpi]{RST} MADT: IOAPIC base {STAT}{:#x}{RST}, GSI base {STAT}{}{RST}",
+                base, gsi0
+            ),
+            None => kprintln!("{VRB}[acpi] MADT: no IOAPIC entry — using default base{RST}"),
+        }
+    } else {
+        kprintln!("{VRB}[acpi] no MADT (RSDP {:#x}) — IOAPIC defaults, identity ISA→GSI{RST}", rsdp_phys);
+    }
 
-    // ── Wall-clock anchor (requires apic::ticks() to be live) ────────────
+    // ── APIC + preemptive timer ───────────────────────────────────────────────
+    // apic::init() also remaps + fully masks both 8259 PICs, and enables the
+    // Local APIC via SVR bit 8 (spurious vector 0xFF).
+    apic::init();
+    kprintln!("{TAG}[apic]{RST} timer active {VRB}— preemptive scheduling enabled, 8259 PICs masked{RST}");
+
+    // ── Wall-clock anchor (requires apic::ticks() to be live) ────────────────
     time::init();
 
+    if let Some((base, gsi0)) = acpi::ioapic_info() {
+        ioapic::set_phys_base(base, gsi0);
+    }
     ioapic::init();
     kprintln!(
-        "{TAG}[ioapic]{RST} initialized — {STAT}{} GSIs{RST}, all masked",
+        "{TAG}[ioapic]{RST} initialized — base {STAT}{:#x}{RST}, {STAT}{} GSIs{RST}, all masked",
+        ioapic::phys_base(),
         ioapic::entry_count(),
     );
 
-    keyboard::init();
-    kprintln!("{TAG}[kbd]{RST} PS/2 keyboard initialized {VRB}— GSI 1, vector {}, set-2 decode{RST}", crate::keyboard::VECTOR_KBD);
+    match keyboard::init() {
+        Some((gsi, flags)) => kprintln!(
+            "{TAG}[kbd]{RST} i8042 armed — IRQ1 → GSI {STAT}{}{RST}{}, vector {STAT}{}{RST}, {}{}, set-2 decode",
+            gsi,
+            if acpi::isa_irq_overridden(1) { " (MADT override)" } else { "" },
+            keyboard::VECTOR_KBD,
+            if flags & ioapic::IRQ_LEVEL != 0 { "level" } else { "edge" },
+            if flags & ioapic::IRQ_ACTIVE_LO != 0 { ", active-low" } else { ", active-high" },
+        ),
+        None => kprintln!("{VRB}[kbd] no i8042 controller detected{RST}"),
+    }
 
     if virtio_blk::init() {
         let sects = virtio_blk::capacity_sectors();
@@ -223,14 +401,14 @@ pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
         apic::ticks() - t0
     );
 
-    // ── Syscall interface ─────────────────────────────────────────────────
+    // ── Syscall interface ─────────────────────────────────────────────────────
     syscall::init();
     kprintln!("{TAG}[syscall]{RST} initialized {VRB}— LSTAR/STAR/FMASK configured{RST}");
 
-    // ── SMP — start Application Processors ───────────────────────────────
+    // ── SMP — start Application Processors ───────────────────────────────────
     smp::init();
 
-    // ── Capability system ─────────────────────────────────────────────────
+    // ── Capability system ─────────────────────────────────────────────────────
     {
         let mut alice = cap::CapabilityTable::new();
         let mut bob = cap::CapabilityTable::new();
@@ -284,7 +462,7 @@ pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
     }
     kprintln!("{TAG}[cap]{RST} smoke-test {OK}passed{RST}");
 
-    // ── Cascade-revoke smoke-test ─────────────────────────────────────────
+    // ── Cascade-revoke smoke-test ─────────────────────────────────────────────
     {
         let mut alice = cap::CapabilityTable::new();
         let mut bob = cap::CapabilityTable::new();
@@ -322,7 +500,7 @@ pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
     }
     kprintln!("{TAG}[cap]{RST} cascade-revoke smoke-test {OK}passed{RST}");
 
-    // ── IPC smoke-test ────────────────────────────────────────────────────
+    // ── IPC smoke-test ────────────────────────────────────────────────────────
     // Two kernel tasks share one endpoint.  The receiver spawns first and
     // blocks immediately (ring is empty).  The sender runs next, posts three
     // messages, and exits.  The receiver wakes on each message, verifies the
@@ -371,15 +549,22 @@ pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
     }
     kprintln!("{TAG}[ipc]{RST} smoke-test {OK}passed{RST}");
 
-    // ── Userspace entry smoke-test ────────────────────────────────────────
+    // ── Boot test suite (feature-gated) ───────────────────────────────────────
+    // Userspace-entry / ELF / integration / sweep probes cost several seconds
+    // per boot; they run only with `--features boot-tests` (`make kernel-tests`).
+    // The cheap init smoke tests above (pmm/vmm/heap/sched/apic/cap/ipc) stay
+    // unconditional.
+    #[cfg(feature = "boot-tests")]
+    {
+    // ── Userspace entry smoke-test ────────────────────────────────────────────
     // Spawn a kernel task that maps a user code page, writes `mov eax,1;
     // syscall` into it (SYS_TASK_EXIT = 1), and enters ring 3.  The syscall
     // handler calls task_exit(), marks the task Dead, and switches back to
-    // kmain.
+    // kernel_main.
     let smoke_task_id = task::spawn_kernel_task(userspace_smoke_task);
     // Yield until the smoke task has been fully reaped by sweep_dead.
     // A bare yield_task() is not enough: the APIC timer may switch back to
-    // kmain before the task stores SMOKE_STACK_PHYS, making the physaddr zero.
+    // kernel_main before the task stores SMOKE_STACK_PHYS, making the physaddr zero.
     while task::task_exists(smoke_task_id) {
         task::yield_task();
     }
@@ -393,30 +578,77 @@ pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
     }
     kprintln!("{TAG}[syscall]{RST} userspace entry smoke-test {OK}passed{RST}");
 
-    // ── ELF exec smoke-test ───────────────────────────────────────────────
+    // ── ELF exec smoke-test ───────────────────────────────────────────────────
     // Load SMOKE_ELF (hand-crafted ELF64 that calls SYS_TASK_EXIT) via the
     // full exec path: ELF parser → segment mapping → stack allocation →
     // ABI stack frame → exec_trampoline → ring-3 entry.
-    // The task exits via SYS_TASK_EXIT, returning control to kmain.
+    // The task exits via SYS_TASK_EXIT, returning control to kernel_main.
     elf::exec(elf::SMOKE_ELF, &[], &[]).expect("elf smoke-test: exec failed");
     task::yield_task();
     kprintln!("{TAG}[elf]{RST} smoke-test {OK}passed{RST}");
 
-    // ── Core integration smoke tests ──────────────────────────────────────
+    // ── Core integration smoke tests ──────────────────────────────────────────
     //
     // Run before spawning lythd so these kernel-level checks execute without
     // any concurrent userspace tasks.  None of the checks require lythd.
     core_smoke();
     kprintln!("{WIN}[integration] all checks passed{RST}");
 
-    // ── Locate lythd ELF ────────────────────────────────────────────────
+    // ── sweep_dead resource-release probe ─────────────────────────────────────
+    // Spawn tasks that exit immediately and wait for the reap; heap and PMM
+    // free counts must return to their pre-spawn values or sweep_dead leaks.
+    {
+        let heap_before = heap::free_bytes() as i64;
+        let pmm_before  = pmm::free_frame_count() as i64;
+        for _ in 0..8 {
+            let id = task::spawn_kernel_task(sweep_probe_task);
+            while task::task_exists(id) {
+                task::yield_task();
+            }
+        }
+        let heap_delta = heap_before - heap::free_bytes() as i64;
+        let pmm_delta  = pmm_before - pmm::free_frame_count() as i64;
+        kprintln!(
+            "{TAG}[sweep]{RST} 8 spawn/reap cycles: heap_leak={} B pmm_leak={} frames",
+            heap_delta, pmm_delta
+        );
+
+        // Same probe through the userspace path: exec + exit exercises
+        // free_user_page_table (user frames, PT pages) on top of the kernel
+        // stack release.
+        let heap_before = heap::free_bytes() as i64;
+        let pmm_before  = pmm::free_frame_count() as i64;
+        for i in 0..8 {
+            let before = pmm::free_frame_count();
+            let id = elf::exec(elf::SMOKE_ELF, &[], &[])
+                .expect("sweep probe: exec failed");
+            if i == 0 {
+                kprintln!(
+                    "{TAG}[sweep-user]{RST} single exec cost: {} frames",
+                    before - pmm::free_frame_count()
+                );
+            }
+            while task::task_exists(id) {
+                task::yield_task();
+            }
+        }
+        let heap_delta = heap_before - heap::free_bytes() as i64;
+        let pmm_delta  = pmm_before - pmm::free_frame_count() as i64;
+        kprintln!(
+            "{TAG}[sweep-user]{RST} 8 exec/reap cycles: heap_leak={} B pmm_leak={} frames",
+            heap_delta, pmm_delta
+        );
+    }
+    } // end #[cfg(feature = "boot-tests")]
+
+    // ── Locate lythd ELF ────────────────────────────────────────────────────
     //
     // lythd (PID 1) lives at /lth/system/init (symlink → /lth/bin/lythd).
     // Populate via `make oros`.
     let lythd_elf = rfs::load_file("/lth/system/init")
         .expect("lythd: /lth/system/init not found — run `make oros` to populate rootfs/lth/bin/");
 
-    // ── lythd bootstrap ───────────────────────────────────────────────────
+    // ── lythd bootstrap ───────────────────────────────────────────────────────
     //
     // Build the initial capability set and exec lythd with it.
     //
@@ -446,7 +678,7 @@ pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
     })
     .expect("lythd bootstrap: boot-info cap OOM");
 
-    // Insert all three caps into kmain's table so spawn_userspace_task can inherit them.
+    // Insert all three caps into kernel_main's table so spawn_userspace_task can inherit them.
     let mut kmain_caps = cap::CapabilityTable::new();
     let mem_cap = cap::create_root_cap(
         &mut kmain_caps,
@@ -467,30 +699,82 @@ pub extern "C" fn kmain(mb_magic: u32, mb_info: u64) -> ! {
         boot_ipc_obj,
     );
 
-    // Temporarily give kmain's bootstrap task this cap table so spawn_userspace_task
-    // can read from it during cap inheritance.
+    // Temporarily give kernel_main's bootstrap task this cap table so
+    // spawn_userspace_task can read from it during cap inheritance.
     task::set_bootstrap_cap_table(kmain_caps);
 
+    let pf_before = pmm::free_frame_count();
     elf::exec(lythd_elf.as_slice(), &[mem_cap, rollback_cap, boot_cap], &[])
         .expect("lythd bootstrap: exec failed");
+    kprintln!(
+        "{TAG}[exec-cost]{RST} lythd: {} frames",
+        pf_before - pmm::free_frame_count()
+    );
 
     kprintln!("{TAG}[boot]{RST} lythd launched {VRB}— entering scheduler{RST}");
+    // Periodic idle-RAM report: remaining PMM frames plus heap free-list
+    // totals every ~2000 ticks.  The last report in a serial log is the
+    // settled idle state.  Serial only (kdiagln!) — on the framebuffer
+    // console these lines would scroll the screen forever on an idle system.
+    let mut next_report = 2_000u64;
     loop {
+        if apic::ticks() >= next_report {
+            next_report = apic::ticks() + 2_000;
+            let free = pmm::free_frame_count();
+            kdiagln!(
+                "{TAG}[ram-idle]{RST} ticks={} pmm_free_frames={} ({} MiB free)",
+                apic::ticks(), free, free * 4 / 1024
+            );
+            heap::print_stats("idle");
+            // TEMP DEBUG: serial RX health — bytes delivered to userspace and
+            // whether a byte is currently waiting unread in the UART.
+            // Evaluate BEFORE the print: format args run under the log lock,
+            // which already holds SERIAL — locking it in-args deadlocks.
+            let rx  = serial::RX_DELIVERED.load(core::sync::atomic::Ordering::Relaxed);
+            let dr  = serial::SERIAL.lock().data_ready();
+            let kst = keyboard::status_raw();
+            let kbn = keyboard::buffered();
+            let kiq = keyboard::irq_seen();
+            kdiagln!(
+                "{TAG}[serial-diag]{RST} rx_delivered={} lsr_dr={} i8042_status={:#04x} kbd_buf={} kbd_irq_seen={}",
+                rx, dr, kst, kbn, kiq
+            );
+            // TEMP DEBUG: live task states (id:state, 1=Running 2=Ready 3=Blocked).
+            let mut states = [0u8; 128];
+            let mut si = 0usize;
+            task::for_each_task(|_idx, id, state_raw, _kind| {
+                if si + 12 >= states.len() { return; }
+                let mut idv = id;
+                if idv == 0 { states[si] = b'0'; si += 1; }
+                else {
+                    let mut tmp = [0u8; 8];
+                    let mut n = 0;
+                    while idv > 0 && n < 8 { tmp[n] = b'0' + (idv % 10) as u8; idv /= 10; n += 1; }
+                    while n > 0 { n -= 1; states[si] = tmp[n]; si += 1; }
+                }
+                states[si] = b':'; si += 1;
+                states[si] = b'0' + (state_raw as u8).min(9); si += 1;
+                states[si] = b' '; si += 1;
+            });
+            if let Ok(s) = core::str::from_utf8(&states[..si]) {
+                kdiagln!("{TAG}[task-diag]{RST} {}", s);
+            }
+        }
         unsafe { core::arch::asm!("hlt") };
     }
 }
 
+/// Probe task for the sweep_dead resource-release check: exits immediately.
+#[cfg(feature = "boot-tests")]
+fn sweep_probe_task() -> ! {
+    task::task_exit()
+}
+
 /// Core integration checklist.  Runs before lythd is spawned so all checks
 /// execute without concurrent userspace tasks.
-///
-/// Checks verified here:
-///   1. Boot completes without triple fault          (implicit — we reached this line)
-///   2. IPC send/recv between two userspace tasks    (active test below)
-///   3. task_exit reaps correctly                    (active test below)
-///   4. Unauthorized cap access returns ENOCAP       (active test below)
-///   5. QEMU `-d int,cpu_reset` shows no faults      (manual — run: make qemu)
+#[cfg(feature = "boot-tests")]
 fn core_smoke() {
-    // ── Check 6: ENOCAP ──────────────────────────────────────────────────
+    // ── Check 6: ENOCAP ──────────────────────────────────────────────────────
     // Call syscall_dispatch directly with a handle index that's way out of
     // range in the bootstrap task's cap table.
     {
@@ -504,7 +788,7 @@ fn core_smoke() {
     }
     kprintln!("{TAG}[integration]{RST} ENOCAP check {OK}passed{RST}");
 
-    // ── Check 4 + 5: IPC between two userspace tasks ─────────────────────
+    // ── Check 4 + 5: IPC between two userspace tasks ──────────────────────────
     // Create a fresh IPC endpoint and add a cap to the bootstrap task's table
     // so both exec'd tasks can inherit it.
     {
@@ -514,7 +798,7 @@ fn core_smoke() {
         })
         .expect("step14: IPC ep cap OOM");
         let ipc_cap = {
-            // task 0 is the bootstrap (kmain) task; access its cap table directly.
+            // task 0 is the bootstrap (kernel_main) task; access its cap table directly.
             let tbl = unsafe { &mut *task::cap_table_ptr(0) };
             cap::create_root_cap(tbl, cap::CapKind::Ipc, cap::CapRights::ALL, ep_obj)
         };
@@ -546,7 +830,7 @@ fn core_smoke() {
     kprintln!("{TAG}[integration]{RST} IPC userspace send/recv {OK}passed{RST}");
     kprintln!("{TAG}[integration]{RST} task_exit + scheduler reap {OK}verified{RST}");
 
-    // ── Cap syscall: SYS_CAP_GRANT error paths + SYS_CAP_REVOKE ─────────
+    // ── Cap syscall: SYS_CAP_GRANT error paths + SYS_CAP_REVOKE ─────────────
     {
         // Create a fresh Memory cap in task 0's table for this test.
         let test_obj = cap::create_object(cap::KernelObject::Memory {
@@ -608,7 +892,7 @@ fn core_smoke() {
     }
     kprintln!("{TAG}[integration]{RST} cap grant/revoke syscall {OK}passed{RST}");
 
-    // ── SYS_MMAP / SYS_MUNMAP full lifecycle ─────────────────────────────
+    // ── SYS_MMAP / SYS_MUNMAP full lifecycle ─────────────────────────────────
     // Exec MMAP_TEST_ELF — it maps a fresh frame at VA 0x5_0000_0000, writes
     // a sentinel, unmaps (freeing the frame), then exits.  The task has its
     // own page table; sweep_dead frees any remaining pages on exit.
@@ -637,7 +921,7 @@ fn core_smoke() {
     }
     kprintln!("{TAG}[integration]{RST} SYS_MMAP/SYS_MUNMAP lifecycle {OK}passed{RST}");
 
-    // ── SYS_IPC_SEND_CAP / SYS_IPC_RECV_CAP end-to-end ──────────────────
+    // ── SYS_IPC_SEND_CAP / SYS_IPC_RECV_CAP end-to-end ──────────────────────
     // Two kernel tasks share an endpoint.  The sender moves a Memory
     // capability through the ring buffer; the receiver verifies its kind.
     {
@@ -692,7 +976,7 @@ fn core_smoke() {
     }
     kprintln!("{TAG}[integration]{RST} IPC_SEND_CAP/IPC_RECV_CAP {OK}passed{RST}");
 
-    // ── Triangular IPC: blocked task woken by a third task ────────────────
+    // ── Triangular IPC: blocked task woken by a third task ────────────────────
     // Task A blocks on ep1, task B blocks on ep2, task C sends to both.
     // Verifies that a task blocked in recv is correctly woken by an unrelated
     // third task (not the task that created the endpoint).
@@ -748,7 +1032,7 @@ fn core_smoke() {
     }
     kprintln!("{TAG}[integration]{RST} triangular IPC {OK}passed{RST}");
 
-    // ── SYS_EXEC invoked from a userspace task ────────────────────────────
+    // ── SYS_EXEC invoked from a userspace task ────────────────────────────────
     // EXEC_FROM_USER_ELF calls SYS_EXEC with an embedded SMOKE_ELF copy,
     // exercises user-pointer validation and the full exec syscall path.
     {
@@ -765,14 +1049,10 @@ fn core_smoke() {
     }
     kprintln!("{TAG}[integration]{RST} SYS_EXEC from userspace {OK}passed{RST}");
 
-    // ── Syscall fuzz: boundary / invalid inputs must return error codes ───
+    // ── Syscall fuzz: boundary / invalid inputs must return error codes ───────
     // All cases are called directly via `syscall_dispatch` (no ring-3 needed).
     // A panic here means the kernel did not reject a bad input gracefully.
     {
-        // Unknown syscall numbers → ENOSYS.
-        // syscall::SYSCALL_MAX is kept in sync with the highest defined syscall.
-        // 20/21 return ENOSYS when no VirtIO block device is present, which is the
-        // case during kernel smoke tests run without a disk image.
         let mut f: syscall::SyscallFrame;
         for nr in [syscall::SYSCALL_MAX + 1, syscall::SYSCALL_MAX + 100, u64::MAX] {
             f = unsafe { core::mem::zeroed() };
@@ -977,7 +1257,6 @@ fn core_smoke() {
         );
 
         // SYS_TIME: no args, always returns a millisecond count (never an error sentinel).
-        // Error sentinels are the top four u64 values (EINVAL..ENOSYS).
         f = unsafe { core::mem::zeroed() };
         f.nr = syscall::SYS_TIME;
         let t = syscall::syscall_dispatch(&mut f);
@@ -999,7 +1278,7 @@ fn core_smoke() {
         // SYS_TASK_STATUS: bootstrap task (id=0) is always alive → 1.
         f = unsafe { core::mem::zeroed() };
         f.nr = syscall::SYS_TASK_STATUS;
-        f.a1 = 0; // kmain / bootstrap task
+        f.a1 = 0; // kernel_main / bootstrap task
         assert_eq!(
             syscall::syscall_dispatch(&mut f),
             1,
@@ -1066,20 +1345,20 @@ fn cpuid_vendor() -> [u8; 12] {
 }
 
 // Physical addresses of the two frames mapped by `userspace_smoke_task` into the
-// global kernel PML4.  Stored here so kmain can unmap and free them after the task
-// exits — otherwise they would leak permanently into the kernel page table.
+// global kernel PML4.  Stored here so kernel_main can unmap and free them after
+// the task exits — otherwise they would leak permanently into the kernel page table.
+#[cfg(feature = "boot-tests")]
 static SMOKE_CODE_PHYS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "boot-tests")]
 static SMOKE_STACK_PHYS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Kernel task for the Step 10 userspace smoke-test.
+/// Kernel task for the userspace smoke-test.
 ///
 /// Maps a user code page and a user stack page, writes two instructions
 /// (`mov eax, SYS_TASK_EXIT; syscall`) into the code page, then enters
 /// ring 3.  The syscall handler calls `task_exit()`, which marks this task
-/// Dead and switches back to kmain.
-///
-/// The physical frames are saved to `SMOKE_CODE_PHYS` / `SMOKE_STACK_PHYS`
-/// so kmain can unmap and free them once the task has exited.
+/// Dead and switches back to kernel_main.
+#[cfg(feature = "boot-tests")]
 fn userspace_smoke_task() -> ! {
     use core::sync::atomic::Ordering;
 
@@ -1090,8 +1369,10 @@ fn userspace_smoke_task() -> ! {
     vmm::map_page(code_va, code_phys, vmm::PageFlags::USER_RX);
 
     // Write: `mov eax, 1` (SYS_TASK_EXIT); `syscall`
+    // Written through the identity map (kernel RW), not the USER_RX mapping:
+    // Limine sets CR0.WP=1, so ring-0 writes honour the R/W bit.
     unsafe {
-        let p = code_va.as_u64() as *mut u8;
+        let p = code_phys.as_u64() as *mut u8;
         p.add(0).write(0xB8); // MOV EAX, imm32
         p.add(1).write(syscall::SYS_TASK_EXIT as u8); // imm32 byte 0
         p.add(2).write(0x00);

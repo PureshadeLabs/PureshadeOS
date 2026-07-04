@@ -100,31 +100,22 @@ fn get_u64(b: &[u8], o: usize) -> u64 {
 
 // ── Block I/O ─────────────────────────────────────────────────────────────────
 
-fn read_block(blk: u32) -> Option<[u8; BLOCK_SIZE]> {
-    let base = blk as u64 * SECTORS_PER_BLK;
-    let mut out = [0u8; BLOCK_SIZE];
-    for i in 0..SECTORS_PER_BLK {
-        let mut sector = [0u8; virtio_blk::SECTOR_SIZE];
-        if !virtio_blk::read_sector(base + i, &mut sector) {
-            return None;
-        }
-        let off = (i as usize) * virtio_blk::SECTOR_SIZE;
-        out[off..off + virtio_blk::SECTOR_SIZE].copy_from_slice(&sector);
-    }
-    Some(out)
+/// Read one 4 KiB block into `out`.
+///
+/// Takes the destination by reference instead of returning `[u8; BLOCK_SIZE]`:
+/// the by-value version cost up to three 4 KiB stack copies per call in debug
+/// builds (return slot, `Option` temporary, destination local), and the write
+/// path stacks several of these frames (append_to_file → resolve_block →
+/// add_extent → read_block) — enough to blow through the 64 KiB kernel stack
+/// into the guard page once a file grew past its inline extents.
+fn read_block_into(blk: u32, out: &mut [u8; BLOCK_SIZE]) -> bool {
+    // One 8-sector virtio request per block — sector-at-a-time was 8 device
+    // round-trips per block and dominated boot time.
+    virtio_blk::read_sectors(blk as u64 * SECTORS_PER_BLK, out)
 }
 
 fn write_block(blk: u32, data: &[u8; BLOCK_SIZE]) -> bool {
-    let base = blk as u64 * SECTORS_PER_BLK;
-    for i in 0..SECTORS_PER_BLK {
-        let off = (i as usize) * virtio_blk::SECTOR_SIZE;
-        let sector: &[u8; virtio_blk::SECTOR_SIZE] =
-            data[off..off + virtio_blk::SECTOR_SIZE].try_into().unwrap();
-        if !virtio_blk::write_sector(base + i, sector) {
-            return false;
-        }
-    }
-    true
+    virtio_blk::write_sectors(blk as u64 * SECTORS_PER_BLK, data)
 }
 
 // ── Inode ─────────────────────────────────────────────────────────────────────
@@ -171,7 +162,8 @@ fn parse_inode(b: &[u8]) -> Inode {
 fn read_inode(ino: u32) -> Option<Inode> {
     if ino >= INODE_COUNT { return None; }
     let blk = INODE_START + ino / INODES_PER_BLOCK;
-    let buf = read_block(blk)?;
+    let mut buf = [0u8; BLOCK_SIZE];
+    if !read_block_into(blk, &mut buf) { return None; }
     let off = ((ino % INODES_PER_BLOCK) as usize) * INODE_SIZE;
     let inode = parse_inode(&buf[off..off + INODE_SIZE]);
     if inode.flags & INODE_USED == 0 { return None; }
@@ -202,10 +194,8 @@ fn write_inode(ino: u32, inode: &Inode) -> bool {
     if ino >= INODE_COUNT { return false; }
     let blk = INODE_START + ino / INODES_PER_BLOCK;
     let off = ((ino % INODES_PER_BLOCK) as usize) * INODE_SIZE;
-    let mut buf = match read_block(blk) {
-        Some(b) => b,
-        None    => return false,
-    };
+    let mut buf = [0u8; BLOCK_SIZE];
+    if !read_block_into(blk, &mut buf) { return false; }
     buf[off..off + INODE_SIZE].copy_from_slice(&serialize_inode(inode));
     write_block(blk, &buf)
 }
@@ -234,8 +224,9 @@ fn resolve_block(inode: &Inode, logical: u32) -> Option<u32> {
     let mut ovfl         = inode.ovfl_block;
     let mut seen_extents = inline_count;
 
+    let mut buf = [0u8; BLOCK_SIZE];
     loop {
-        let buf  = read_block(ovfl)?;
+        if !read_block_into(ovfl, &mut buf) { return None; }
         let used = get_u32(&buf, 4) as usize;
 
         for i in 0..used.min(OVFL_EXTENTS) {
@@ -275,10 +266,9 @@ pub fn read_file_data(inode: &Inode, offset: u64, buf: &mut [u8]) -> usize {
         let chunk    = (BLOCK_SIZE - blk_off).min(to_read - done);
 
         if let Some(phys) = resolve_block(inode, logical) {
-            match read_block(phys) {
-                Some(b) => buf[done..done + chunk].copy_from_slice(&b[blk_off..blk_off + chunk]),
-                None    => break,
-            }
+            let mut b = [0u8; BLOCK_SIZE];
+            if !read_block_into(phys, &mut b) { break; }
+            buf[done..done + chunk].copy_from_slice(&b[blk_off..blk_off + chunk]);
         } else {
             buf[done..done + chunk].fill(0); // sparse hole
         }
@@ -330,10 +320,8 @@ pub fn scan_dir(inode: &Inode) -> Vec<DirEntry> {
             Some(p) => p,
             None    => continue,
         };
-        let buf = match read_block(phys) {
-            Some(b) => b,
-            None    => continue,
-        };
+        let mut buf = [0u8; BLOCK_SIZE];
+        if !read_block_into(phys, &mut buf) { continue; }
 
         // The last block may be partial; all others are full.
         let is_last    = (logical as usize + 1) * BLOCK_SIZE > size;
@@ -368,7 +356,8 @@ fn lookup_in_dir(dir: &Inode, name: &str) -> Option<u32> {
 
 /// Find a free data block, mark it used in the bitmap, return its number.
 fn alloc_block(total_blocks: u32) -> Option<u32> {
-    let mut bitmap = read_block(BITMAP_BLOCK)?;
+    let mut bitmap = [0u8; BLOCK_SIZE];
+    if !read_block_into(BITMAP_BLOCK, &mut bitmap) { return None; }
     for byte_idx in 0..BLOCK_SIZE {
         if bitmap[byte_idx] == 0xFF { continue; }
         for bit in 0..8u32 {
@@ -387,7 +376,8 @@ fn alloc_block(total_blocks: u32) -> Option<u32> {
 /// Clear a block's bitmap bit, returning it to the free pool.
 fn free_block(blk: u32) {
     if blk < DATA_START { return; }
-    if let Some(mut bitmap) = read_block(BITMAP_BLOCK) {
+    let mut bitmap = [0u8; BLOCK_SIZE];
+    if read_block_into(BITMAP_BLOCK, &mut bitmap) {
         let byte_idx = (blk / 8) as usize;
         let bit      = blk % 8;
         bitmap[byte_idx] &= !(1u8 << bit);
@@ -397,8 +387,9 @@ fn free_block(blk: u32) {
 
 /// Find a free inode slot (skips inode 0, the root). Returns inode number.
 fn alloc_inode() -> Option<u32> {
+    let mut buf = [0u8; BLOCK_SIZE];
     for blk_off in 0..32u32 {
-        let buf = read_block(INODE_START + blk_off)?;
+        if !read_block_into(INODE_START + blk_off, &mut buf) { return None; }
         for slot in 0..INODES_PER_BLOCK {
             let ino = blk_off * INODES_PER_BLOCK + slot;
             if ino == 0 { continue; }
@@ -416,10 +407,8 @@ fn free_inode(ino: u32) -> bool {
     if ino == 0 || ino >= INODE_COUNT { return false; }
     let blk = INODE_START + ino / INODES_PER_BLOCK;
     let off = ((ino % INODES_PER_BLOCK) as usize) * INODE_SIZE;
-    let mut buf = match read_block(blk) {
-        Some(b) => b,
-        None    => return false,
-    };
+    let mut buf = [0u8; BLOCK_SIZE];
+    if !read_block_into(blk, &mut buf) { return false; }
     buf[off..off + INODE_SIZE].fill(0);
     write_block(blk, &buf)
 }
@@ -433,11 +422,10 @@ fn free_inode_blocks(inode: &Inode) {
         }
     }
     let mut ovfl = inode.ovfl_block;
+    let mut buf = [0u8; BLOCK_SIZE];
     while ovfl != 0 {
-        let next = match read_block(ovfl) {
-            Some(buf) => get_u32(&buf, 0),
-            None      => break,
-        };
+        if !read_block_into(ovfl, &mut buf) { break; }
+        let next = get_u32(&buf, 0);
         free_block(ovfl);
         ovfl = next;
     }
@@ -480,11 +468,9 @@ fn add_extent(inode: &mut Inode, logical: u32, physical: u32, count: u32,
     }
 
     let mut ovfl = inode.ovfl_block;
+    let mut obuf = [0u8; BLOCK_SIZE];
     loop {
-        let mut obuf = match read_block(ovfl) {
-            Some(b) => b,
-            None    => return false,
-        };
+        if !read_block_into(ovfl, &mut obuf) { return false; }
         let next = get_u32(&obuf, 0);
         let used = get_u32(&obuf, 4) as usize;
 
@@ -550,10 +536,8 @@ fn append_to_file(ino_num: u32, inode: &mut Inode, data: &[u8],
             new_blk
         };
 
-        let mut block_buf = match read_block(phys) {
-            Some(b) => b,
-            None    => return false,
-        };
+        let mut block_buf = [0u8; BLOCK_SIZE];
+        if !read_block_into(phys, &mut block_buf) { return false; }
         let chunk = (BLOCK_SIZE - blk_off).min(data.len() - written);
         block_buf[blk_off..blk_off + chunk].copy_from_slice(&data[written..written + chunk]);
         if !write_block(phys, &block_buf) { return false; }
@@ -583,10 +567,8 @@ fn add_dir_entry(dir_ino_num: u32, entry_ino: u32, name: &str,
             Some(p) => p,
             None    => continue,
         };
-        let mut buf = match read_block(phys) {
-            Some(b) => b,
-            None    => continue,
-        };
+        let mut buf = [0u8; BLOCK_SIZE];
+        if !read_block_into(phys, &mut buf) { continue; }
 
         let is_last   = logical + 1 == n_blocks;
         let block_used = if is_last && dir.size as usize % BLOCK_SIZE != 0 {
@@ -662,10 +644,8 @@ fn remove_dir_entry(dir_ino_num: u32, name: &str) -> bool {
             Some(p) => p,
             None    => continue,
         };
-        let mut buf = match read_block(phys) {
-            Some(b) => b,
-            None    => continue,
-        };
+        let mut buf = [0u8; BLOCK_SIZE];
+        if !read_block_into(phys, &mut buf) { continue; }
 
         let is_last    = logical + 1 == n_blocks;
         let block_used = if is_last && dir.size as usize % BLOCK_SIZE != 0 {
@@ -807,10 +787,8 @@ static STATE: SpinLock<RfsState> = SpinLock::new(RfsState {
 pub fn init() -> bool {
     if !virtio_blk::is_present() { return false; }
     crate::kprintln!("[rfs] reading superblock...");
-    let buf = match read_block(0) {
-        Some(b) => b,
-        None    => return false,
-    };
+    let mut buf = [0u8; BLOCK_SIZE];
+    if !read_block_into(0, &mut buf) { return false; }
     if &buf[0..8] != MAGIC { return false; }
 
     let total_blocks = get_u32(&buf, 16);
@@ -947,8 +925,8 @@ pub fn write(fd: u64, buf: &[u8]) -> i64 {
     buf.len() as i64
 }
 
-/// Create a new empty regular file at `path`. Returns a writable fd (≥ 0).
-pub fn create(path: &[u8]) -> i64 {
+/// Create a new empty regular file at `path`, owned by `uid`/`gid`. Returns a writable fd (≥ 0).
+pub fn create(path: &[u8], uid: u32, gid: u32) -> i64 {
     let total_blocks = {
         let st = STATE.lock();
         if !st.mounted { return ENOMNT; }
@@ -978,7 +956,7 @@ pub fn create(path: &[u8]) -> i64 {
     let new_inode = Inode {
         flags:        INODE_USED,
         mode:         0o644,
-        uid:          0, gid: 0, nlink: 1,
+        uid, gid, nlink: 1,
         size:         0, blocks: 0,
         mtime:        now, ctime: now,
         ovfl_block:   0, extent_count: 0,
@@ -1002,7 +980,7 @@ pub fn create(path: &[u8]) -> i64 {
 }
 
 /// Create a directory at `path`. Parent must exist. Returns 0 on success.
-pub fn mkdir(path: &[u8]) -> i64 {
+pub fn mkdir(path: &[u8], uid: u32, gid: u32) -> i64 {
     let total_blocks = {
         let st = STATE.lock();
         if !st.mounted { return ENOMNT; }
@@ -1032,7 +1010,7 @@ pub fn mkdir(path: &[u8]) -> i64 {
     let new_inode = Inode {
         flags:       INODE_USED | INODE_DIR,
         mode:        0o755,
-        uid:         0, gid: 0, nlink: 1,
+        uid, gid, nlink: 1,
         size:        0, blocks: 0,
         mtime:       now, ctime: now,
         ovfl_block:  0, extent_count: 0,

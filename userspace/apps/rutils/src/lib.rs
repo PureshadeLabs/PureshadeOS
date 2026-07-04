@@ -12,8 +12,9 @@ use lythos_rt::{
     print, println,
     file_type, TaskInfo,
     sys_close, sys_create, sys_exec, sys_mem_stat, sys_mkdir, sys_open,
-    sys_read_fd, sys_readdir, sys_stat, sys_task_kill, sys_task_list,
-    sys_time, sys_unlink, sys_write_fd,
+    sys_read_fd, sys_readdir, sys_serial_read, sys_setgid, sys_setuid,
+    sys_stat, sys_task_kill, sys_task_list,
+    sys_time, sys_unlink, sys_write_fd, sys_yield,
 };
 
 pub fn cmd_echo(args: &[&str]) {
@@ -232,6 +233,14 @@ pub fn cmd_mkdir(path: &str) {
 
 /// Load and exec ELF at `path` (already absolute).
 pub fn cmd_exec(path: &str) {
+    cmd_exec_with_caps(path, &[])
+}
+
+/// Like [`cmd_exec`], forwarding `caps` (handles in the caller's table) to
+/// the spawned task.  lysh delegates its Memory capability per-exec to an
+/// allowlist of apps (e.g. rkilo) that need SYS_BRK heap growth beyond the
+/// 64 KiB bootstrap arena; generic children get no caps.
+pub fn cmd_exec_with_caps(path: &str, caps: &[u64]) {
     let stat = match sys_stat(path) {
         Some(s) => s,
         None    => { println!("exec: {}: not found", path); return; }
@@ -268,7 +277,7 @@ pub fn cmd_exec(path: &str) {
         return;
     }
 
-    match sys_exec(&elf, &[]) {
+    match sys_exec(&elf, caps) {
         Ok(tid) => {
             // Block until the child task exits so the shell doesn't race for
             // serial input while an interactive program (e.g. rkilo) is running.
@@ -298,12 +307,148 @@ pub fn print_help() {
     println!("  useradd <name> [-u uid] [-g gid] [-d home] [-s shell] [-c comment]");
     println!("  userdel <name>                  delete a user");
     println!("  whoami                          print current username");
+    println!("  passwd [user]                   set or change a password");
+    println!("  su [user]                       switch to another user (default: root)");
 }
 
 // ── user / group management ───────────────────────────────────────────────────
 
 const PASSWD: &str = "/etc/passwd";
 const GROUP:  &str = "/etc/group";
+const SHADOW: &str = "/etc/shadow";
+
+// ── SHA-256 (inline, no_std, no external crate) ───────────────────────────────
+
+fn sha256(data: &[u8]) -> [u8; 32] {
+    const K: [u32; 64] = [
+        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
+    ];
+    let mut h: [u32; 8] = [
+        0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19,
+    ];
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    let mut msg: Vec<u8> = Vec::with_capacity(data.len() + 64);
+    msg.extend_from_slice(data);
+    msg.push(0x80);
+    while (msg.len() % 64) != 56 { msg.push(0); }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+    for block in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([block[i*4], block[i*4+1], block[i*4+2], block[i*4+3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i-15].rotate_right(7) ^ w[i-15].rotate_right(18) ^ (w[i-15] >> 3);
+            let s1 = w[i-2].rotate_right(17)  ^ w[i-2].rotate_right(19)  ^ (w[i-2]  >> 10);
+            w[i] = w[i-16].wrapping_add(s0).wrapping_add(w[i-7]).wrapping_add(s1);
+        }
+        let [mut a,mut b,mut c,mut d,mut e,mut f,mut g,mut hh] = h;
+        for i in 0..64 {
+            let s1    = e.rotate_right(6)  ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch    = (e & f) ^ ((!e) & g);
+            let t1    = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+            let s0    = a.rotate_right(2)  ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj   = (a & b) ^ (a & c) ^ (b & c);
+            let t2    = s0.wrapping_add(maj);
+            hh=g; g=f; f=e; e=d.wrapping_add(t1); d=c; c=b; b=a; a=t1.wrapping_add(t2);
+        }
+        h[0]=h[0].wrapping_add(a); h[1]=h[1].wrapping_add(b);
+        h[2]=h[2].wrapping_add(c); h[3]=h[3].wrapping_add(d);
+        h[4]=h[4].wrapping_add(e); h[5]=h[5].wrapping_add(f);
+        h[6]=h[6].wrapping_add(g); h[7]=h[7].wrapping_add(hh);
+    }
+    let mut out = [0u8; 32];
+    for (i, &word) in h.iter().enumerate() { out[i*4..i*4+4].copy_from_slice(&word.to_be_bytes()); }
+    out
+}
+
+fn hex_encode(data: &[u8]) -> alloc::string::String {
+    const HEX: &[u8] = b"0123456789abcdef";
+    let mut s = alloc::string::String::with_capacity(data.len() * 2);
+    for &b in data { s.push(HEX[b as usize >> 4] as char); s.push(HEX[b as usize & 0xf] as char); }
+    s
+}
+
+/// Hash a password. Empty string → empty field (no password). Otherwise `$sha256$hexdigest`.
+fn hash_password(pw: &str) -> alloc::string::String {
+    if pw.is_empty() { return alloc::string::String::new(); }
+    alloc::format!("$sha256${}", hex_encode(&sha256(pw.as_bytes())))
+}
+
+/// Read a line from serial without echoing characters (for password prompts).
+pub fn read_secret_line() -> alloc::string::String {
+    let mut buf = alloc::string::String::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match sys_serial_read(&mut byte) {
+            Ok(0) | Err(_) => { sys_yield(); continue; }
+            Ok(_) => {}
+        }
+        match byte[0] {
+            b'\r' | b'\n' => { println!(); return buf; }
+            0x7F | 0x08   => { buf.pop(); }
+            0x20..=0x7E   => { buf.push(byte[0] as char); }
+            _ => {}
+        }
+    }
+}
+
+// ── shadow helpers ────────────────────────────────────────────────────────────
+
+fn parse_shadow(text: &str) -> Vec<(alloc::string::String, alloc::string::String)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.splitn(2, ':');
+        let name = match parts.next() { Some(s) if !s.is_empty() => s, _ => continue };
+        let hash = parts.next().unwrap_or("").trim_end();
+        out.push((alloc::string::String::from(name), alloc::string::String::from(hash)));
+    }
+    out
+}
+
+fn encode_shadow(entries: &[(alloc::string::String, alloc::string::String)]) -> alloc::string::String {
+    let mut s = alloc::string::String::new();
+    for (name, hash) in entries { s.push_str(name); s.push(':'); s.push_str(hash); s.push('\n'); }
+    s
+}
+
+/// True if `user` appears in /etc/passwd.
+pub fn user_exists(name: &str) -> bool {
+    let text = read_text(PASSWD);
+    parse_passwd(&text).iter().any(|e| e.name == name)
+}
+
+/// Look up the uid and gid for `user` from /etc/passwd.
+pub fn lookup_uid_gid(user: &str) -> Option<(u32, u32)> {
+    let text = read_text(PASSWD);
+    parse_passwd(&text).iter()
+        .find(|e| e.name == user)
+        .map(|e| (e.uid, e.gid))
+}
+
+/// Verify a password against /etc/shadow.
+/// Empty hash field = no password required (any input matches, including empty).
+/// `*` = locked (always fails).
+pub fn verify_password(user: &str, pw: &str) -> bool {
+    let text = read_text(SHADOW);
+    for (name, hash) in parse_shadow(&text) {
+        if name != user { continue; }
+        if hash.is_empty() { return true; }
+        if hash == "*"     { return false; }
+        if let Some(expected) = hash.strip_prefix("$sha256$") {
+            return hex_encode(&sha256(pw.as_bytes())) == expected;
+        }
+        return false;
+    }
+    false
+}
 
 fn read_text(path: &str) -> alloc::string::String {
     let fd = match sys_open(path) {
@@ -417,26 +562,94 @@ fn encode_group(entries: &[GrEntry]) -> alloc::string::String {
 
 // ── commands ──────────────────────────────────────────────────────────────────
 
-pub fn cmd_whoami() {
-    // All tasks currently run as uid 0; in future the kernel will report real UIDs.
-    println!("root");
+pub fn cmd_whoami(user: &str) {
+    println!("{}", user);
 }
 
-pub fn cmd_id() {
-    // Read primary group name from /etc/group for gid 0.
+pub fn cmd_id(user: &str) {
+    let ptext = read_text(PASSWD);
+    let pw    = parse_passwd(&ptext);
+    let (uid, gid) = pw.iter()
+        .find(|e| e.name == user)
+        .map(|e| (e.uid, e.gid))
+        .unwrap_or((0, 0));
     let gtext = read_text(GROUP);
     let grps  = parse_group(&gtext);
-    let gname = grps.iter().find(|g| g.gid == 0).map(|g| g.name.as_str()).unwrap_or("root");
-    print!("uid=0(root) gid=0({}) groups=0({})", gname, gname);
+    let gname = grps.iter().find(|g| g.gid == gid).map(|g| g.name.as_str()).unwrap_or(user);
+    print!("uid={}({}) gid={}({}) groups={}({})", uid, user, gid, gname, gid, gname);
     for g in &grps {
-        let is_member = g.members.split(',').any(|m| m.trim() == "root");
-        if is_member && g.gid != 0 { print!(",{}({})", g.gid, g.name); }
+        let is_member = g.members.split(',').any(|m| m.trim() == user);
+        if is_member && g.gid != gid { print!(",{}({})", g.gid, g.name); }
     }
     println!();
 }
 
-pub fn cmd_groups(args: &[&str]) {
-    let uname = args.first().copied().unwrap_or("root");
+pub fn cmd_passwd(args: &[&str], current_user: &str) {
+    let target = args.first().copied().unwrap_or(current_user);
+    // Only root (uid=0) can change another user's password; others can only change their own.
+    // We approximate this: non-root cannot specify a different user.
+    if target != current_user && current_user != "root" {
+        println!("passwd: permission denied");
+        return;
+    }
+    // For non-root changing own password, verify current password first.
+    if current_user != "root" || target == current_user {
+        print!("Current password: ");
+        let cur = read_secret_line();
+        if !verify_password(target, &cur) {
+            println!("passwd: authentication failure");
+            return;
+        }
+    }
+    print!("New password: ");
+    let p1 = read_secret_line();
+    print!("Retype new password: ");
+    let p2 = read_secret_line();
+    if p1 != p2 {
+        println!("passwd: passwords do not match");
+        return;
+    }
+    let new_hash = hash_password(&p1);
+    let text = read_text(SHADOW);
+    let mut entries = parse_shadow(&text);
+    let mut found = false;
+    for (name, hash) in entries.iter_mut() {
+        if name == target { *hash = new_hash.clone(); found = true; break; }
+    }
+    if !found {
+        entries.push((alloc::string::String::from(target), new_hash));
+    }
+    if write_text(SHADOW, &encode_shadow(&entries)) {
+        println!("passwd: password updated for '{}'", target);
+    } else {
+        println!("passwd: cannot write {}", SHADOW);
+    }
+}
+
+/// Authenticate as another user. Drops kernel uid/gid if successful.
+/// Returns the new username on success, None on failure.
+pub fn cmd_su(args: &[&str]) -> Option<alloc::string::String> {
+    let target = args.first().copied().unwrap_or("root");
+    let (uid, gid) = match lookup_uid_gid(target) {
+        Some(pair) => pair,
+        None => { println!("su: user '{}' does not exist", target); return None; }
+    };
+    print!("Password: ");
+    let pw = read_secret_line();
+    if !verify_password(target, &pw) {
+        println!("su: authentication failure");
+        return None;
+    }
+    // Set gid first (while still potentially root), then uid.
+    if !sys_setgid(gid) || !sys_setuid(uid) {
+        println!("su: cannot switch to '{}' — insufficient privileges (exit and log in again as root)", target);
+        return None;
+    }
+    Some(alloc::string::String::from(target))
+}
+
+pub fn cmd_groups(args: &[&str], current_user: &str) {
+    let uname = args.first().copied().unwrap_or(current_user);
     let ptext = read_text(PASSWD);
     let pw    = parse_passwd(&ptext);
     let user  = pw.iter().find(|e| e.name == uname);
@@ -522,6 +735,14 @@ pub fn cmd_useradd(args: &[&str]) {
         let _ = write_text(GROUP, &encode_group(&grps));
     }
 
+    // Add locked shadow entry so the account exists but has no usable password.
+    let stext = read_text(SHADOW);
+    let mut shadow = parse_shadow(&stext);
+    if !shadow.iter().any(|(n, _)| n == username) {
+        shadow.push((alloc::string::String::from(username), alloc::string::String::from("*")));
+        let _ = write_text(SHADOW, &encode_shadow(&shadow));
+    }
+
     // Create home directory; ignore error if it already exists.
     let _ = sys_mkdir(&home_note);
 
@@ -546,6 +767,11 @@ pub fn cmd_userdel(args: &[&str]) {
         return;
     }
     if write_text(PASSWD, &encode_passwd(&entries)) {
+        // Remove shadow entry too.
+        let stext = read_text(SHADOW);
+        let shadow: Vec<(alloc::string::String, alloc::string::String)> =
+            parse_shadow(&stext).into_iter().filter(|(n, _)| n != username).collect();
+        let _ = write_text(SHADOW, &encode_shadow(&shadow));
         println!("userdel: '{}' removed", username);
     } else {
         println!("userdel: cannot write {}", PASSWD);

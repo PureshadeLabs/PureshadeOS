@@ -116,9 +116,14 @@ pub enum ElfError {
 /// Base VA of the first user-mode stack slot.
 /// Must be above 1 GiB (identity-mapped region) and below the kernel half.
 const STACK_GUARD_VA:   u64   = 0x0000_7FFF_0000_0000;
-/// 8 MiB = 2048 × 4 KiB pages of usable stack above the guard.
-const USER_STACK_PAGES: usize = 2048;
-/// Pages per stack slot: guard + usable + 1 gap = 2050.
+/// 256 KiB = 64 × 4 KiB pages of usable stack above the guard.
+///
+/// Every page is allocated eagerly at exec, so this is a per-task physical
+/// RAM cost — the previous 8 MiB value made each userspace task cost 8 MiB
+/// idle.  256 KiB covers the current OROS binaries (no deep recursion; big
+/// buffers live on the brk heap); overflow hits the guard page as a clean #PF.
+const USER_STACK_PAGES: usize = 64;
+/// Pages per stack slot: guard + usable + 1 gap.
 const STACK_SLOT_PAGES: u64   = USER_STACK_PAGES as u64 + 2;
 
 /// Monotonically increasing counter for stack slot allocation.
@@ -233,8 +238,9 @@ fn load_segment_into(data: &[u8], phdr: &Elf64Phdr, user_pml4: PhysAddr) -> Resu
 /// identity map while the kernel PML4 is still active.
 fn alloc_user_stack_into(user_pml4: PhysAddr) -> Result<(VirtAddr, PhysAddr), ElfError> {
     // Available VA: 0x7FFF_0000_0000 → 0x8000_0000_0000 = 4 GiB.
-    // Slot size: 2050 × 4096 ≈ 8 MiB.  Limit: floor(4GiB/8MiB) = 511.
-    const MAX_STACK_SLOTS: u64 = 511;
+    // Slot size: STACK_SLOT_PAGES × 4 KiB.
+    const MAX_STACK_SLOTS: u64 =
+        (0x1_0000_0000u64 / 0x1000) / STACK_SLOT_PAGES;
     let slot = NEXT_STACK_SLOT.fetch_add(1, Ordering::Relaxed);
     if slot >= MAX_STACK_SLOTS { return Err(ElfError::StackExhausted); }
     let slot_base = STACK_GUARD_VA + slot * STACK_SLOT_PAGES * 0x1000;
