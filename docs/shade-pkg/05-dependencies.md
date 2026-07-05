@@ -1,16 +1,17 @@
-# rpkg — Dependency Resolution and Build Ordering
+# shade — Dependency Resolution and Build Ordering
 
 Two dependency layers exist and stay separate:
 
-1. **rpkg-level deps** — `[deps]` in a recipe, naming other rpkg packages
-   (§2).
+1. **shade-level deps** — a recipe's `deps` (the Shade `deps` argument and its
+   string-context dependencies, [`03 §4`](03-recipe-format.md#4-deps)), naming
+   other shade packages (§2).
 2. **Cargo-level deps** — the crate graph implied by a Rust source's Cargo
    metadata (§3, §4).
 
 Both resolve to store paths that appear as `dep.<i>` CDF entries
 ([`02 §3.3`](02-store.md#33-hash-inputs)); below the derivation layer the
-distinction disappears. **[rpkg-local]** throughout — this doc is policy for
-*producing* derivations ([`01 §5`](01-overview.md#5-os-general-vs-rpkg-local)).
+distinction disappears. **[shade-local]** throughout — this doc is policy for
+*producing* derivations ([`01 §5`](01-overview.md#5-os-general-vs-shade-local)).
 
 ---
 
@@ -21,7 +22,7 @@ Resolution turns one requested package into a DAG of derivations:
 - the package's own build derivation,
 - source derivations for each of its `[[source]]` entries
   ([`04 §2`](04-sources.md#2-source-derivations)),
-- build derivations for each rpkg dep (recursively, §2),
+- build derivations for each shade dep (recursively, §2),
 - source + build derivations for each crate in its Cargo graph (§4).
 
 A dep satisfied by a PsPackage bundle produces the *same* graph shape: the
@@ -36,50 +37,78 @@ breaking — a real build cycle needs a bootstrap package, which is a recipe
 author decision).
 
 Input-addressing makes the graph *cheap to skip through*: every node's digest
-is computable from its children's digests without building anything, so rpkg
+is computable from its children's digests without building anything, so shade
 computes the full graph's store paths first, then builds only the nodes whose
-`/r/db/valid/` record is missing ([`03 §8`](03-recipe-format.md#8-recipe--derivation-compilation-summary)).
+`/shade/db/valid/` record is missing ([`03 §8`](03-recipe-format.md#8-recipe--derivation-compilation-summary)).
 
-## 2. rpkg-level resolution {#2-rpkg-level-resolution}
+## 2. shade-level resolution {#2-shade-level-resolution}
 
-`[deps].build` / `[deps].runtime` entries (`"name"` or `"name@<semver-req>"`,
-[`03 §4`](03-recipe-format.md#4-deps)) resolve against the **recipe
-universe**: the ordered list of places rpkg looks for a recipe by name.
+Build and runtime deps (`"name"` or `"name@<semver-req>"`,
+[`03 §4`](03-recipe-format.md#4-deps)) resolve against the **prism
+registry**: the ordered list of places shade looks for a package by name. The
+registry backs two things — a bare `name` prism reference on the CLI
+([`07 §1`](07-cli.md#1-prism-reference-forms)) and an inter-package dep name
+inside a prism's build. (A prism's *own* explicit `inputs`, [`04 §1`](04-sources.md#1-the-prism),
+are pinned directly and do **not** go through the registry; the registry is
+only for by-name lookup.)
 
-v1 universe, in precedence order:
+v1 registry, in precedence (search) order:
 
-1. Recipes in the same directory as the requesting recipe (a repo can carry
-   its own lib recipes).
-2. The system recipe collection: `/cfg/rpkg/recipes/` — a directory of
-   `<name>.rpkg.toml` files, versioned however the user manages `/cfg`.
-3. Bundle repositories: `/cfg/rpkg/bundles/` — a directory of PsPackage
+1. Prisms/recipes in the same directory as the requesting prism (a repo can
+   carry its own lib recipes).
+2. The system collection: `/cfg/shade/recipes/` — a directory of
+   `<name>.shade` prisms, versioned however the user manages `/cfg`.
+3. Bundle repositories: `/cfg/shade/bundles/` — a directory of PsPackage
    bundles ([`04 §3.4`](04-sources.md#34-pspackage)), each self-describing
-   (name + version from its own recipe). A dep resolving to a bundle needs
-   **no network at any stage** — resolution reads the bundle's recipe,
+   (name + version from its own prism). A dep resolving to a bundle needs
+   **no network at any stage** — resolution reads the bundled prism,
    fetch reads its vendor tree — so a populated bundle repo makes entire
    dependency graphs installable offline and immune to upstream
    disappearance. This is the intended air-gap and archival deployment
    shape.
 
+A registry member is a `.shade` prism, a bundle (whose manifest is
+`.shade`, [`04 §3.4`](04-sources.md#34-pspackage)), or — once channels land
+([`shade 06 §3`](../shade/06-imports.md#3-channels)) — a channel's package
+set (the `shadepkgs` prism is the canonical such channel). A single `.shade`
+prism may expose an **attrset of packages** via its `outputs` (a package set),
+each attribute a registry entry by its `name`
+([`shade 08 §4`](../shade/08-interop.md#4-package-set-selection)).
+
+**Name collision policy: first-wins by search order.** If the same package
+`name` resolves in more than one registry location (or more than one channel),
+the **first** in the precedence order above wins; later ones are shadowed, not
+an error. This is consistent with search-path resolution generally and lets a
+same-directory or higher-precedence channel override a system recipe
+deliberately. (Contrast the *profile* collision rule — two installed packages
+providing the same `bin/foo` file is still a hard error at generation-build
+time, [`02 §5`](02-store.md#5-generations); that is a filesystem clash, not a
+name-resolution choice.) `TODO(open):` a `--why`/`shade info` display of which
+registry location a name resolved from, so shadowing is visible; deferred with
+the CLI.
+
 `TODO(open):` channels. A real distribution needs a versioned, updatable,
 signed recipe collection (the Nixpkgs analog) with a pinned revision recorded
-in the lockfile. v1's directory-based universe is a placeholder; the
+in the lockfile. v1's directory-based registry is a placeholder; the
 lockfile's `[[dep]]` pins (name → version, [`04 §5`](04-sources.md#5-lockfile))
 plus the resolved recipes' own lockfiles keep builds reproducible meanwhile,
-but *discovery* is unversioned. Design a channel format before any
-multi-machine deployment story.
+but *discovery* is unversioned. This is **one design** with Shade's channels
+([`shade 06 §3`](../shade/06-imports.md#3-channels)) and the unified lockfile
+([`04 §5`](04-sources.md#5-lockfile), [`shade 08 §5`](../shade/08-interop.md#5-unified-lockfile)):
+shade channels, Shade channels, and the single lockfile format land together.
+Design them before any multi-machine deployment story.
 
 Version selection: among recipes found for a name, choose the highest
 `package.version` satisfying the requirement; error on none, error listing
-candidates on ambiguity (two universes providing the same name+version with
-different content). Exactly **one version of an rpkg package per closure**:
+candidates on ambiguity (two registry locations providing the same name+version with
+different content). Exactly **one version of a shade package per closure**:
 if two recipes in one resolution require disjoint ranges of the same dep,
 resolution fails (no Nix-style coexistence in v1 — coexistence needs profile
 collision policy first, [`02 §5`](02-store.md#5-generations) `TODO`).
 
 ## 3. Cargo integration {#3-cargo-integration}
 
-A source with `Cargo.toml` at its root brings a crate graph. rpkg resolves
+A source with `Cargo.toml` at its root brings a crate graph. shade resolves
 it via **Cargo's own resolver** — `cargo metadata` run at lock time
 ([`04 §1`](04-sources.md#1-two-step-model-resolve-then-fetch), host-assisted
 until OROS hosts cargo) — never by reimplementing semver/feature unification.
@@ -90,7 +119,7 @@ Inputs to `cargo metadata`:
 - The source's `Cargo.lock` **if it ships one** (binaries usually do): pins
   are honored as-is. If absent, resolution generates one (highest compatible
   versions at lock time) — either way the result is snapshotted into
-  `rpkg.lock` `[[crate]]` entries and the upstream file is never consulted
+  `prism.lock` `[[crate]]` entries and the upstream file is never consulted
   again ([`04 §5`](04-sources.md#5-lockfile) is the single authority).
 - Feature selection: default features of the top-level targets;
   `TODO(open):` per-recipe feature overrides (`[source].features` key) —
@@ -127,7 +156,7 @@ features and toolchain hit the *same* crate derivation digest and share one
 build. This is the payoff of "crates.io is just another source" — the store
 dedups the ecosystem instead of each package rebuilding its world.
 
-Cost, stated honestly: rpkg must drive `rustc` directly (crate-by-crate,
+Cost, stated honestly: shade must drive `rustc` directly (crate-by-crate,
 like Nix's `buildRustCrate` / Buck2, not like `cargo build`), including
 build-script execution (`build.rs` compiled + run as a host-target
 derivation step) and proc-macro host builds. This is the most
@@ -150,10 +179,10 @@ per-crate.
 
 | Layer | Resolver | Policy |
 |---|---|---|
-| rpkg deps | rpkg (§2) | highest satisfying version; one version per name per closure; ambiguity = error |
+| shade deps | shade (§2) | highest satisfying version; one version per name per closure; ambiguity = error |
 | Cargo crates | Cargo (§3) | Cargo's resolver v2 semantics, upstream lock honored; multiple semver-major versions of one crate may coexist (Cargo's normal behavior) |
 
-Divergence is deliberate: rpkg names are few and curated (flat namespace,
+Divergence is deliberate: shade names are few and curated (flat namespace,
 coexistence banned until profiles can express it); crate graphs are large and
 Cargo-shaped (fighting Cargo's resolution rules would desync us from the
 ecosystem).
@@ -161,12 +190,12 @@ ecosystem).
 ## 6. Build order and scheduling
 
 - Order: topological over the derivation graph (§1). Ready set = nodes whose
-  deps are all valid in `/r/db/valid/`.
+  deps are all valid in `/shade/db/valid/`.
 - Parallelism: up to `$JOBS` independent derivations build concurrently;
   within a crate derivation, `rustc` parallelism is its own affair.
   `$JOBS` is not hashed ([`03 §5.2`](03-recipe-format.md#52-substitution-variables)).
 - Locking: one in-flight build per digest, machine-wide, via
-  `/r/db/locks/<digest>` ([`02 §7.1`](02-store.md#7-garbage-collection));
+  `/shade/db/locks/<digest>` ([`02 §7.1`](02-store.md#7-garbage-collection));
   a second builder of the same digest blocks and then reuses the result.
 - Failure: a failed derivation aborts scheduling of its dependents; already
   running independent builds finish; already-registered results stay valid

@@ -1,14 +1,18 @@
 # Shade — Overview
 
 Shade is the PureshadeOS configuration language: **pure**, **lazy**,
-**untyped**, functional — the Nix-language analog for the rpkg store. A
+**untyped**, functional — the Nix-language analog for the shade store. A
 `.shade` expression evaluates to derivation values; each derivation value
-serializes to the Canonical Derivation Form (CDF) that rpkg already defines
-([`rpkg 02 §3.2`](../rpkg/02-store.md#32-canonical-derivation-form-cdf)).
+serializes to the Canonical Derivation Form (CDF) that shade already defines
+([`shade-pkg 02 §3.2`](../shade-pkg/02-store.md#32-canonical-derivation-form-cdf)).
 Everything below the CDF boundary — store paths, hashing, generations,
-GC, the build sandbox — is rpkg's existing machinery, consumed unchanged.
+GC, the build sandbox — is shade's existing machinery, consumed unchanged.
 
-The evaluator is **shadec**. Recipes written in Shade are `.shade` files.
+Shade is the **sole** recipe frontend: every shade recipe is a `.shade` file
+([`shade-pkg 03`](../shade-pkg/03-recipe-format.md)). There is no TOML recipe format.
+The evaluator is **shadec**; it is bootstrapped from a prebuilt seed because
+it cannot be a package that requires itself to build
+([`shade-pkg 09`](../shade-pkg/09-bootstrap.md)).
 
 This document set is the design specification. It precedes and governs the
 implementation (no shadec code exists yet). Specs only — no implementation
@@ -18,42 +22,45 @@ Doc set:
 
 | Doc | Contents |
 |-----|----------|
-| [`01-overview.md`](01-overview.md) | goals, non-goals, relation to Nix and to rpkg TOML recipes, pipeline, tiering, glossary |
+| [`01-overview.md`](01-overview.md) | goals, non-goals, relation to Nix, role as sole shade frontend, pipeline, tiering, glossary |
 | [`02-grammar.md`](02-grammar.md) | exact lexical + syntactic grammar (EBNF), operator precedence, string interpolation, paths, comments |
 | [`03-semantics.md`](03-semantics.md) | laziness (thunks, WHNF), purity restrictions, scoping, application, recursion, equality, error model |
 | [`04-values.md`](04-values.md) | the nine value types, coercions, string contexts, the derivation value |
 | [`05-derivation.md`](05-derivation.md) | the `derivation` builtin: argument → CDF mapping, fixed-output fetch builtins |
 | [`06-imports.md`](06-imports.md) | file imports, channel-aware imports, `shade.lock`, purity interaction |
 | [`07-stdlib.md`](07-stdlib.md) | full builtins + `lib` surface with signatures, MVP tier marked |
-| [`08-interop.md`](08-interop.md) | Shade and TOML recipes coexisting; CDF interchangeability; when to use which |
+| [`08-interop.md`](08-interop.md) | integration with shade: single frontend, one canonicalizer, pipeline, `shadec cdf`, package-set selection, unified lockfile |
 
-The split follows the seed proposal unchanged, for the same reason the rpkg
-set did ([`rpkg 01`](../rpkg/01-overview.md)): each doc owns one layer, and
+The split follows the seed proposal unchanged, for the same reason the shade
+set did ([`shade-pkg 01`](../shade-pkg/01-overview.md)): each doc owns one layer, and
 the layering is real — 02–03 define the language 04 gives values to, 05
-consumes 04 and targets rpkg's CDF, 06 sits on 03's purity rules, 07
-enumerates what 02–06 make expressible, 08 closes the loop back to rpkg.
-One candidate ninth doc — the shadec CLI/tool surface — is deliberately
-*not* split out: shadec has no standalone UX in v1; it is invoked by rpkg
-([`08 §4`](08-interop.md#4-pipeline-integration)), and speccing a CLI before
-a consumer exists violates the house rule already applied in
-[`rpkg 07`](../rpkg/07-cli.md) (`--json` schemas deferred for the same
+consumes 04 and targets shade's CDF, 06 sits on 03's purity rules, 07
+enumerates what 02–06 make expressible, 08 closes the loop back to shade.
+A candidate ninth doc — a full shadec CLI/tool surface — is deliberately
+*not* split out: shadec is invoked by shade
+([`08 §2`](08-interop.md#2-pipeline-integration)) and exposes only one
+standalone subcommand in v1, `shadec cdf` (a raw-CDF dump for byte-diff
+verification, [`08 §3`](08-interop.md#3-shadec-cdf)); speccing a broader CLI
+before a consumer exists violates the house rule already applied in
+[`shade-pkg 07`](../shade-pkg/07-cli.md) (`--json` schemas deferred for the same
 reason). Definitions live in exactly one doc and are cross-referenced,
-never restated (rfs-v2 house style). rpkg concepts — CDF, store paths,
+never restated (rfs-v2 house style). shade concepts — CDF, store paths,
 source derivations, channels — are **referenced, never redefined**.
 
 ---
 
 ## 1. Goals
 
-- **A real language over the same store.** TOML recipes deliberately have no
-  expression power ([`rpkg 03`](../rpkg/03-recipe-format.md): no
-  interpolation, no conditionals, no includes). Shade supplies abstraction —
-  functions, composition, a stdlib — for the cases where a package set,
-  not a single package, is being described.
+- **A real language over the store.** Shade supplies abstraction — functions,
+  composition, a stdlib — so a recipe can describe a package *set*, compute
+  build inputs, and parameterize by platform or feature, none of which a
+  static declarative format expresses. This is why shade's recipe frontend is
+  a language at all ([`shade-pkg 03`](../shade-pkg/03-recipe-format.md)).
 - **CDF frontend, nothing more.** Evaluating Shade produces exactly the CDF
-  rpkg defines. Shade adds no store concepts, no new hash inputs, no new
-  `.drv` keys. If a Shade build and a TOML build emit the same CDF bytes,
-  they are the same build ([`08 §2`](08-interop.md#2-interchangeability)).
+  shade defines. Shade adds no store concepts, no new hash inputs, no new
+  `.drv` keys. Two recipes that evaluate to the same CDF bytes are the same
+  build — the same store path, indistinguishable to the store
+  ([`08 §1`](08-interop.md#1-single-frontend)).
 - **Nix's evaluation model, exactly.** Pure, lazy, call-by-need, untyped.
   Purity restrictions mirror Nix's pure-eval mode precisely
   ([`03 §5`](03-semantics.md#5-purity)): no arbitrary IO, fixed-output
@@ -62,8 +69,9 @@ source derivations, channels — are **referenced, never redefined**.
   fixed-output fetch builtins ([`05`](05-derivation.md)). Higher-level
   constructors (Rust package builders, option systems) live in `lib`
   ([`07`](07-stdlib.md)), not in the language.
-- **Coexistence with TOML.** Shade does not replace TOML recipes. Both
-  frontends compile to CDF; the store cannot tell them apart
+- **Sole frontend.** Shade is the only recipe language; there is no TOML
+  recipe format ([`shade-pkg 03`](../shade-pkg/03-recipe-format.md)). All authority
+  below CDF stays shade's; Shade sits entirely above the CDF boundary
   ([`08`](08-interop.md)).
 
 ## 2. Non-goals
@@ -72,7 +80,7 @@ source derivations, channels — are **referenced, never redefined**.
   the Nix expression language, and divergences are individually flagged —
   but no `.nix` file is expected to evaluate under shadec, and no Nix
   behavior may be assumed where these docs are silent. (Same stance as
-  [`rpkg 01 §4`](../rpkg/01-overview.md#4-relation-to-nix) toward Nix's
+  [`shade-pkg 01 §4`](../shade-pkg/01-overview.md#4-relation-to-nix) toward Nix's
   store.)
 - **Static types.** Untyped by decision. Values are data; errors surface at
   eval time ([`03 §8`](03-semantics.md#8-errors)).
@@ -81,35 +89,35 @@ source derivations, channels — are **referenced, never redefined**.
 - **A module/option system in v1.** NixOS-module-style config merging is a
   `lib`-level future ([`07 §4`](07-stdlib.md#4-deferred-lib)), not a
   language feature.
-- **Replacing rpkg's recipe universe.** `[deps]` resolution, lockfiles for
-  TOML recipes, and the CLI stay as specced in rpkg docs. Shade plugs in
-  beside them ([`08 §5`](08-interop.md#5-recipe-universe)).
+- **Redefining shade's store or resolution.** Dep resolution, the recipe
+  registry, lockfiles, and the CLI stay as specced in shade docs. Shade
+  produces the derivations they operate on; it does not reimplement them
+  ([`08 §6`](08-interop.md#6-recipe-universe)).
 
-Relation to [`rpkg 01 §2`](../rpkg/01-overview.md#2-non-goals-v1), which
-lists "a Nix-like language" as an rpkg non-goal: that statement governs
-rpkg-core — recipes-as-TOML stay evaluation-free, and nothing below the
-derivation layer grows language awareness. Shade is a **separate frontend**
-above that boundary and does not amend it. `TODO(open):` add a forward
-pointer from rpkg 01 §2 to this doc set when Shade lands, so the two
-statements read as one decision.
+Relation to [`shade-pkg 01 §2`](../shade-pkg/01-overview.md#2-non-goals-v1): that
+non-goal now reads "no Nix-like language *inside shade-core*" — the language
+(Shade) is its own layer, and shade-core stays language-agnostic below CDF.
+Shade is that layer: it evaluates to the same CDF shade defines and amends
+nothing below the derivation boundary. The two statements are one decision —
+shade-core sees only CDF; the language lives here.
 
 ## 3. Pipeline — Shade's place {#3-pipeline}
 
 ```
 foo.shade ──shadec eval──▶ derivation values ──serialize──▶ CDF bytes
                                                               │
-TOML recipe + rpkg.lock ──rpkg compile──────────────────────▶ CDF bytes
-                                                              │
-                                              BLAKE3 digest ──▶ /r/store/<digest>-… 
-                                              (rpkg 02 §3)      build if missing (rpkg 06)
+                                              BLAKE3 digest ──▶ /shade/store/<digest>-… 
+                                              (shade 02 §3)      build if missing (shade 06)
 ```
 
 shadec owns everything left of "CDF bytes": parsing, evaluation, the
-purity boundary, serialization. rpkg owns everything right of it. The
+purity boundary, serialization. shade owns everything right of it. The
 interface between them is exactly one artifact: CDF text
-([`rpkg 02 §3.2`](../rpkg/02-store.md#32-canonical-derivation-form-cdf)).
-shadec never writes the store directly; it hands derivations to the store
-services like the TOML compiler does ([`08 §4`](08-interop.md#4-pipeline-integration)).
+([`shade-pkg 02 §3.2`](../shade-pkg/02-store.md#32-canonical-derivation-form-cdf)),
+produced by the one shared canonicalizer
+([`08 §1`](08-interop.md#1-single-frontend)). shadec never writes the store
+directly; it hands derivations to the store services
+([`08 §2`](08-interop.md#2-pipeline-integration)).
 
 Evaluation of one top-level expression may yield one derivation, an attrset
 of many (a package set), or any plain value (Shade is also usable as a
@@ -137,12 +145,12 @@ Deliberately different:
 | | Nix | Shade |
 |---|-----|------|
 | Floats | yes | **no** — value set is int, string, bool, null, list, attrset, function, path, derivation; CDF has no float carrier and configuration needs none |
-| `derivation` builtin | open-ended (`builder` + arbitrary env attrs) | closed argument set mapping onto CDF's exhaustive key table ([`05 §2`](05-derivation.md#2-arguments)); unknown attrs are an error, mirroring TOML's unknown-key rule |
-| `version` | not a derivation field | required — CDF and store path grammar require it ([`rpkg 02 §2`](../rpkg/02-store.md#2-store-path-format)) |
+| `derivation` builtin | open-ended (`builder` + arbitrary env attrs) | closed argument set mapping onto CDF's exhaustive key table ([`05 §2`](05-derivation.md#2-arguments)); unknown attrs are an error, since CDF's key set is closed ([`shade-pkg 02 §3.3`](../shade-pkg/02-store.md#33-hash-inputs)) |
+| `version` | not a derivation field | required — CDF and store path grammar require it ([`shade-pkg 02 §2`](../shade-pkg/02-store.md#2-store-path-format)) |
 | Search paths `<foo>` | `NIX_PATH`, impure | **removed**; channels are lock-pinned and reached via `builtins.channel` ([`06 §3`](06-imports.md#3-channels)) |
 | `~/` paths, URI literals | present | **removed** (impure / deprecated respectively) |
-| Derivation format | ATerm `.drv` | CDF ([`rpkg 02 §3.2`](../rpkg/02-store.md#32-canonical-derivation-form-cdf)) |
-| Fixed-output derivations | output-hash-addressed | rpkg source derivations — declared identity is an *input*, addressing stays uniform ([`rpkg 04 §2`](../rpkg/04-sources.md#2-source-derivations)) |
+| Derivation format | ATerm `.drv` | CDF ([`shade-pkg 02 §3.2`](../shade-pkg/02-store.md#32-canonical-derivation-form-cdf)) |
+| Fixed-output derivations | output-hash-addressed | shade source derivations — declared identity is an *input*, addressing stays uniform ([`shade-pkg 04 §2`](../shade-pkg/04-sources.md#2-source-derivations)) |
 | `import` of derivations (IFD) | supported | **not in v1** — `TODO(open):` import-from-derivation requires eval-time builds; see [`06 §5`](06-imports.md#5-ifd) |
 
 ## 5. Tiering — MVP vs incremental {#5-tiering}
@@ -156,7 +164,7 @@ markers appear throughout [`07`](07-stdlib.md) and are summarized here:
   basics, `import` helpers) as marked in [`07`](07-stdlib.md).
 - **Tier 2:** channel imports + `shade.lock` (06 §3–4), the remaining
   builtins, `lib.strings`/`lib.lists`/`lib.attrsets` in full.
-- **Tier 3 (deferred, design flagged):** rpkg-aware constructors
+- **Tier 3 (deferred, design flagged):** shade-aware constructors
   (`lib.rustPackage` and friends), fixed-point/overlay composition,
   module/option system, import-from-derivation.
 
@@ -165,9 +173,9 @@ tiers only add names.
 
 ## 6. Glossary
 
-Terms used across all eight docs. rpkg terms (recipe, derivation, CDF,
+Terms used across all eight docs. shade terms (recipe, derivation, CDF,
 store path, closure, generation, lockfile, source derivation, PsPackage)
-keep their [`rpkg 01 §3`](../rpkg/01-overview.md#3-glossary) meanings and
+keep their [`shade-pkg 01 §3`](../shade-pkg/01-overview.md#3-glossary) meanings and
 are not redefined.
 
 - **Expression** — a Shade syntactic term; evaluates to a value.

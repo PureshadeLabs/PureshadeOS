@@ -50,7 +50,7 @@ all: oros kernel
 ## Build all userspace binaries.
 ## Root .cargo/config.toml provides [target.x86_64-oros] rustflags.
 ## -Z flags and --target are passed explicitly so host tools are unaffected.
-OROS_PKGS := -p lythd -p lythdist -p lythmsg -p lysh -p rutils -p rkilo -p rpkg
+OROS_PKGS := -p lythd -p lythdist -p lythmsg -p lysh -p rutils -p rkilo -p shade
 OROS_FLAGS := --target targets/x86_64-oros.json \
               -Z build-std=core,alloc,compiler_builtins \
               -Z build-std-features=compiler-builtins-mem \
@@ -65,7 +65,7 @@ oros:
 	cp $(OROS_OUT)/lysh      $(ROOTFS_BIN)/lysh
 	cp $(OROS_OUT)/rutils    $(ROOTFS_BIN)/rutils
 	cp $(OROS_OUT)/rkilo     $(ROOTFS_BIN)/rkilo
-	cp $(OROS_OUT)/rpkg      $(ROOTFS_BIN)/rpkg
+	cp $(OROS_OUT)/shade      $(ROOTFS_BIN)/shade
 	cp $(OROS_OUT)/lythd     rootfs/lth/system/init
 
 KERNEL_FLAGS := --target targets/x86_64-lythos.json \

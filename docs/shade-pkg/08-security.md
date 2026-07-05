@@ -1,6 +1,6 @@
-# rpkg — Trust Model and Security
+# shade — Trust Model and Security
 
-What rpkg trusts, what it verifies, what `--unsafe` actually costs, and what
+What shade trusts, what it verifies, what `--unsafe` actually costs, and what
 the sandbox does and does not guarantee today. Written against v1 reality —
 where a guarantee depends on unbuilt kernel work, that is stated, not
 implied away.
@@ -12,9 +12,12 @@ implied away.
 - **Assets:** the store (its integrity is every future execution on the
   system), the generation history (rollback safety), the running system's
   capability boundaries.
-- **Trusted:** the kernel, the store services code, the toolchain, RFS, and
-  in host-assisted mode ([`01 §6.1`](01-overview.md#6-known-system-gaps-design-time-flags))
-  the entire dev host.
+- **Trusted:** the kernel, the store services code, the toolchain, **the seed
+  shadec** ([`09 §3`](09-bootstrap.md#3-trust-and-pinning) — the recipe
+  evaluator is a trust root; every store path descends from trusting it), RFS,
+  and in host-assisted mode
+  ([`01 §6.1`](01-overview.md#6-known-system-gaps-design-time-flags)) the
+  entire dev host.
 - **Untrusted:** everything a derivation causes to execute in phase 3
   ([`06 §2`](06-build.md#2-phases)) — recipe build commands, build scripts,
   proc-macros, compilers *as driven by* untrusted input; and every byte
@@ -31,12 +34,20 @@ Layered, from strongest to weakest:
 2. **First resolution** (TOFU): the pin itself is created by asking the
    network (crates.io index, git remote). A compromised registry/remote at
    *lock time* poisons the pin. Mitigations in §4.
-3. **Recipe content** (human review): a recipe decides what commands run in
-   the sandbox. Installing from the recipe universe means trusting whoever
-   populates `/cfg/rpkg/recipes/` ([`05 §2`](05-dependencies.md#2-rpkg-level-resolution));
-   installing an in-repo recipe means trusting the repo author. There is no
-   recipe signing in v1 (`TODO(open):` channel signing, blocked on the
-   channel design, [`05 §2`](05-dependencies.md#2-rpkg-level-resolution)).
+3. **Recipe content** (human review): a recipe is a Shade expression
+   ([`03`](03-recipe-format.md)) that decides what commands run in the sandbox;
+   reviewing it means reading that expression (and any `lib`/channel code it
+   imports — a wider surface than a static recipe, since evaluation can
+   compute the build). Installing from the prism registry means trusting
+   whoever populates `/cfg/shade/recipes/`
+   ([`05 §2`](05-dependencies.md#2-shade-level-resolution)); installing an
+   in-repo recipe means trusting the repo author. There is no recipe signing
+   in v1 (`TODO(open):` channel signing, blocked on the channel design,
+   [`05 §2`](05-dependencies.md#2-shade-level-resolution)). Evaluation is pure
+   ([`shade 03 §5`](../shade/03-semantics.md#5-purity)) — a recipe cannot do
+   IO at eval time beyond pinned fixed-output fetches and tracked reads — so
+   review scope is the *build commands* the expression produces, not arbitrary
+   eval-time effects.
 4. **Build behavior** (sandbox): whatever the recipe runs is confined per
    the §5 contract — with the v1 gaps stated there.
 
@@ -49,10 +60,18 @@ state.
 
 ## 3. `--unsafe` {#3-unsafe}
 
-What it is: building a git source with a synthesized recipe, no human-
-reviewed build instructions ([`03 §7`](03-recipe-format.md#7-unsafe-default-recipes)).
+**Status: no longer a live install path.** The prism-only model
+([`04 §1`](04-sources.md#1-the-prism)) removed the "install a recipe-less git
+URL" command; there is no `shade install --unsafe <url>`. This section is
+retained as the trust analysis that would apply **if** the recipe-less-input
+default-builder convenience is ever adopted
+([`03 §7`](03-recipe-format.md#7-unsafe-default-recipes),
+`TODO(open):` leaning against). Everything below is conditional on that.
 
-What it does **not** weaken: the sandbox. Unsafe builds run under the same
+What it would be: building a raw source input with a synthesized derivation, no
+human-reviewed build instructions ([`03 §7`](03-recipe-format.md#7-unsafe-default-recipes)).
+
+What it does **not** weaken: the sandbox. Such builds run under the same
 profile as reviewed ones; `unsafe=1` in the CDF keeps their store paths
 disjoint from reviewed builds of the same source; the generation manifest
 carries the flag permanently ([`03 §7`](03-recipe-format.md#7-unsafe-default-recipes)).
@@ -66,11 +85,11 @@ What it does weaken:
   a production system is trusting the repo author with the system.** The
   [`07`](07-cli.md) warning block must say this in so many words.
 - **No provenance floor.** A `name` install at least went through a recipe
-  someone placed in the universe; a URL is just a URL. Typosquatting and
+  someone placed in the registry; a URL is just a URL. Typosquatting and
   lookalike URLs are the obvious vector.
 - **Output trust.** The resulting binaries land in `bin/` and, once
   installed, in `$PATH` via the profile. Marking helps audit
-  (`rpkg info`, [`07`](07-cli.md)) but does not contain.
+  (`shade info`, [`07`](07-cli.md)) but does not contain.
 
 ## 4. Source authenticity {#4-source-authenticity}
 
@@ -84,8 +103,8 @@ Per type, what is verified vs. assumed:
 | pspackage | bundle tree hash against the outer pin; every vendored entry against the bundled lockfile's pins ([`04 §3.4`](04-sources.md#34-pspackage)) | bundle provenance — the bundler chose the pins, so trusting a bundle is trusting its builder (TOFU moves from the network to the bundle author); no bundle signing in v1, folds into the channel-signing `TODO` above |
 
 Lockfile as the audit surface: because every network-derived fact lands in
-`rpkg.lock` ([`04 §5`](04-sources.md#5-lockfile)) and CDF hashes only
-lockfile values, reviewing a diff of `rpkg.lock` reviews the entire
+`prism.lock` ([`04 §5`](04-sources.md#5-lockfile)) and CDF hashes only
+lockfile values, reviewing a diff of `prism.lock` reviews the entire
 resolution change. Keep lockfiles in VCS; treat unexplained pin changes as
 incidents.
 
@@ -109,8 +128,8 @@ native builds with the fs gap closed — that kernel work is the single
 biggest security dependency of this design and should be tracked in
 `docs/plans/followup-code-tasks.md` when implementation starts.
 
-Store immutability enforcement (only store services write `/r/store`,
-[`02 §1`](02-store.md#1-the-r-hierarchy)) sits on the same kernel gap.
+Store immutability enforcement (only store services write `/shade/store`,
+[`02 §1`](02-store.md#1-the-shade-hierarchy)) sits on the same kernel gap.
 
 ## 6. Future binary substitution {#6-future-binary-substitution}
 
@@ -122,7 +141,7 @@ so substitution is **pure trust transfer** — a substituter's signature over
 trusted keys, and the content hash then verified over the received bytes.
 Design consequences already locked in:
 
-- `/r/db/valid/` records keep the full untruncated content-relevant metadata
+- `/shade/db/valid/` records keep the full untruncated content-relevant metadata
   (deriver, registration provenance) so "where did this path come from" is
   answerable ([`02 §7.2`](02-store.md#72-references)).
 - Determinism work ([`06 §6`](06-build.md#6-determinism)) graduates from
@@ -130,4 +149,4 @@ Design consequences already locked in:
   path's contents.
 - Signature format, key distribution, trust roots: `TODO(open):` entirely —
   do not improvise pieces of it early; it arrives as one design with the
-  channel mechanism ([`05 §2`](05-dependencies.md#2-rpkg-level-resolution)).
+  channel mechanism ([`05 §2`](05-dependencies.md#2-shade-level-resolution)).

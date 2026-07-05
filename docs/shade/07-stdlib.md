@@ -106,8 +106,8 @@ Signatures use `::`; `a`/`b` are type variables; `attrs` an attrset;
 | `builtins.hashFile` | `string -> path -> string` | `hashFile "blake3" p`; hex digest | T2 |
 | `builtins.hashString` | `string -> string -> string` | `hashString "blake3" s` | T2 |
 
-Hash algorithm names: `"blake3"` (native, [`rpkg 02 §3.1`](../rpkg/02-store.md#31-hash-function)),
-`"sha256"` (for crates.io parity, [`rpkg 04 §3.1`](../rpkg/04-sources.md#31-crates-io)).
+Hash algorithm names: `"blake3"` (native, [`shade-pkg 02 §3.1`](../shade-pkg/02-store.md#31-hash-function)),
+`"sha256"` (for crates.io parity, [`shade-pkg 04 §3.1`](../shade-pkg/04-sources.md#31-crates-io)).
 `TODO(open):` whether to expose `sha1` (git object ids) — omitted until a
 recipe needs it; git commits arrive pre-pinned
 ([`05 §5`](05-derivation.md#5-fetch-builtins)).
@@ -126,8 +126,8 @@ recipe needs it; git commits arrive pre-pinned
 | `builtins.match` | `string -> string -> list\|null` | anchored regex groups or null | T2 |
 | `builtins.toJSON` | `a -> string` | canonical JSON of int/bool/null/string/list/attrs; function/path/derivation handling per §2.9 | T2 |
 | `builtins.fromJSON` | `string -> a` | parse JSON → Shade value | T2 |
-| `builtins.fromTOML` | `string -> attrs` | parse TOML → attrs — **the interop bridge** ([`08 §3`](08-interop.md#3-consuming-toml)) | T2 |
-| `builtins.toTOML` | `attrs -> string` | `TODO(open):` needed for Shade→TOML export? defer until a consumer exists | T3 |
+| `builtins.fromTOML` | `string -> attrs` | parse a TOML **data** string → attrs (e.g. an upstream `Cargo.toml`, external config); **not** a recipe format — recipes are Shade ([`shade-pkg 03`](../shade-pkg/03-recipe-format.md)) | T2 |
+| `builtins.toTOML` | `attrs -> string` | `TODO(open):` emit TOML data; defer until a consumer exists | T3 |
 
 ### 2.7 Introspection {#27-introspection}
 
@@ -154,7 +154,7 @@ hash-required.
 
 ## 3. `lib`
 
-Shade-level library, shipped as an importable tree / the `rpkgs` channel's
+Shade-level library, shipped as an importable tree / the `shadepkgs` channel's
 `lib` ([`06 §3`](06-imports.md#3-channels)). Organized Nix-lib-style. Only
 the MVP subset is required for tier 1; the rest is spec-complete but lands
 incrementally.
@@ -194,7 +194,7 @@ incrementally.
 [`03 §6`](03-semantics.md#6-recursion)), `fix'`, `extends`, `makeExtensible`,
 `composeExtensions`, `makeOverridable`. These power overlay-style package
 sets (a `self`/`super` fixpoint over an attrset of packages). **[T3]** —
-they are the substrate of the rpkg-aware package-set constructors (§4) and
+they are the substrate of the shade-aware package-set constructors (§4) and
 land with them. `fix` alone is **[T2]** (small, broadly useful).
 
 ### 3.5 Derivation helpers {#35-derivation-helpers}
@@ -219,26 +219,28 @@ dropping `.git/`, `target/`, editor droppings — thin wrapper over
 
 `id`, `const`, `pipe :: a -> [f] -> b`, `flip`, `mapNullable`,
 `importJSON :: path -> a` (`fromJSON (readFile p)`),
-`importTOML :: path -> attrs` (`fromTOML (readFile p)` — the TOML-recipe
-bridge, [`08 §3`](08-interop.md#3-consuming-toml)). **[MVP]** subset:
+`importTOML :: path -> attrs` (`fromTOML (readFile p)` — read an external
+TOML **data** file, e.g. a vendored `Cargo.toml`; not a recipe format,
+[`shade-pkg 03`](../shade-pkg/03-recipe-format.md)). **[MVP]** subset:
 `id`, `const`, `flip`, `importTOML`, `importJSON`. `pipe` **[T2]**.
 
-## 4. Deferred `lib` — rpkg-aware constructors {#4-deferred-lib}
+## 4. Deferred `lib` — shade-aware constructors {#4-deferred-lib}
 
 **[T3]**, the highest layer, spec-flagged not spec-complete because it
-depends on decisions still open in rpkg (Cargo integration granularity,
-[`rpkg 05 §4`](../rpkg/05-dependencies.md#4-crate-derivations); channel
+depends on decisions still open in shade (Cargo integration granularity,
+[`shade-pkg 05 §4`](../shade-pkg/05-dependencies.md#4-crate-derivations); channel
 format, [`06 §3`](06-imports.md#3-channels)):
 
 - `lib.rustPackage :: attrs -> drv` — the ergonomic Rust-package
   constructor: takes `{ name; version; src; cargoLock?; deps?; … }`,
   produces a `derivation` with the standard cargo phases
-  ([`rpkg 03 §7`](../rpkg/03-recipe-format.md#7-unsafe-default-recipes)
+  ([`shade-pkg 03 §7`](../shade-pkg/03-recipe-format.md#7-unsafe-default-recipes)
   default phase table) and the resolved crate graph as `deps`. **This is
   the Shade analog of nixpkgs' `buildRustCrate`/`rustPlatform`** and the
-  main reason to write a recipe in Shade rather than TOML. `TODO(open):`
-  its exact interface is blocked on rpkg's per-crate-vs-per-package
-  derivation decision ([`rpkg 05 §4`](../rpkg/05-dependencies.md#4-crate-derivations)
+  ergonomic default for Rust recipes — the idiomatic form the worked example
+  ([`08 §7`](08-interop.md#7-worked-example)) is blocked on. `TODO(open):`
+  its exact interface is blocked on shade's per-crate-vs-per-package
+  derivation decision ([`shade-pkg 05 §4`](../shade-pkg/05-dependencies.md#4-crate-derivations)
   `TODO`); do not stabilize `lib.rustPackage` until that lands.
 - `lib.mkPackageSet` / overlay plumbing (over §3.4 `fix`) — a `self`-recursive
   package set with `override`/`overrideAttrs`, the nixpkgs fixpoint shape.
@@ -248,6 +250,6 @@ format, [`06 §3`](06-imports.md#3-channels)):
 
 `TODO(open):` the entire §4 surface is a **design placeholder** — signatures
 above are indicative, not frozen. Each constructor gets its own spec pass
-when its rpkg dependency settles. What is frozen: they are `lib` (Shade
+when its shade dependency settles. What is frozen: they are `lib` (Shade
 code over `builtins`), never new `builtins`, and never new CDF keys
 ([`05 §1`](05-derivation.md#1-design-stance)).

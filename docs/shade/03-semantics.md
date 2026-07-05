@@ -45,7 +45,7 @@ elements; forcing an attrset does not force its values. **Deep forcing**
 (recursively forcing everything) happens only where explicitly required:
 CDF serialization ([`05 §3`](05-derivation.md#3-cdf-emission)), the
 `shadec eval --strict` mode, and `builtins.deepSeq`
-([`07 §2.6`](07-stdlib.md#26-evaluation-control)).
+([`07 §2.1`](07-stdlib.md#21-core)).
 
 Demand is created by: the top-level result being serialized/printed;
 operators forcing their operands (arithmetic forces to int, `.`-select
@@ -192,11 +192,11 @@ from the evaluation roots: the top-level file's directory and its imports'
 directories, plus channel roots ([`06 §3`](06-imports.md#3-channels)).
 `TODO(open):` the exact confinement boundary — whether an absolute path
 outside every root is a hard error or merely a tracked read — is tied to
-the rpkg build-sandbox fs gap ([`rpkg 06 §3.2`](../rpkg/06-build.md#32-mechanism-on-oros)).
+the shade build-sandbox fs gap ([`shade-pkg 06 §3.2`](../shade-pkg/06-build.md#32-mechanism-on-oros)).
 v1 decision: **tracked, not blocked** — reads succeed and are recorded;
 the confinement guarantee is documented as honor-system until the kernel
-fs-capability work lands, exactly as rpkg's own sandbox row is
-([`rpkg 08 §5`](../rpkg/08-security.md#5-sandbox-guarantees)). Revisit
+fs-capability work lands, exactly as shade's own sandbox row is
+([`shade-pkg 08 §5`](../shade-pkg/08-security.md#5-sandbox-guarantees)). Revisit
 when that closes.
 
 ### 5.3 Eval inputs {#53-eval-inputs}
@@ -208,7 +208,7 @@ with the same source and the same eval-input set produce identical results.
 The set is reported by `shadec eval --inputs` and is what makes an
 evaluation reproducible and cacheable. It is **not** part of any CDF — CDF
 identity comes from the derivation's own inputs
-([`rpkg 02 §3.3`](../rpkg/02-store.md#33-hash-inputs)); the eval-input set
+([`shade-pkg 02 §3.3`](../shade-pkg/02-store.md#33-hash-inputs)); the eval-input set
 governs *evaluation* reproducibility, a separate concern from *build*
 reproducibility.
 
@@ -255,7 +255,7 @@ extension, included). Any other operand pairing is a type error (§8).
 Errors are **not values** — Shade has no exceptions, no `try` that catches
 arbitrary failures. An error aborts evaluation with a message and a source
 trace. The only catchable failure is via `builtins.tryEval`
-([`07 §2.6`](07-stdlib.md#26-evaluation-control)), which catches
+([`07 §2.1`](07-stdlib.md#21-core)), which catches
 `throw`/`abort`/assertion/type errors reached while forcing its argument
 to WHNF and reports success/failure — it does **not** catch
 infinite-recursion or resource-limit aborts (those are non-recoverable).

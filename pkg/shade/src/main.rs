@@ -1,4 +1,4 @@
-//! rpkg — Lythos package manager (stub).
+//! shade — Lythos package manager (stub).
 //!
 //! Full implementation pending. This stub registers the binary so it appears
 //! in /lth/bin and responds to --version and help so scripts can detect it.
@@ -19,10 +19,10 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn print_usage() {
-    println!("rpkg 0.1 — Lythos package manager (stub)");
+    println!("shade 0.1 — Lythos package manager (stub)");
     println!();
     println!("USAGE:");
-    println!("  rpkg <command> [args]");
+    println!("  shade <command> [args]");
     println!();
     println!("COMMANDS:");
     println!("  install <pkg>      install a package from the store");
@@ -39,6 +39,6 @@ fn print_usage() {
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
-    lythos_rt::sys_log("[rpkg] panic\n");
+    lythos_rt::sys_log("[shade] panic\n");
     sys_task_exit()
 }

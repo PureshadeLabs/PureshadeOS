@@ -4,8 +4,8 @@
 
 OROS uses a RFS subvolume-based structure split into three domains:
 
-- **`/lth/`** — system-owned, managed by `rpkg` and the kernel, immutable at runtime
-- **`/r/`** — reserved OS-wide for the rpkg store services (store, generations, GC roots, cache); canonical spec is `docs/rpkg/02-store.md`
+- **`/lth/`** — system-owned, managed by `shade` and the kernel, immutable at runtime
+- **`/shade/`** — reserved OS-wide for the shade store services (store, generations, GC roots, cache); canonical spec is `docs/shade-pkg/02-store.md`
 - **Root-level** — standard POSIX paths, user-adjacent and mutable
 
 Subvolumes are snapshots atomically together during updates. Config always rolls back with the system.
@@ -21,25 +21,25 @@ Subvolumes are snapshots atomically together during updates. Config always rolls
 │   │   ├── /lth/system/boot/       (Lythos kernel binary, UEFI stub)
 │   │   ├── /lth/system/lib/        (core system libraries — musl, Lythos stdlib)
 │   │   └── /lth/system/init        (lythd binary — PID 1)
-│   └── /lth/bin → /r/gen/current/profile/bin
-│                                   (single symlink into the active rpkg
-│                                    generation — docs/rpkg/02-store.md §6)
+│   └── /lth/bin → /shade/gen/current/profile/bin
+│                                   (single symlink into the active shade
+│                                    generation — docs/shade-pkg/02-store.md §6)
 │
-├── /r/                              (reserved OS-wide for rpkg store services —
-│   │                                canonical layout: docs/rpkg/02-store.md §1)
-│   ├── /r/store/                   (input-addressed store: <digest>-<name>-<version>)
-│   ├── /r/db/                      (store metadata: valid set, references)
-│   ├── /r/gen/                     (generations + `current` activation symlink)
-│   ├── /r/roots/                   (GC roots)
-│   ├── /r/cache/                   (fetch cache — supersedes /var/cache/rpkg)
-│   ├── /r/build/                   (transient build directories)
-│   └── /r/log/                     (build logs)
+├── /shade/                              (reserved OS-wide for shade store services —
+│   │                                canonical layout: docs/shade-pkg/02-store.md §1)
+│   ├── /shade/store/                   (input-addressed store: <digest>-<name>-<version>)
+│   ├── /shade/db/                      (store metadata: valid set, references)
+│   ├── /shade/gen/                     (generations + `current` activation symlink)
+│   ├── /shade/roots/                   (GC roots)
+│   ├── /shade/cache/                   (fetch cache — supersedes /var/cache/shade)
+│   ├── /shade/build/                   (transient build directories)
+│   └── /shade/log/                     (build logs)
 │
 ├── /cfg/                            (@cfg subvolume, read-write)
 │   ├── /cfg/lythos/                (CASK kernel configuration)
-│   │   ├── /cfg/lythos/rollback    (rollback flag file — set by rpkg, cleared by lythd)
+│   │   ├── /cfg/lythos/rollback    (rollback flag file — set by shade, cleared by lythd)
 │   │   └── /cfg/lythos/boot        (kernel command-line and boot parameters)
-│   ├── /cfg/services/              (service definitions — TOML)
+│   ├── /cfg/services/              (service definitions — TOML; OS-init config, see note)
 │   │   ├── lythd.toml
 │   │   ├── lythdist.toml
 │   │   ├── lythmsg.toml
@@ -84,8 +84,8 @@ Subvolumes are snapshots atomically together during updates. Config always rolls
 │   │   ├── /var/log/lythmsg.log
 │   │   ├── /var/log/kernel.log
 │   │   └── (service logs)
-│   ├── /var/cache/                 (transient caches — rpkg caches live under
-│   │                                /r/cache/, not here)
+│   ├── /var/cache/                 (transient caches — shade caches live under
+│   │                                /shade/cache/, not here)
 │   └── /var/tmp/                   (temporary files)
 │
 ├── /tmp/                            (user temporary files — tmpfs, world-writable)
@@ -126,18 +126,29 @@ Subvolumes are snapshots atomically together during updates. Config always rolls
 | Path          | Subvolume                      | Writable | Snapshots | Purpose                                 |
 | ------------- | ------------------------------ | -------- | --------- | --------------------------------------- |
 | `/lth/system` | `@core`                        | No       | Yes       | Kernel and `lythd` binary               |
-| `/r`          | (directory on root RFS, v1)\*  | No\*\*   | No        | rpkg store, generations, GC roots       |
+| `/r`          | (directory on root RFS, v1)\*  | No\*\*   | No        | shade store, generations, GC roots       |
 | `/cfg`        | `@cfg`                         | Yes      | Yes       | System config, snapshotted with `@core` |
 | `/user`       | `@home`                        | Yes      | No        | User data, persistent across updates    |
 | `/var`        | (separate, tmpfs or small vol) | Yes      | No        | Logs, runtime state, transient          |
 | `/tmp`        | tmpfs                          | Yes      | No        | Ephemeral, world-writable               |
 
-\*Whether `/r/` becomes its own subvolume once RFS v2 subvolumes are
-specified is an open decision — `docs/rpkg/02-store.md` §1.
+\*Whether `/shade/` becomes its own subvolume once RFS v2 subvolumes are
+specified is an open decision — `docs/shade-pkg/02-store.md` §1.
 
-\*\*`/r/store`, `/r/db`, `/r/gen` are writable only by the store services;
-`/r/cache`, `/r/build`, `/r/log` are working areas. See
-`docs/rpkg/02-store.md` §1.
+\*\*`/shade/store`, `/shade/db`, `/shade/gen` are writable only by the store services;
+`/shade/cache`, `/shade/build`, `/shade/log` are working areas. See
+`docs/shade-pkg/02-store.md` §1.
+
+**Config-format scope.** The TOML under `/cfg/services/*.toml` and
+`/cfg/webwm/config.toml` is **OS-init and desktop configuration**, read
+directly by `lythd` and webWM at boot — it is *not* an shade recipe and is not
+evaluated by shadec. The package system uses **Shade** as its sole recipe
+language (`docs/shade-pkg/03-recipe-format.md`, `docs/shade/`); that change does
+**not** reach these files. `TODO(open):` whether OS-init/desktop config
+eventually migrates to Shade (a unified declarative config story) is a
+separate design — it would require a Shade evaluator available at PID-1 boot,
+which the bootstrap (`docs/shade-pkg/09-bootstrap.md`) does not currently provide.
+Flagged, out of scope for the package-system frontend change.
 
 ---
 
@@ -165,21 +176,21 @@ specified is an open decision — `docs/rpkg/02-store.md` §1.
 
 ## Snapshot Atomicity
 
-Package-level atomicity is the rpkg generation mechanism
-(`docs/rpkg/02-store.md` §5–6): every install/remove/rollback creates a new
-generation under `/r/gen/`, and activation is one atomic symlink flip of
-`/r/gen/current`. Rollback is flipping back to a prior generation's manifest.
+Package-level atomicity is the shade generation mechanism
+(`docs/shade-pkg/02-store.md` §5–6): every install/remove/rollback creates a new
+generation under `/shade/gen/`, and activation is one atomic symlink flip of
+`/shade/gen/current`. Rollback is flipping back to a prior generation's manifest.
 
 Boot-critical updates additionally arm the boot rollback protocol:
 
 ```
-rpkg writes previous generation number → /cfg/lythos/rollback
+shade writes previous generation number → /cfg/lythos/rollback
 ```
 
 On next boot, if a critical daemon fails within 30 seconds:
 
 ```
-lythd re-points /r/gen/current → recorded generation (same atomic flip)
+lythd re-points /shade/gen/current → recorded generation (same atomic flip)
 lythd reboot
 ```
 
@@ -191,22 +202,22 @@ lythd rm /cfg/lythos/rollback
 
 Kernel/config snapshot atomicity (`@core` + `@cfg` snapshotted together) is
 deferred until RFS v2 specifies subvolume snapshots; the generation manifest
-is the intended integration point (`docs/rpkg/02-store.md` §6.3).
+is the intended integration point (`docs/shade-pkg/02-store.md` §6.3).
 
 ---
 
 ## Key Invariants
 
-- **`/lth/` is immutable at runtime** — no mutations except by `rpkg` on update
-- **`/r/` is reserved OS-wide for the rpkg store services** — store paths are
-  immutable once registered; only the store services write `/r/store`, `/r/db`,
-  `/r/gen` (`docs/rpkg/02-store.md`)
+- **`/lth/` is immutable at runtime** — no mutations except by `shade` on update
+- **`/shade/` is reserved OS-wide for the shade store services** — store paths are
+  immutable once registered; only the store services write `/shade/store`, `/shade/db`,
+  `/shade/gen` (`docs/shade-pkg/02-store.md`)
 - **`/cfg` rolls back with `/lth/system`** — atomically snapshotted together
 - **`/user` never rolls back** — user data is persistent across updates
 - **`/var` is ephemeral** — cleared or reset on reboot
 - **Symlinks in `/bin`, `/sbin`, `/lib`** allow POSIX-compliant tools to find binaries and libraries
 - **All user-facing tools are reached via `/lth/bin`** — a single symlink to
-  `/r/gen/current/profile/bin`, flipped atomically per generation
+  `/shade/gen/current/profile/bin`, flipped atomically per generation
 
 ---
 

@@ -1,26 +1,72 @@
-# rpkg — Sources and Lockfile
+# shade — Prisms, Inputs, and the Lock
 
-How each source type (crates.io, git, local, PsPackage) resolves to a pinned
-identity,
-how that identity becomes a *source derivation* with a store path, and the
-lockfile format that makes resolution reproducible. **[rpkg-local]** except
-where noted; the source derivations it emits are ordinary store objects
-([`02`](02-store.md)).
+The **prism** is shade's flake: the sole unit you install
+([`07 §1`](07-cli.md#1-prism-reference-forms)). This doc defines the prism
+(§1), the four **input types** a prism may declare — crates.io, git, local,
+PsPackage — and how each resolves to a pinned identity (§3), how that identity
+becomes a *source derivation* with a store path (§2), the fetch cache (§4), and
+the lock that makes the whole thing reproducible (§5). **[shade-local]** except
+where noted; the source derivations a prism's inputs emit are ordinary store
+objects ([`02`](02-store.md)).
 
-Fixed decision restated: all sources resolve **uniformly** to store-path
-builds. crates.io is just another source. A crate dependency's build is a
+Fixed decision restated: all inputs resolve **uniformly** to store-path builds.
+crates.io is just another input type. A crate dependency's build is a
 derivation like any other; nothing downstream of resolution knows or cares
 where bytes came from.
 
 ---
 
-## 1. Two-step model: resolve, then fetch
+## 1. The prism {#1-the-prism}
+
+A **prism** is a directory (or a single `prism.shade` file) that declares its
+pinned **inputs** and computes its **outputs** from them — the exact
+Nix-flake shape, renamed for the brand. It is the **only** thing `shade
+install` accepts ([`07 §1`](07-cli.md#1-prism-reference-forms)); a bare crate,
+git repo, local recipe, or `.pspkg` is **never** a standalone install target —
+each exists only as an *input* to some prism.
+
+```
+# prism.shade
+{
+  inputs = {
+    lythos-libstd = { type = "git"; url = "https://…"; rev = "v0.3.0"; };
+    serde         = { type = "crates-io"; crate = "serde"; version = "^1"; };
+    mylib         = { type = "local"; path = ./vendor/mylib; };
+  };
+  outputs = { self, lythos-libstd, serde, mylib, ... }: {
+    packages.rkilo = derivation { … };   # 08 §4 selects packages.<name>
+  };
+}
+```
+
+- **`inputs`** — a named set of input specs. Each names one of the four input
+  types (§3) and its requirement; resolution pins each to an exact identity
+  and records it in the prism lock (§5). The named inputs are the prism's
+  entire outside world — evaluation sees nothing else
+  ([`shade 03 §5`](../shade/03-semantics.md#5-purity)).
+- **`outputs`** — a function of the resolved inputs (plus `self`, the prism's
+  own realized tree) returning an attrset; `outputs.packages.<name>` are the
+  installable packages, selected by `#<output>`
+  ([`shade 08 §4`](../shade/08-interop.md#4-package-set-selection)).
+- **The prism lock** (`prism.lock`, §5) pins the whole input closure — the
+  flake.lock analog. It subsumes the old split between build-source pins and
+  channel pins: one prism, one lock ([`05 §2`](05-dependencies.md#2-shade-level-resolution),
+  [`shade 08 §5`](../shade/08-interop.md#5-unified-lockfile)).
+
+The **input closure** is the transitive set of inputs reached from a prism's
+`inputs` (an input may itself be a prism, contributing its inputs). `shade`
+resolves the closure at lock time and never re-resolves silently at install
+([§5](#5-lockfile)).
+
+### 1.1 Two-step model: resolve, then fetch {#1-two-step-model-resolve-then-fetch}
+
+Each input goes through two steps:
 
 - **Resolve** (needs network, or a pre-populated cache): turn a *requirement*
   (semver range, git branch/tag, local path) into a pinned *identity* (exact
   version + content hash; commit hash; tree hash). Results are recorded in
-  the lockfile (§5). Resolution runs only for `rpkg lock` /
-  first-install-without-lockfile ([`07`](07-cli.md)).
+  the prism lock (§5). Resolution runs only for `shade lock` /
+  first-install-without-lock ([`07`](07-cli.md)).
 - **Fetch** (needs network unless cached): obtain the bytes for a pinned
   identity, verify against it, ingest into the store as the source
   derivation's output (§2). Fetching a pinned identity is repeatable and
@@ -30,7 +76,7 @@ Everything after fetch is offline by construction — the build sandbox has no
 network ([`06 §3`](06-build.md#3-sandbox)). Until OROS has a network stack
 capable of TLS/git, both steps run host-assisted
 ([`01 §6.3`](01-overview.md#6-known-system-gaps-design-time-flags)).
-PsPackage sources (§3.4) need no network in *either* step: resolve and fetch
+PsPackage inputs (§3.4) need no network in *either* step: resolve and fetch
 both read the bundle.
 
 ## 2. Source derivations {#2-source-derivations}
@@ -58,13 +104,18 @@ consumed only via `$src<i>`).
 Because the identity (content hash / commit / tree hash) is an *input*, the
 same pinned source always lands at the same store path, and two recipes
 depending on the same crate version share one source store path. This is how
-rpkg gets Nix fixed-output-derivation behavior without an output-addressed
+shade gets Nix fixed-output-derivation behavior without an output-addressed
 mechanism ([`01 §4`](01-overview.md#4-relation-to-nix)).
 
 Verification at fetch time is per-type (§3); a hash/commit mismatch fails
 the fetch and nothing is ingested ([`08 §4`](08-security.md#4-source-authenticity)).
 
-## 3. Resolution per source type {#3-resolution-per-source-type}
+## 3. Input types (resolution per type) {#3-resolution-per-source-type}
+
+The four input types a prism's `inputs` (§1) may declare. Each is **only**
+reachable as a prism input — none is a standalone install target
+([`07 §1`](07-cli.md#1-prism-reference-forms)). "source" below means "the
+resolved bytes of an input."
 
 ### 3.1 `crates-io`
 
@@ -122,10 +173,17 @@ The `url` and `requested` ref live only in the lockfile (§5), as fetch
 transport and audit trail; changing them without changing the commit
 changes nothing in the store.
 
-In-repo recipe: if the checkout root has `rpkg.toml`, *that* recipe governs
-the build — the outer reference contributes only the source pin. No recipe +
-no `--unsafe` ⇒ error; `--unsafe` ⇒ synthesized recipe
-([`03 §7`](03-recipe-format.md#7-unsafe-default-recipes)).
+As a **git input**, a git entry contributes only its pinned source tree to the
+enclosing prism (via `$src<i>` / the input binding); the enclosing prism's
+`outputs` govern the build. A git repo that is *itself* a prism (its root holds
+`prism.shade`) is reached as a **remote prism reference**
+([`07 §1`](07-cli.md#1-prism-reference-forms)), not as a git input — the two
+uses are distinct: a git *input* is source bytes, a git *prism* is an install
+unit. `TODO(open):` a raw git input with no builder in the enclosing prism
+(the old `--unsafe` synthesized-derivation case,
+[`03 §7`](03-recipe-format.md#7-unsafe-default-recipes)) — whether a `builder =
+default` convenience survives for recipe-less source trees; flagged in
+[`07 §2`](07-cli.md#2-commands) (install), leaning explicit-builder-required.
 
 ### 3.3 `local`
 
@@ -136,7 +194,7 @@ no `--unsafe` ⇒ error; `--unsafe` ⇒ synthesized recipe
 Resolve = fetch: compute the **tree hash** of the directory and ingest it.
 The lockfile records the tree hash; a later build verifies the directory
 still matches or re-resolves (local sources are expected to change — the
-lockfile entry pins *what was built*, and `rpkg build` refreshes it,
+lockfile entry pins *what was built*, and `shade build` refreshes it,
 [`07`](07-cli.md)).
 
 **Tree hash algorithm** (normative): a BLAKE3 hash over a canonical
@@ -162,12 +220,14 @@ so the same tree at a different path is the same source.
 
 ### 3.4 `pspackage` {#34-pspackage}
 
-A **PsPackage** is a self-contained bundle: recipe, lockfile, and vendored
-sources shipped together. It is the fourth first-class source type and the
-offline/archival unit of the system: a bundle builds with **no network
-fetch** and **no dependence on upstream availability** — crates.io outages,
-deleted git repos, and yanked versions cannot break a build whose bundle you
-hold. A bundle built today builds identically in ten years.
+A **PsPackage** is a self-contained bundle: a prism (`prism.shade`), its lock,
+and vendored sources shipped together. It is the fourth input type and the
+offline/archival form of a prism: as a `pspackage` input, a bundle builds with
+**no network fetch** and **no dependence on upstream availability** — crates.io
+outages, deleted git repos, and yanked versions cannot break a build whose
+bundle you hold. A bundle built today builds identically in ten years. (A
+`.pspkg` is produced from a prism by `shade bundle`,
+[`07`](07-cli.md); it is consumed only as an input, never installed directly.)
 
 **Bundle layout** (normative). A directory, conventionally named
 `<name>-<version>.pspkg` (`TODO(open):` a single-file archive form —
@@ -176,19 +236,28 @@ authoritative either way):
 
 ```
 <name>-<version>.pspkg/
-├── rpkg.toml            the recipe (03), governs the build
-├── rpkg.lock            required — pins every source and crate (§5)
+├── prism.shade           the recipe (03, Shade), governs the build
+├── prism.lock            required — pins every source and crate (§5)
 └── vendor/
     ├── crate/           byte-identical registry .crate files, named
     │                    <name>-<version>.crate, one per [[crate]] lock entry
-    └── src/<i>/         one unpacked tree per non-crates-io [[source]] of
-                         the recipe, by source index
+    └── src/<i>/         one unpacked tree per non-crates-io source of the
+                         recipe, by source index
 ```
+
+The bundle's `prism.shade` must evaluate **offline** — no channel fetch, no
+network fixed-output fetch at bundle-build time. `shade bundle`
+([`07`](07-cli.md)) pins every channel and source the recipe references into
+`prism.lock` before vendoring, so bundle evaluation reads only pinned data.
+`TODO(open):` a bundle whose recipe imports a channel must vendor the
+channel tree too (as a `vendor/channel/<name>/` entry) so evaluation is fully
+self-contained — specify the channel-vendor layout when channels land
+([`shade 06 §3`](../shade/06-imports.md#3-channels)); flagged.
 
 **Resolve = fetch = read the bundle**, offline:
 
-1. Parse `rpkg.toml` + `rpkg.lock`; recipe/lock mismatch is an error, as
-   ever (§5 rules).
+1. Evaluate `prism.shade` against `prism.lock`; recipe/lock mismatch is an
+   error, as ever (§5 rules).
 2. Every lockfile pin must have a vendor entry; each entry is verified
    against its pin exactly as a network fetch would be — `.crate` files by
    `sha256`, trees by tree hash (§3.3 algorithm). Missing entry or mismatch
@@ -196,13 +265,13 @@ authoritative either way):
 3. Verified entries are ingested as ordinary source derivations (§2).
 
 Vendored *git* sources are stored and verified as trees: bundle creation
-(`rpkg bundle`, [`07`](07-cli.md)) records `tree` alongside `commit` in the
+(`shade bundle`, [`07`](07-cli.md)) records `tree` alongside `commit` in the
 bundled lockfile, since a stripped checkout cannot re-verify a commit hash.
 This is the same tree-hash backstop [`08 §4`](08-security.md#4-source-authenticity)
 wants for git sources generally.
 
 **Input-addressing.** The hash covers the vendored source *and* the recipe,
-by construction: the recipe compiles to the CDF being hashed, and every
+by construction: the recipe evaluates to the CDF being hashed, and every
 vendored entry contributes its pinned identity (`sha256` / `tree`) as a
 `source.*`/crate input ([`02 §3.3`](02-store.md#33-hash-inputs)). Because
 those identities are the same ones a network resolution would have pinned,
@@ -212,23 +281,23 @@ derivation. Offline reproducibility falls out: same bundle ⇒ same CDF bytes
 ⇒ same digest, on any machine.
 
 **Bundle identity.** The whole bundle has one identity: the §3.3 tree hash
-over the bundle directory. It is used to pin a bundle from *outside*:
+over the bundle directory. It is used to pin a bundle as an **input** from
+*outside* — never as a direct install target
+([`07 §1`](07-cli.md#1-prism-reference-forms)):
 
-- As a `[[source]]` entry in another recipe:
+- As a `pspackage` input of another prism — a Shade input-spec attrset in the
+  `inputs` set ([`shade 05 §4`](../shade/05-derivation.md#4-sources)):
 
-  ```toml
-  [[source]]
-  type = "pspackage"
-  path = "./deps/mylib-0.3.0.pspkg"   # or a bundle-repo reference, 05 §2
+  ```
+  { type = "pspackage"; path = ./deps/mylib-0.3.0.pspkg; }
+  # or a bundle-repo reference, 05 §2
   ```
 
-  Semantics follow the git in-repo-recipe rule ([§3.2](#32-git)): the
-  bundle's own recipe governs the build; the outer entry contributes only
-  the pin. CDF identity keys: `source.<i>.type=pspackage`,
+  The bundled prism's own `outputs` govern the build; the outer entry
+  contributes only the pin. CDF identity keys: `source.<i>.type=pspackage`,
   `source.<i>.tree` (64 lowercase hex, the bundle tree hash).
-- As a dependency: bundle repositories in the recipe universe,
-  [`05 §2`](05-dependencies.md#2-rpkg-level-resolution).
-- As a CLI install argument: [`07 §1`](07-cli.md#1-package-argument-forms).
+- As a dependency: bundle repositories in the prism registry,
+  [`05 §2`](05-dependencies.md#2-shade-level-resolution).
 
 Trust: a bundle bypasses first-resolution TOFU (§1 — its pins were created
 by whoever built the bundle) but not verification; provenance
@@ -236,11 +305,11 @@ considerations in [`08 §4`](08-security.md#4-source-authenticity).
 
 ## 4. Fetch cache {#4-fetch-cache}
 
-`/r/cache/` holds verified downloads keyed by their content identity:
+`/shade/cache/` holds verified downloads keyed by their content identity:
 
 ```
-/r/cache/crate/<sha256>.crate
-/r/cache/git/<url-digest>/          bare repo, url-digest = 32-char base32 BLAKE3 of URL
+/shade/cache/crate/<sha256>.crate
+/shade/cache/git/<url-digest>/          bare repo, url-digest = 32-char base32 BLAKE3 of URL
 ```
 
 Cache entries are an optimization only: every use re-verifies against the
@@ -251,11 +320,26 @@ host) lets fetch succeed with no network.
 
 ## 5. Lockfile {#5-lockfile}
 
-`rpkg.lock`, TOML, lives next to the recipe it locks (in-repo for git
-sources' recipes, beside the local recipe otherwise) and is copied into each
-generation ([`02 §5`](02-store.md#5-generations)). Committing it to VCS is
-expected practice. Machine-written, human-reviewable; rpkg rewrites it as a
-whole (no partial edits, stable sort order → clean diffs).
+`prism.lock`, TOML (a machine-written state serialization — not a recipe
+language, [`01 §1`](01-overview.md#1-goals)), lives at the prism root beside
+`prism.shade`, pins the prism's whole **input closure** (§1), and is copied
+into each generation ([`02 §5`](02-store.md#5-generations)). It is the
+flake.lock analog. Committing it to VCS is expected practice. Machine-written,
+human-reviewable; shade rewrites it as a whole (no partial edits, stable sort
+order → clean diffs).
+
+**Unification.** The prism model **collapses the old two-lockfile split**: a
+prism's `inputs` cover both its build sources *and* the evaluation inputs
+(channels/other prisms) that older docs pinned separately in a `shade.lock`
+([`shade 06 §4`](../shade/06-imports.md#4-shade-lock)). One prism → one
+`prism.lock` covering every input identity + resolved commit/tree. `TODO(open):`
+the **frozen unified schema** — whether the per-input tables below absorb the
+channel-pin table verbatim, and the exact field set — is still open and lands
+with the channel design ([`05 §2`](05-dependencies.md#2-shade-level-resolution)
+`TODO`, [`shade 08 §5`](../shade/08-interop.md#5-unified-lockfile)). Until
+frozen, treat the `[[source]]`/`[[crate]]`/`[[dep]]` tables below as the
+build-input portion and the [`shade 06 §4`](../shade/06-imports.md#4-shade-lock)
+`[[channel]]` table as the eval-input portion of the same `prism.lock`.
 
 ```toml
 schema = 1
@@ -296,7 +380,7 @@ sha256 = "…"
 features = ["default", "std"]   # post-unification feature set, sorted
 deps = ["cfg-if 1.0.0"]         # "name version" of resolved crate deps, sorted
 
-# rpkg-level dep pins (05 §2): name -> version chosen.
+# shade-level dep pins (05 §2): name -> version chosen.
 [[dep]]
 name = "lythos-libstd"
 version = "0.3.0"
@@ -310,7 +394,7 @@ Rules:
   contract, on any machine, network up or down.
 - A recipe/lockfile mismatch (recipe source not in lock, requirement no
   longer satisfied by pin, local tree hash drift) is an error naming the fix
-  (`rpkg lock`); rpkg never silently re-resolves during `install`.
+  (`shade lock`); shade never silently re-resolves during `install`.
 - `[[crate]]` entries are the authority for the Cargo layer; how they are
   produced from Cargo metadata (and their relation to upstream `Cargo.lock`
   when the source ships one) is [`05 §3`](05-dependencies.md#3-cargo-integration).

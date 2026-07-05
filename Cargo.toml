@@ -11,7 +11,7 @@ members = [
     "userspace/shell/lysh",
     "userspace/apps/rkilo",
     "userspace/apps/rutils",
-    "pkg/rpkg",
+    "pkg/shade",
     "fs/rfs2",
     "tools/orox-pack",
     "tools/lythos-toolchain/lythos-libc",

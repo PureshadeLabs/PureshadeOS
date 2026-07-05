@@ -1,10 +1,10 @@
 [package]
-name = "rpkg"
+name = "shade"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "rpkg"
+name = "shade"
 path = "src/main.rs"
 
 [dependencies]

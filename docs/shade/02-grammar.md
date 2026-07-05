@@ -290,3 +290,40 @@ escapes are errors. Everything else is intended to parse exactly as the
 corresponding Nix construct; where this doc and observed Nix behavior
 disagree for a construct both accept, **this doc wins** (no bug-for-bug
 compatibility, [`01 §2`](01-overview.md#2-non-goals)).
+
+## 6. Package-set selectors {#6-package-set-selectors}
+
+A **selector** is *not* part of the `.shade` expression language above — it
+is the flake-style fragment syntax applied to a file **reference** on the
+command line, selecting one attribute (a package) from the attrset a recipe
+evaluates to ([`08 §4`](08-interop.md#4-package-set-selection),
+[`shade-pkg 07 §1`](../shade-pkg/07-cli.md)). It is specified here so its grammar lives
+with the rest of the language's syntax; it is consumed by shade/shadec argument
+parsing, never by the expression parser (§3).
+
+```
+selector      = file-ref [ "#" attr-selector ]
+attr-selector = sel-attr *( "." sel-attr )
+sel-attr      = ID / STRING
+```
+
+- `file-ref` is a path to a `.shade` file (or a `.pspkg` bundle, or a
+  git URL — [`shade-pkg 07 §1`](../shade-pkg/07-cli.md) defines the argument forms); the
+  selector grammar governs only the `#…` fragment.
+- `attr-selector` is an attribute path into the evaluated value: `#rkilo`
+  selects the `rkilo` attribute, `#rust.rkilo` descends two levels. Each
+  `sel-attr` is a plain `ID` or a (interpolation-free) `STRING` — the same
+  attribute forms `attr` allows (§3.3), minus dynamic `${…}` (a CLI argument
+  is not an evaluation context).
+- Resolution: force **only** the selected path
+  ([`03 §2`](03-semantics.md#2-laziness)); siblings are never evaluated.
+  A missing attribute is an error naming the attribute path; selecting into a
+  non-attrset is an error.
+- Omitted `#…`: the default-selection rule is `TODO(open):`
+  ([`08 §4`](08-interop.md#4-package-set-selection)) — leaning `default`
+  attribute if present, else install-all when the value is an attrset of
+  derivations, else error.
+
+The `.` inside a selector is the CLI's own separator, lexed by the argument
+parser, and is independent of path lexing (§2.5) and attribute-selection
+precedence (§3.1) inside expressions.

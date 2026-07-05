@@ -50,7 +50,7 @@
     { id: 'calendar',   label: 'Calendar',         desc: 'Dates and events',          icon: 'calendar_month',   elf: '/usr/bin/lycal'        },
     { id: 'system',     label: 'System Info',      desc: 'Hardware and OS details',   icon: 'info',             elf: '/usr/bin/lysysinfo'    },
     { id: 'screenshot', label: 'Screenshot',       desc: 'Capture the screen',        icon: 'screenshot',       elf: '/usr/bin/lyshot'       },
-    { id: 'package',    label: 'Package Manager',  desc: 'Install and update rpkg',   icon: 'package_2',        elf: '/usr/bin/rpkg-gui'     },
+    { id: 'package',    label: 'Package Manager',  desc: 'Install and update shade',   icon: 'package_2',        elf: '/usr/bin/shade-gui'     },
     { id: 'display',    label: 'Display Settings', desc: 'Resolution and scaling',    icon: 'display_settings', elf: '/usr/bin/lydisplay'    },
   ];
 

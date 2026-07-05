@@ -79,11 +79,11 @@ recording whether it originated inside the store.
   store path. This is the single most important path behavior and the one
   place path values differ sharply from strings.
 
-Store-origin paths (already under `/r/store/`) coerce to their own string
+Store-origin paths (already under `/shade/store/`) coerce to their own string
 without re-ingesting (§4.2). `TODO(open):` whether eval-time path literals
-pointing *into* `/r/store` are permitted at all, or must arrive only via
+pointing *into* `/shade/store` are permitted at all, or must arrive only via
 derivation `outPath` — allowing raw store-path literals is an integrity
-seam ([`rpkg 08 §2`](../rpkg/08-security.md#2-trust-model)). v1: permitted
+seam ([`shade-pkg 08 §2`](../shade-pkg/08-security.md#2-trust-model)). v1: permitted
 but flagged.
 
 ## 3. Lists
@@ -139,19 +139,19 @@ and bool to `""`/`"1"` in some paths; Shade refuses — silent coercion of
 Coercing a **path** to a string (interpolation, `toString`, `+` against a
 string) **ingests** it:
 
-1. If the path is already under `/r/store/` (store-origin flag set), the
+1. If the path is already under `/shade/store/` (store-origin flag set), the
    result is its own path string with an empty (or preserving) context —
    no copy.
 2. Otherwise shadec computes the path's tree hash
-   ([`rpkg 04 §3.3`](../rpkg/04-sources.md#33-local)) and realizes a
-   `local` **source derivation** ([`rpkg 04 §2`](../rpkg/04-sources.md#2-source-derivations))
+   ([`shade-pkg 04 §3.3`](../shade-pkg/04-sources.md#33-local)) and realizes a
+   `local` **source derivation** ([`shade-pkg 04 §2`](../shade-pkg/04-sources.md#2-source-derivations))
    whose store path is the result string. The ingested path + hash is
    recorded as an eval input ([`03 §5.3`](03-semantics.md#53-eval-inputs))
    and the resulting string carries a context referencing that source
    derivation (§5).
 
 Ingestion is how `src = ./.;` in a recipe becomes a pinned source: the
-path coerces, the tree is hashed and ingested exactly as rpkg's `local`
+path coerces, the tree is hashed and ingested exactly as shade's `local`
 source type, and the derivation gets a `source.*` entry
 ([`05 §2`](05-derivation.md#2-arguments)). A single file path ingests as a
 single-file tree. `builtins.filterSource` / `lib.cleanSource`
@@ -214,7 +214,7 @@ Rules:
   ([`07 §2.8`](07-stdlib.md#28-string-context-ops)). "unsafe" because
   discarding context drops a real build dependency — a string that names a
   store path but no longer *depends* on it, which registration's reference
-  scan ([`rpkg 06 §5`](../rpkg/06-build.md#5-registration)) may then flag
+  scan ([`shade-pkg 06 §5`](../shade-pkg/06-build.md#5-registration)) may then flag
   as an undeclared reference. Use only when the dependency is provably
   provided another way.
 
@@ -230,10 +230,10 @@ remove, by the fetch builtins. It is an **attrset** carrying:
 | Attribute | Value |
 |---|---|
 | `type` | the marker: the string `"derivation"` (distinguishes from a plain set; `lib.isDerivation x = x.type or null == "derivation"`) |
-| `name` | the derivation name (normalized, [`rpkg 02 §2`](../rpkg/02-store.md#2-store-path-format)) |
+| `name` | the derivation name (normalized, [`shade-pkg 02 §2`](../shade-pkg/02-store.md#2-store-path-format)) |
 | `version` | the version string |
 | `system` | target triple |
-| `drvPath` | string: the `.drv` store path, `/r/store/<digest>-<name>-<version>.drv` — computed by serializing to CDF and hashing ([`05 §3`](05-derivation.md#3-cdf-emission)) |
+| `drvPath` | string: the `.drv` store path, `/shade/store/<digest>-<name>-<version>.drv` — computed by serializing to CDF and hashing ([`05 §3`](05-derivation.md#3-cdf-emission)) |
 | `outPath` | string: the output store path (the `.drv` path minus `.drv`), **carrying a context referencing this derivation** — so interpolating a derivation into another recipe threads the dependency |
 | `outputName` | `"out"` (single-output only in v1; `TODO(open):` multi-output, [`05 §6`](05-derivation.md#6-multiple-outputs)) |
 | the original argument attrs | passed through, so `d.buildInputs` etc. remain readable |
@@ -248,4 +248,4 @@ them).
 Two derivation values are `==` iff their `drvPath`s are equal
 ([`03 §7`](03-semantics.md#7-equality)); equal `drvPath` ⇒ identical CDF ⇒
 identical build ⇒ the store dedups them
-([`rpkg 02 §3`](../rpkg/02-store.md#3-input-addressing)).
+([`shade-pkg 02 §3`](../shade-pkg/02-store.md#3-input-addressing)).
