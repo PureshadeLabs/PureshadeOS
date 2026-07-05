@@ -184,7 +184,7 @@ Flagged.
 When shade must evaluate a `.shade` recipe, it selects the shadec to invoke,
 in order:
 
-1. The **profile** shadec — `/shade/gen/current/profile/bin/shadec` if present
+1. The **profile** shadec — `/shade/gen/system/current/profile/bin/shadec` if present
    (the store shadec, §4). Steady state.
 2. The **seed** shadec — the bootstrap pin's `store-path` (§3). Used at first
    boot, during re-bootstrap, and whenever no profile shadec exists.

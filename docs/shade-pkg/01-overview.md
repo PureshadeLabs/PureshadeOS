@@ -33,6 +33,7 @@ Doc set:
 | [`07-cli.md`](07-cli.md) | command surface and UX |
 | [`08-security.md`](08-security.md) | trust model, retired `--unsafe` (why the category is gone), source authenticity, sandbox guarantees |
 | [`09-bootstrap.md`](09-bootstrap.md) | the shadec bootstrap: seed evaluator, trust/pin, rebuild through shade |
+| [`10-system-prism.md`](10-system-prism.md) | the **system prism** (`shade os rebuild`), the `current.pointer` file, bootstrap default + first-rebuild migration, per-user prisms (`~/.prism`) |
 
 The split follows the seed proposal, plus 09 for the bootstrap: each doc owns
 one layer, and the layering is real — 02 defines the store that 03–06 build
@@ -80,6 +81,9 @@ Definitions live in exactly one doc and are cross-referenced, never restated
 - Binary package distribution or substitution from a remote cache.
 - Multi-user / per-user profiles. One system-wide installed set
   (`TODO(open):` per-user generations, [`02 §5`](02-store.md#5-generations)).
+  The system prism does HM for its **owner** only; additional users' per-user
+  prisms have a defined location but no activation yet
+  ([`10 §5`](10-system-prism.md#5-per-user-prisms)).
 - Output-addressed or content-addressed store entries. Explicitly rejected —
   see §4.
 - Language ecosystems beyond Rust/Cargo. The source model is
@@ -235,5 +239,5 @@ dependencies on these items.
    pre-vendored software.
 
 (`docs/spec/fhs.md` now specifies the `/shade/` hierarchy and the
-`/lth/bin → /shade/gen/current/profile/bin` symlink consistently with this doc
+`/lth/bin → /shade/gen/system/current/profile/bin` symlink consistently with this doc
 set; the earlier `/lth/store/` layout is gone.)

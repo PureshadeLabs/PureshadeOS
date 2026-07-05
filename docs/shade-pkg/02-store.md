@@ -29,10 +29,14 @@ subsystem may create entries under `/shade/`. Layout:
 └── log/        build logs, one file per store path (§8)
 ```
 
-Permissions model: `/shade/store`, `/shade/db`, `/shade/gen` are writable only by the
-store services ([`01 §5`](01-overview.md#5-os-general-vs-shade-local) — in v1,
-the `shade` binary running with the store-write authority). All of `/shade/` is
-world-readable. `TODO(open):` the enforcement mechanism is the kernel fs
+Permissions model: `/shade/store`, `/shade/db`, and the system generation line
+`/shade/gen/system` are writable only by the store services
+([`01 §5`](01-overview.md#5-os-general-vs-shade-local) — in v1, the `shade`
+binary running with the store-write authority, privileged). Each per-user line
+`/shade/gen/users/<user>` is writable by its owning user **unprivileged**
+(`shade home rebuild`, [`10 §5`](10-system-prism.md#5-per-user-prisms)); building
+into the shared `/shade/store` still goes through the store services. All of
+`/shade/` is world-readable. `TODO(open):` the enforcement mechanism is the kernel fs
 isolation gap ([`01 §6.2`](01-overview.md#6-known-system-gaps-design-time-flags));
 until it exists, immutability of `/shade/store` is a convention backed only by
 RFS mount options.
@@ -201,20 +205,35 @@ the builder writes to `$out` and registration verifies the declaration
 
 ## 5. Generations {#5-generations}
 
-A generation is one immutable snapshot of the installed set:
+A generation is one immutable snapshot of an installed set. Generations are
+partitioned into **one system line** and **one line per user**
+([`10 §1`](10-system-prism.md#1-the-system-prism),
+[`10 §5`](10-system-prism.md#5-per-user-prisms)):
 
 ```
 /shade/gen/
-├── 1/
-├── 2/
-│   ├── manifest.toml      what is installed and why (schema below)
-│   ├── prism.lock          the lockfile snapshot that produced this generation
-│   └── profile/
-│       ├── bin/           symlink forest into /shade/store/*/bin/
-│       ├── lib/
-│       └── share/
-└── current -> 2           the activation symlink (§6)
+├── system/                the system generation line (built by `shade os rebuild`)
+│   ├── 1/
+│   ├── 2/
+│   │   ├── manifest.toml  what is installed and why (schema below)
+│   │   ├── prism.lock      the lockfile snapshot that produced this generation
+│   │   └── profile/
+│   │       ├── bin/       symlink forest into /shade/store/*/bin/
+│   │       ├── lib/
+│   │       └── share/
+│   └── current -> 2       the activation symlink (§6)
+└── users/                 per-user generation lines (built by `shade home rebuild`)
+    └── <user>/            one independent line per user, same layout as system/
+        ├── 1/
+        ├── 2/  (manifest.toml, prism.lock, profile/)
+        └── current -> 2   the user's own activation symlink
 ```
+
+Each line — `system/` and every `users/<user>/` — has its **own** monotonic
+generation counter, its own `current` symlink, and its own append-only history.
+The lines are **independent**: a user rebuild ([`10 §5`](10-system-prism.md#5-per-user-prisms))
+flips only that user's `current`, never `system/current`, and vice versa. There
+is no single atomic super-generation combining them.
 
 Generation numbers are a monotonically increasing decimal counter, never
 reused, allocated at generation creation. Every operation that changes the
@@ -253,9 +272,19 @@ outputs into the merged `profile/` tree. Collisions (two packages providing
 system in v1. `TODO(open):` collision policy if/when two packages must
 coexist (Nix's priority mechanism is the known prior art).
 
-`TODO(open):` per-user profiles. v1 has exactly one system profile. The
-layout reserves nothing for users; a later design must add e.g.
-`/shade/gen/user/<uid>/` plus per-user roots without breaking the grammar above.
+**Per-user profiles.** Each user has an independent profile under
+`/shade/gen/users/<user>/`, built and activated by that user's own prism
+([`10 §1`](10-system-prism.md#1-the-system-prism),
+[`10 §5`](10-system-prism.md#5-per-user-prisms)) exactly as the system profile
+above — symlink forest of the user prism's declared outputs into a `profile/`
+tree, same collision rule, flipped by the same procedure (§6) scoped to
+`/shade/gen/users/<user>/current`. A user's profile composes with the system
+profile at use time via `PATH`, not by merging trees: the user's
+`profile/bin` precedes the system `profile/bin`
+([`10 §1`](10-system-prism.md#1-the-system-prism)), so a user override shadows
+the system tool without a build-time collision. `TODO(open):` cross-line
+collision *reporting* — a user shadowing a system binary is legal by PATH
+order; whether `shade home rebuild` warns is unspecified.
 
 **Temporary environments do not touch profiles.** `shade -t`
 ([`07 §2`](07-cli.md#shade-t)) — the ephemeral nix-shell-style env — builds its
@@ -272,10 +301,11 @@ reachable from `shade -t`.
 
 Activation of generation *N*:
 
-1. Build `/shade/gen/N/` completely (manifest, lock, profile). Fsync it.
-   Until step 3 it is unreferenced by `current` and invisible.
-2. Create symlink `/shade/gen/.current.new -> N`.
-3. `rename("/shade/gen/.current.new", "/shade/gen/current")` — the flip.
+1. Build `/shade/gen/<line>/N/` completely (manifest, lock, profile), where
+   `<line>` is `system` or `users/<user>`. Fsync it. Until step 3 it is
+   unreferenced by that line's `current` and invisible.
+2. Create symlink `/shade/gen/<line>/.current.new -> N`.
+3. `rename("/shade/gen/<line>/.current.new", "/shade/gen/<line>/current")` — the flip.
 4. Fsync the containing directory (forces an RFS commit; see §6.3).
 
 `rename` over an existing symlink is atomic at the VFS level: any reader sees
@@ -284,13 +314,13 @@ procedure with a manifest copied from an older generation (§5).
 
 Every path the rest of the system uses goes through the flip point:
 
-- `/lth/bin` is a single symlink to `/shade/gen/current/profile/bin`, as
+- `/lth/bin` is a single symlink to `/shade/gen/system/current/profile/bin`, as
   specified in `docs/spec/fhs.md`; lythd's boot-time `/bin`, `/sbin` POSIX
   links are unchanged (they point at `/lth/bin`, which dereferences through
   `current`).
 - Anything else that must be generation-consistent (service definitions,
   eventually kernel + config — the fhs.md snapshot-atomicity story) is
-  reached via `/shade/gen/current/…` when the OS adopts the mechanism
+  reached via `/shade/gen/system/current/…` when the OS adopts the mechanism
   ([`01 §5`](01-overview.md#5-os-general-vs-shade-local)).
 
 Processes already running keep their open files and mapped binaries (store
@@ -309,8 +339,11 @@ it rather than replacing it:
   `boot-critical` in its manifest entry (`TODO(open):` marker definition —
   likely a recipe field, [`03 §2`](03-recipe-format.md#2-package)), shade
   writes the previous generation number into `/cfg/lythos/rollback`.
-- If lythd's stability window fails, lythd re-points `/shade/gen/current` to the
-  recorded generation using the same flip (§6.1) and reboots.
+- If lythd's stability window fails, lythd re-points `/shade/gen/system/current`
+  to the recorded system generation using the same flip (§6.1) and reboots.
+  Boot integration is **system-line only**: per-user lines
+  (`/shade/gen/users/<user>/`) are not boot-critical and never arm the flag
+  ([`10 §6`](10-system-prism.md#6-boot-dependency)).
 - On a clean window, lythd clears the flag.
 
 ### 6.3 RFS interaction — decision {#63-rfs-interaction}
@@ -346,9 +379,11 @@ recording the snapshot ID. The flip stays the commit point either way.
 
 The live set is the union of closures (§7.2) of:
 
-1. Every generation's manifest store paths — all of `/shade/gen/*/manifest.toml`.
-   (Deleting old generations — `shade gc --generations` or explicit
-   `generations delete` — is how store space is actually reclaimed.)
+1. Every generation's manifest store paths — all of
+   `/shade/gen/system/*/manifest.toml` **and** `/shade/gen/users/*/*/manifest.toml`.
+   (Deleting old generations — `shade os clean` / `shade home clean`, or
+   explicit `generations delete` — is how store space is actually reclaimed;
+   [`07 §2.1`](07-cli.md#21-shade-os).)
 2. Every symlink in `/shade/roots/`. Anyone may root a path by symlinking it
    here; the symlink name is `<owner>-<label>` by convention, content is the
    store path. Dangling symlinks are pruned by GC. **[OS-general]**

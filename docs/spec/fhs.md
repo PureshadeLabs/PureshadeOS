@@ -21,15 +21,17 @@ Subvolumes are snapshots atomically together during updates. Config always rolls
 │   │   ├── /lth/system/boot/       (Lythos kernel binary, UEFI stub)
 │   │   ├── /lth/system/lib/        (core system libraries — musl, Lythos stdlib)
 │   │   └── /lth/system/init        (lythd binary — PID 1)
-│   └── /lth/bin → /shade/gen/current/profile/bin
+│   └── /lth/bin → /shade/gen/system/current/profile/bin
 │                                   (single symlink into the active shade
-│                                    generation — docs/shade-pkg/02-store.md §6)
+│                                    system generation — docs/shade-pkg/02-store.md §6)
 │
 ├── /shade/                              (reserved OS-wide for shade store services —
 │   │                                canonical layout: docs/shade-pkg/02-store.md §1)
 │   ├── /shade/store/                   (input-addressed store: <digest>-<name>-<version>)
 │   ├── /shade/db/                      (store metadata: valid set, references)
-│   ├── /shade/gen/                     (generations + `current` activation symlink)
+│   ├── /shade/gen/                     (generation lines — docs/shade-pkg/02-store.md §5)
+│   │   ├── /shade/gen/system/          (system line: N/ + `current` flip; boot activates this)
+│   │   └── /shade/gen/users/<user>/    (per-user line: N/ + `current`, one per user, independent)
 │   ├── /shade/roots/                   (GC roots)
 │   ├── /shade/cache/                   (fetch cache — supersedes /var/cache/shade)
 │   ├── /shade/build/                   (transient build directories)
@@ -49,6 +51,15 @@ Subvolumes are snapshots atomically together during updates. Config always rolls
 │   ├── /cfg/webwm/                 (webWM frontend configuration)
 │   │   ├── config.toml             (keybinds, gaps, layout rules, app assignments)
 │   │   └── theme.css               (visual theming via CSS custom properties)
+│   ├── /cfg/shade/                 (system prism authoring + activation pointer —
+│   │   │                            canonical: docs/shade-pkg/10-system-prism.md)
+│   │   ├── prism.shade             (bootstrap default system prism — only enough
+│   │   │                            to build the user's prism; renamed to
+│   │   │                            prism.shade.bak on first `shade os rebuild`)
+│   │   ├── prism.shade.bak         (retired default, kept as recovery fallback)
+│   │   ├── current.pointer         (active system prism ref: <path>#<selector>,
+│   │   │                            e.g. /user/lyon/.prism#workstation)
+│   │   └── docs/                   (prism-authoring reference; not evaluated)
 │   └── /cfg/shell/                 (shell configuration)
 │       └── .shellrc                (lysh shell initialization)
 │
@@ -61,6 +72,8 @@ Subvolumes are snapshots atomically together during updates. Config always rolls
 │   │   │   ├── Documents/
 │   │   │   ├── Downloads/
 │   │   │   ├── Desktop/
+│   │   │   ├── .prism/             (per-user prism profile dir; entry prism.shade —
+│   │   │   │                        HM-style user config, docs/shade-pkg/10-system-prism.md §5)
 │   │   │   └── .config/            (user per-app configuration)
 │   │   └── /user/home/bob/         (additional users)
 │   └── /user/root/                 (root home)
@@ -135,9 +148,11 @@ Subvolumes are snapshots atomically together during updates. Config always rolls
 \*Whether `/shade/` becomes its own subvolume once RFS v2 subvolumes are
 specified is an open decision — `docs/shade-pkg/02-store.md` §1.
 
-\*\*`/shade/store`, `/shade/db`, `/shade/gen` are writable only by the store services;
-`/shade/cache`, `/shade/build`, `/shade/log` are working areas. See
-`docs/shade-pkg/02-store.md` §1.
+\*\*`/shade/store`, `/shade/db` and the system line `/shade/gen/system` are
+writable only by the (privileged) store services; each `/shade/gen/users/<user>`
+line is writable by its owning user unprivileged
+(`docs/shade-pkg/10-system-prism.md` §5). `/shade/cache`, `/shade/build`,
+`/shade/log` are working areas. See `docs/shade-pkg/02-store.md` §1.
 
 **Config-format scope.** The TOML under `/cfg/services/*.toml` and
 `/cfg/webwm/config.toml` is **OS-init and desktop configuration**, read
@@ -172,14 +187,35 @@ Flagged, out of scope for the package-system frontend change.
 8. **`lythd` spawns services in dependency order**
 9. **On boot cleanup**: if stability timer expires, clears `/cfg/lythos/rollback`
 
+**System-prism activation at boot — boot consumes BUILT generations, not source
+prisms.** Boot activates the system by flipping
+`/shade/gen/system/current` to the built generation the last successful
+`shade os rebuild` produced (pinned as line 3 of `/cfg/shade/current.pointer`,
+`docs/shade-pkg/10-system-prism.md` §2). `/shade/gen/system/` lives in the store
+domain, mounted before user data. Boot **never re-evaluates a source prism and
+never reads a user path**: the source prism at `/user/<owner>/.prism` on `@home`
+is a **rebuild-time input, not a boot-time dependency**. `@home` being unmounted
+at the stage that activates the system therefore **does not block boot** — the
+built system generation is already present.
+
+Recovery: if the pinned generation is missing or fails its stability window,
+boot recovers to the **last-good system generation** in `/shade/gen/system/` via
+the rollback protocol below — never to `prism.shade.bak`, which is only the
+resolution fallback when the pointer is **absent entirely**
+(`docs/shade-pkg/10-system-prism.md` §4, §6). Per-user lines
+(`/shade/gen/users/<user>/`) are **not** part of boot; they activate at
+login/session start after `@home` is mounted.
+
 ---
 
 ## Snapshot Atomicity
 
 Package-level atomicity is the shade generation mechanism
 (`docs/shade-pkg/02-store.md` §5–6): every install/remove/rollback creates a new
-generation under `/shade/gen/`, and activation is one atomic symlink flip of
-`/shade/gen/current`. Rollback is flipping back to a prior generation's manifest.
+generation under a line (`/shade/gen/system/` or `/shade/gen/users/<user>/`), and
+activation is one atomic symlink flip of that line's `current` (e.g.
+`/shade/gen/system/current`). Rollback is flipping back to a prior generation's
+manifest. Boot integration is **system-line only**.
 
 Boot-critical updates additionally arm the boot rollback protocol:
 
@@ -190,7 +226,7 @@ shade writes previous generation number → /cfg/lythos/rollback
 On next boot, if a critical daemon fails within 30 seconds:
 
 ```
-lythd re-points /shade/gen/current → recorded generation (same atomic flip)
+lythd re-points /shade/gen/system/current → recorded generation (same atomic flip)
 lythd reboot
 ```
 
@@ -210,14 +246,20 @@ is the intended integration point (`docs/shade-pkg/02-store.md` §6.3).
 
 - **`/lth/` is immutable at runtime** — no mutations except by `shade` on update
 - **`/shade/` is reserved OS-wide for the shade store services** — store paths are
-  immutable once registered; only the store services write `/shade/store`, `/shade/db`,
-  `/shade/gen` (`docs/shade-pkg/02-store.md`)
+  immutable once registered; only the store services write `/shade/store`, `/shade/db`.
+  Generation lines are line-scoped: the **system line** `/shade/gen/system/` is
+  written privileged (`shade os rebuild`); a user's own line
+  `/shade/gen/users/<user>/` is written by that user **unprivileged**
+  (`shade home rebuild`, `docs/shade-pkg/10-system-prism.md` §5)
 - **`/cfg` rolls back with `/lth/system`** — atomically snapshotted together
 - **`/user` never rolls back** — user data is persistent across updates
 - **`/var` is ephemeral** — cleared or reset on reboot
 - **Symlinks in `/bin`, `/sbin`, `/lib`** allow POSIX-compliant tools to find binaries and libraries
 - **All user-facing tools are reached via `/lth/bin`** — a single symlink to
-  `/shade/gen/current/profile/bin`, flipped atomically per generation
+  `/shade/gen/system/current/profile/bin`, flipped atomically per system
+  generation. Per-user tools layer on top by PATH order (the user's
+  `/shade/gen/users/<user>/current/profile/bin` precedes `/lth/bin`,
+  `docs/shade-pkg/10-system-prism.md` §1.1)
 
 ---
 

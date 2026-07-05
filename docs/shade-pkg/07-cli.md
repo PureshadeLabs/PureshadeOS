@@ -57,6 +57,88 @@ prism, [`04 §3.2`](04-sources.md#32-git)).
 
 ## 2. Commands
 
+`shade` is a **subcommand** CLI: `shade <subcommand> [args] [flags]`. Most
+subcommands are flat verbs (`install`, `remove`, `build`, …). Two subcommands
+are **groups**: `os` (system-line verbs, [§2.1](#21-shade-os)) and `home`
+(per-user-line verbs, [§2.2](#22-shade-home)) — `shade os <verb> …`,
+`shade home <verb> …`.
+
+### 2.1 `shade os` — system prism management {#21-shade-os}
+
+The `os` subcommand group operates on the **system prism**
+([`10 §1`](10-system-prism.md#1-the-system-prism)) and the **system generation
+line** `/shade/gen/system/`. **Privileged** — system-line writes need root.
+
+#### `shade os rebuild [<prism>[#<selector>]] [--dry-run]`
+
+Build and activate the named prism as the **system prism**
+([`10 §1`](10-system-prism.md#1-the-system-prism)): resolve its input closure
+and build its system output exactly as `install` does (below), create and
+activate a new generation in `/shade/gen/system/`
+([`02 §5–6`](02-store.md#5-generations)), and — when run by the owner — activate
+the owner's own user line too ([`10 §1`](10-system-prism.md#1-the-system-prism)).
+
+Pointer handling ([`10 §2–3`](10-system-prism.md#2-the-pointer-file)):
+
+- **First rebuild** — if the default `/cfg/shade/prism.shade` is present, rename
+  it to `/cfg/shade/prism.shade.bak` and stop using it as the main config.
+- On success, rewrite `/cfg/shade/current.pointer` (three lines: prism path,
+  selector, resolved system generation number, [`10 §2`](10-system-prism.md#2-the-pointer-file)).
+  The pinned generation is what boot activates ([`10 §6`](10-system-prism.md#6-boot-dependency)).
+
+With no `<prism>` argument, rebuild the pointer's current target (lines 1–2). If
+the pointer is present but its target is **unresolvable**, **fail loud** (exit 1,
+name the target) — never silently fall back to `.bak`
+([`10 §4`](10-system-prism.md#4-resolution-order)). `--dry-run` prints the plan
+and the pointer change, mutates nothing.
+
+#### `shade os clean [--keep-last <K>] [--dry-run]`
+
+**Prune old system generations, then collect.** Two steps:
+
+1. Delete old `/shade/gen/system/` generation records (default policy
+   `TODO(open):`; `--keep-last <K>` keeps the K newest plus `current`), never
+   deleting `current` — same record deletion as
+   `shade generations delete` (below).
+2. Trigger a store sweep (`shade gc`, below) to reclaim paths the pruned
+   generations were the last to reference.
+
+`os clean` is thus **generation pruning + gc**, distinct from bare `gc` (which
+only collects already-unreferenced paths and prunes no generation). `--dry-run`
+reports what would be pruned and freed. `TODO(open):` whether `os clean` prunes
+only the system line or also offers a system-wide sweep across user lines
+(user-line pruning is `shade home clean`, [§2.2](#22-shade-home)).
+
+### 2.2 `shade home` — per-user prism management {#22-shade-home}
+
+The `home` subcommand group operates on the caller's **own** per-user prism
+([`10 §5`](10-system-prism.md#5-per-user-prisms)) and their **own** generation
+line `/shade/gen/users/<user>/`. **Unprivileged** — a user activates only their
+own line; **no root** ([`10 §5`](10-system-prism.md#5-per-user-prisms)). Contrast
+`shade os rebuild` (system line, privileged, [§2.1](#21-shade-os)).
+
+#### `shade home rebuild [~/.prism[#<selector>]] [--dry-run]`
+
+Build and activate the caller's user prism — default `~/.prism`
+([`10 §5`](10-system-prism.md#5-per-user-prisms)) — into a new generation under
+`/shade/gen/users/<user>/`, then flip **only** `/shade/gen/users/<user>/current`
+([`10 §1.1`](10-system-prism.md#11-hm-activation)). Writes the user's profile
+symlink set, HM environment, and dotfiles; PATH composes ahead of the system
+profile ([`10 §1.1`](10-system-prism.md#11-hm-activation)). It **never** touches
+`/shade/gen/system/` or any other user's line, and is **not** folded into the
+system generation ([`10 §5`](10-system-prism.md#5-per-user-prisms)). No pointer
+is involved — `current.pointer` names the system prism only.
+
+#### `shade home clean [--keep-last <K>] [--dry-run]`
+
+Prune the caller's own old user generations under `/shade/gen/users/<user>/`,
+then trigger `gc` — the per-user analog of `shade os clean` ([§2.1](#21-shade-os)),
+scoped to the caller's line and unprivileged.
+
+`TODO(open):` administrative operations across **all** user lines (e.g. root
+pruning every user's history), and behavior when a user is deleted (their
+`/shade/gen/users/<user>/` line's disposition) — unspecified.
+
 ### `shade install <prism>[#<output>]… [--dry-run]`
 
 Resolve the prism's **input closure** from its lock
