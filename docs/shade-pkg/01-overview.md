@@ -26,12 +26,12 @@ Doc set:
 |-----|----------|
 | [`01-overview.md`](01-overview.md) | goals, glossary, relation to Nix, OS-general vs shade-local boundary |
 | [`02-store.md`](02-store.md) | the `/shade/` hierarchy, store path format, input-addressing hash, generations, atomic activation, rollback, GC |
-| [`03-recipe-format.md`](03-recipe-format.md) | recipes are Shade; frontend-independent CDF field policy; `--unsafe` synthesis |
+| [`03-recipe-format.md`](03-recipe-format.md) | recipes are Shade; frontend-independent CDF field policy; default phases; explicit-required builder (no recipe-less synthesis) |
 | [`04-sources.md`](04-sources.md) | the **prism** (sole install unit), its four input types (crates.io, git, local, PsPackage), source derivations, the prism lock |
 | [`05-dependencies.md`](05-dependencies.md) | dependency resolution, Cargo metadata integration, derivation graph, build order |
 | [`06-build.md`](06-build.md) | isolated build model, phases, sandbox, determinism goals |
 | [`07-cli.md`](07-cli.md) | command surface and UX |
-| [`08-security.md`](08-security.md) | trust model, `--unsafe` risks, source authenticity, sandbox guarantees |
+| [`08-security.md`](08-security.md) | trust model, retired `--unsafe` (why the category is gone), source authenticity, sandbox guarantees |
 | [`09-bootstrap.md`](09-bootstrap.md) | the shadec bootstrap: seed evaluator, trust/pin, rebuild through shade |
 
 The split follows the seed proposal, plus 09 for the bootstrap: each doc owns
@@ -135,9 +135,11 @@ Terms are used consistently across the doc set.
   collection ([`02 §7`](02-store.md#7-garbage-collection)).
 - **Lockfile** — `prism.lock`, the pinned resolution of all sources and
   dependency versions for a recipe ([`04 §5`](04-sources.md#5-lockfile)).
-- **`--unsafe`** — build a git source that carries no in-repo recipe using a
-  synthesized derivation ([`03 §7`](03-recipe-format.md#7-unsafe-default-recipes),
-  risks in [`08 §3`](08-security.md#3-unsafe)).
+- **`--unsafe`** — *retired.* Formerly built a recipe-less git source via a
+  synthesized derivation. The prism-only model plus the explicit-required
+  builder decision removed it: shade synthesizes no build for a recipe-less
+  input ([`03 §7`](03-recipe-format.md#7-unsafe-default-recipes),
+  [`08 §3`](08-security.md#3-unsafe)).
 
 ---
 

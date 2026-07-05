@@ -138,7 +138,10 @@ is exhaustive; adding a key requires bumping `shade-drv`.
 | `env.<KEY>` | extra build env var, literal value | recipe build env ([`03 §5.3`](03-recipe-format.md#53-buildenv)) |
 | `phase.<i>` | build phase command line | recipe [`03 §5`](03-recipe-format.md#5-build) |
 | `output.<i>` | declared output entry | recipe [`03 §6`](03-recipe-format.md#6-outputs) |
-| `unsafe` | `1`, present only for `--unsafe` synthesized recipes | [`03 §7`](03-recipe-format.md#7-unsafe-default-recipes) |
+
+(The former `unsafe` key is **retired** — shade no longer synthesizes builds
+for recipe-less inputs, so it is never emitted and is not part of the CDF key
+set, [`03 §7`](03-recipe-format.md#7-unsafe-default-recipes).)
 
 Ordering of indexed lists: `source.*` in recipe order; `dep.*` sorted
 bytewise by store path; `env.*` sorted by key (rule 2 does this
@@ -354,13 +357,18 @@ The live set is the union of closures (§7.2) of:
    duration of a build — [`06 §5`](06-build.md#5-registration)).
 4. **Temporary environments:** every store path a live `shade -t` session
    ([`07 §2`](07-cli.md#shade-t)) depends on, held **only** for the session's
-   lifetime — a transient root registered when the temp env starts and dropped
-   when its process tree exits. This is what lets `shade -t` build into the
-   shared store without a generation: the paths are GC-live while the subshell
-   runs and reclaimable afterward. (Same enumeration caveat as the running-
-   process `TODO` below applies to how the root is tracked — `TODO(open):` the
-   exact mechanism, likely a `/shade/roots/` entry under a `tmp-<pid>` label
-   removed on exit; flagged.)
+   lifetime. The mechanism (resolved): when a temp env starts, `shade -t`
+   writes a GC root symlink **`/shade/roots/tmp-<pid>`** (`<pid>` = the temp
+   env's subshell/process-tree root PID) pointing at each selected output; the
+   root is a §2 `/shade/roots/` entry like any other, so `gc`'s existing
+   mark phase (rule 2) keeps the closure live with no special-casing. On exit
+   the session **removes its own `tmp-<pid>` root** — so no persistent root and
+   **no generation** ([`02 §5`](02-store.md#5-generations)) ever result from a
+   temp env. A stale `tmp-<pid>` left by a crashed session is a dangling entry
+   pruned like any other under `/shade/roots/` (rule 2): `TODO(open):` whether
+   `gc` additionally cross-checks `<pid>` liveness to reclaim a crashed
+   session's paths before the next natural prune — deferred, low-stakes since a
+   dangling symlink is already handled.
 
 `TODO(open):` roots for *running* processes. OROS has no enumeration of
 which store paths live processes have open/mapped. Because rule 1 keeps all

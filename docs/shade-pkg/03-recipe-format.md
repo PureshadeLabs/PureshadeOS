@@ -131,9 +131,9 @@ grouping, **no** shell — no pipes, no redirection, no `&&`, no globbing, no
 variable expansion beyond §5.2. A step needing shell logic ships a script in
 its source and invokes it.
 
-If phases are omitted, the default for the first source's type applies (§7
-default phase table — one place, shared with the deferred recipe-less-input
-builder). `lib.rustPackage` ([`shade 07 §4`](../shade/07-stdlib.md#4-deferred-lib))
+If phases are omitted, the default for the first source's type applies
+([`§7.1`](#71-default-phase-table) default phase table). `lib.rustPackage`
+([`shade 07 §4`](../shade/07-stdlib.md#4-deferred-lib))
 is the ergonomic way to get standard cargo phases without writing them.
 
 CDF mapping: each string verbatim as `phase.<i>` in list (execution) order,
@@ -198,55 +198,45 @@ v1 is **single-output** — one `outPath` per derivation; the `output.<i>`
 entries are FHS sub-paths *within* that one output, not Nix-style separate
 `$out`/`$dev`/`$doc` store paths ([`shade 05 §6`](../shade/05-derivation.md#6-multiple-outputs)).
 
-## 7. Default builder for a recipe-less input {#7-unsafe-default-recipes}
+## 7. Default phases; no builder for a recipe-less input {#7-unsafe-default-recipes}
 
-**No longer an install path.** Under the prism-only model
-([`04 §1`](04-sources.md#1-the-prism), [`07 §1`](07-cli.md#1-prism-reference-forms))
-there is no `shade install --unsafe <url>` — a git URL is either a **prism
-location** (its root holds `prism.shade`, whose `outputs` govern the build) or
-a **git input** of some prism (source bytes only). There is no "install this
-repo, no recipe" command to synthesize around.
+**No install path here, and no derivation synthesis.** Under the prism-only
+model ([`04 §1`](04-sources.md#1-the-prism),
+[`07 §1`](07-cli.md#1-prism-reference-forms)) there is no
+`shade install --unsafe <url>` — a git URL is either a **prism location** (its
+root holds `prism.shade`, whose `outputs` govern the build) or a **git input**
+of some prism (source bytes only).
 
-`TODO(open):` this section's **default-builder policy** survives only as a
-possible convenience for a *raw source input* — an input tree with no builder
-declared by the enclosing prism (flagged in [`07 §2`](07-cli.md#2-commands) and
-[`04 §3.2`](04-sources.md#32-git)). If that convenience lands, shade would
-**synthesize a derivation** for such an input from the default policy below
-(there being no author-written builder to evaluate). Leaning toward requiring
-an explicit builder instead; the policy is retained here as the reference spec
-should it be adopted. The synthesis rules, were it adopted:
+**Decision (resolved): a recipe-less input gets no default builder — a builder
+must be explicit.** A raw source input (a tree with no `prism.shade` and no
+builder declared by the enclosing prism) is **not** buildable: shade does
+**not** synthesize a derivation for it. Resolution **fails** with an error
+naming the input and demanding an explicit builder (the enclosing prism must
+provide `phases`/`outputs` for it, [`04 §3.2`](04-sources.md#32-git)). There is
+no `builder = default`, no probe-and-guess, no `unsafe=1` synthesized build.
+This closes the former "default-builder for a recipe-less input" open item:
+the answer is **explicit-required**, chosen so that nothing ever builds from a
+source without an author-written, reviewable build spec. (Consequently the CDF
+`unsafe` key and the git-URL synthesis rules of earlier drafts are **retired**;
+[`08 §3`](08-security.md#3-unsafe) records the security rationale.)
 
-1. `name` = last path segment of the URL, stripped of `.git`, normalized per
-   §2; `version` = `0.0.0+git.<12-hex-commit-prefix>`.
-2. One source of type `git` at the locked commit.
-3. No deps.
-4. `phases` = the **default phase table** below, selected by probing the
-   checkout root.
-5. Outputs inferred: for the cargo default, every `[[bin]]` target from
-   `cargo metadata` becomes a `bin` output.
+### 7.1 Default phase table {#71-default-phase-table}
 
-Default phase table (normative for omitted `phases` in real recipes too,
-§5.1):
+This is a distinct mechanism: the default `phases` for a **real recipe/prism
+that omits `phases`** (§5.1) — *not* a builder for recipe-less inputs. A prism
+still authors the derivation (name, version, outputs, inputs); it may simply
+leave `phases` unspecified and take the ecosystem default below.
 
-| Probe (checkout root) | Default phases |
+| Probe (source root) | Default phases |
 |---|---|
 | `Cargo.toml` present | `cargo build --release --offline --target $TARGET` then, per bin target `<t>`: `install -m755 target/$TARGET/release/<t> $out/bin/<t>` |
-| anything else | error — `--unsafe` refuses to guess beyond Cargo (`TODO(open):` probe table grows with supported ecosystems) |
+| anything else | error — the default table covers only Cargo; the recipe must specify `phases` explicitly (`TODO(open):` probe table grows with supported ecosystems) |
 
 (`Cargo.toml` is upstream Rust project metadata — TOML by Cargo's design, read
-here as *data*, not as a shade recipe. shade authors no TOML.)
-
-Were it adopted, a synthesized derivation would carry `unsafe=1` in its CDF
-([`02 §3.3`](02-store.md#33-hash-inputs)) so an unsafe build can never collide
-with — and thus never shadow or substitute for — a reviewed prism's build of
-the same source, and the generation manifest would mark the package `unsafe =
-true` so [`07`](07-cli.md) can display it and
-[`08 §3`](08-security.md#3-unsafe) risks stay visible post-install.
-
-Synthesis would weaken *review*, not *isolation*: the build still runs in the
-same sandbox as any other ([`06 §3`](06-build.md#3-sandbox)). What is lost is
-any human having reviewed what the build does within its permissions — see
-[`08 §3`](08-security.md#3-unsafe).
+here as *data*, not as a shade recipe. shade authors no TOML.) Note the
+"anything else → error" row is the same explicit-required stance as above,
+applied to omitted phases: shade never guesses a build beyond the one ecosystem
+whose conventions it encodes.
 
 ## 8. Recipe → derivation compilation {#8-recipe--derivation-compilation-summary}
 

@@ -70,11 +70,11 @@ generation with the selected package(s) added, `requested = true`
 
 There is no `--unsafe` install path: a prism carries its own build logic in
 its `outputs`, so there is no bare-repo-with-no-recipe case to synthesize
-around. (The old default-recipe synthesis, [`03 §7`](03-recipe-format.md#7-unsafe-default-recipes),
-survives only as a possible convenience for a *raw source input* inside a
-prism — `TODO(open):` whether an input may carry `builder = default` for a
-recipe-less source tree, or whether every buildable input must name a builder
-explicitly; flagged, leaning explicit.)
+around. A raw source input with no builder is **not** buildable — shade never
+synthesizes a `builder = default`; the enclosing prism must give every
+buildable input explicit `phases`/`outputs` or resolution fails
+([`03 §7`](03-recipe-format.md#7-unsafe-default-recipes),
+[`04 §3.2`](04-sources.md#32-git); decided **explicit-required**).
 
 ### `shade -t <prism>[#<output>]… [-- <cmd> [args…]]` {#shade-t}
 
@@ -93,20 +93,45 @@ available in an **ephemeral subshell** without installing them to any profile.
    to `PATH`, export the usual per-package env, and exec either a subshell
    (default) or `<cmd>` after `--`. The environment lives only for that
    process tree.
-4. On exit: nothing persists. **No generation is created**
-   ([`02 §5`](02-store.md#5-generations)), **no profile is touched**
-   ([`02 §5.1`](02-store.md#5-generations)), and **no GC root is held beyond
-   the session** — the built paths are live only for the duration of the
-   process (an in-flight-build/temp-env root, [`02 §7.1`](02-store.md#7-garbage-collection)),
-   so a later `gc` may reclaim them once no temp env references them. Running
-   `shade -t` twice for the same packages is cheap (store hit), never
-   cumulative.
+   The session's store paths are held live by a transient GC root
+   **`/shade/roots/tmp-<pid>`** ([`02 §7.1`](02-store.md#7-garbage-collection)),
+   written at start.
+4. On exit: nothing persists. The `tmp-<pid>` root is **removed**, so **no GC
+   root is held beyond the session**, **no generation is created**
+   ([`02 §5`](02-store.md#5-generations)), and **no profile is touched**
+   ([`02 §5.1`](02-store.md#5-generations)). A later `gc` may reclaim the paths
+   once no temp env references them. Running `shade -t` twice for the same
+   packages is cheap (store hit), never cumulative.
 
-Flags: `--pure` (start from an empty environment rather than inheriting the
-caller's, `TODO(open):` exact whitelist — `TERM`/`HOME`/locale likely kept),
-`--dry-run` (print what would be built, enter nothing). `shade -t` is
-read-only with respect to profiles and generations by construction; it is the
-only "install-like" command that creates no generation.
+**`--pure`.** Start from a **cleared** environment rather than inheriting the
+caller's — mirroring `nix-shell --pure` exactly. The environment is wiped and
+only a fixed **whitelist** of variables is passed through from the caller
+(then step 3's `PATH` and per-package exports are applied on top). The
+whitelist mirrors Nix's `keepVars` one-for-one, with shade-namespaced names
+substituted for the three Nix-internal ones:
+
+| Passed through | Notes |
+|---|---|
+| `HOME` | |
+| `XDG_RUNTIME_DIR` | |
+| `USER` | |
+| `LOGNAME` | |
+| `DISPLAY` | |
+| `PATH` | inherited value kept, then **overwritten** by step 3's temp-env `PATH` |
+| `TERM` | |
+| `TZ` | |
+| `PAGER` | |
+| `SHLVL` | |
+| `IN_SHADE_SHELL` | shade's `IN_NIX_SHELL` analog; set to mark an active temp env |
+| `SHADE_SHELL_PRESERVE_PROMPT` | `NIX_SHELL_PRESERVE_PROMPT` analog |
+| `SHADE_BUILD_SHELL` | `NIX_BUILD_SHELL` analog |
+
+Every other caller variable is dropped. Without `--pure`, the caller's full
+environment is inherited and only `PATH`/per-package vars are layered on.
+
+Other flags: `--dry-run` (print what would be built, enter nothing). `shade -t`
+is read-only with respect to profiles and generations by construction; it is
+the only "install-like" command that creates no generation.
 
 ### `shade remove <prism>…`
 

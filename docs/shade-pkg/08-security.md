@@ -1,6 +1,7 @@
 # shade — Trust Model and Security
 
-What shade trusts, what it verifies, what `--unsafe` actually costs, and what
+What shade trusts, what it verifies, why the `--unsafe` build category is
+retired (§3), and what
 the sandbox does and does not guarantee today. Written against v1 reality —
 where a guarantee depends on unbuilt kernel work, that is stated, not
 implied away.
@@ -58,38 +59,37 @@ because every path in it was built locally by the trusted store services.
 Any path that entered another way is an integrity breach, not a degraded
 state.
 
-## 3. `--unsafe` {#3-unsafe}
+## 3. `--unsafe` — retired {#3-unsafe}
 
-**Status: no longer a live install path.** The prism-only model
+**Status: retired, not just removed.** The prism-only model
 ([`04 §1`](04-sources.md#1-the-prism)) removed the "install a recipe-less git
-URL" command; there is no `shade install --unsafe <url>`. This section is
-retained as the trust analysis that would apply **if** the recipe-less-input
-default-builder convenience is ever adopted
-([`03 §7`](03-recipe-format.md#7-unsafe-default-recipes),
-`TODO(open):` leaning against). Everything below is conditional on that.
+URL" command, and the follow-on decision is **explicit-required**: shade never
+synthesizes a builder for a recipe-less input
+([`03 §7`](03-recipe-format.md#7-unsafe-default-recipes)). There is therefore
+**no unbuilt-from-unreviewed-instructions path at all** — no
+`shade install --unsafe <url>`, no `builder = default`, and no `unsafe=1` CDF
+key. The whole "unsafe build" category is gone by construction, which is the
+strongest possible resolution of this section's former concern.
 
-What it would be: building a raw source input with a synthesized derivation, no
-human-reviewed build instructions ([`03 §7`](03-recipe-format.md#7-unsafe-default-recipes)).
+The **security rationale** that drove the decision (kept for the record):
 
-What it does **not** weaken: the sandbox. Such builds run under the same
-profile as reviewed ones; `unsafe=1` in the CDF keeps their store paths
-disjoint from reviewed builds of the same source; the generation manifest
-carries the flag permanently ([`03 §7`](03-recipe-format.md#7-unsafe-default-recipes)).
+- **No review of build behavior.** A synthesized `cargo build` would execute
+  `build.rs` and proc-macros from the repo and its whole crate graph —
+  arbitrary code, confined only by §5. With the v1 fs-isolation gap such a
+  build would be effectively unconfined; **on-target that is handing the repo
+  author the system.** Making the build spec explicit forces this code path to
+  be authored and reviewable, not conjured from a URL.
+- **No provenance floor.** A `name` resolves through the prism registry
+  (something a person placed there, [`05 §2`](05-dependencies.md#2-shade-level-resolution));
+  a bare URL is just a URL — typosquatting and lookalike URLs were the obvious
+  vector, now closed since a URL alone builds nothing.
+- **Output trust.** Any built binary lands in `bin/` and, once installed, in
+  `$PATH` via the profile; there is no "marking helps audit but does not
+  contain" gap because there is no unreviewed build to mark in the first place.
 
-What it does weaken:
-
-- **No review of build behavior.** `cargo build` executes `build.rs` and
-  proc-macros from the repo and its whole crate graph — arbitrary code,
-  confined only by §5. With the v1 fs-isolation gap, on-target unsafe builds
-  are effectively unconfined; **until the kernel gap closes, `--unsafe` on
-  a production system is trusting the repo author with the system.** The
-  [`07`](07-cli.md) warning block must say this in so many words.
-- **No provenance floor.** A `name` install at least went through a recipe
-  someone placed in the registry; a URL is just a URL. Typosquatting and
-  lookalike URLs are the obvious vector.
-- **Output trust.** The resulting binaries land in `bin/` and, once
-  installed, in `$PATH` via the profile. Marking helps audit
-  (`shade info`, [`07`](07-cli.md)) but does not contain.
+`TODO(open):` none — the explicit-required decision closes this section. (The
+anchor and the `--unsafe` name are retained only so older cross-references
+still resolve.)
 
 ## 4. Source authenticity {#4-source-authenticity}
 

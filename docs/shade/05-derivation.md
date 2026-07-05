@@ -44,7 +44,7 @@ attribute; anything else → error):
 | `env` | attrset (string→string) | no | `env.<KEY>` — keys must match `[A-Z_][A-Z0-9_]*`, values string-coerced; setting a sandbox-fixed var ([`shade-pkg 06 §4`](../shade-pkg/06-build.md#4-environment)) is an error |
 | `phases` | list of strings | no | `phase.<i>` in list order (execution order) |
 | `outputs` | attrset `{ bin=[…]; lib=[…]; share=[…]; }` | yes | `output.<i>` in `bin`,`lib`,`share` order then list order ([`shade-pkg 03 §6`](../shade-pkg/03-recipe-format.md#6-outputs)) |
-| `unsafe` | bool | no | `unsafe=1` only when true ([`shade-pkg 03 §7`](../shade-pkg/03-recipe-format.md#7-unsafe-default-recipes)) |
+| ~~`unsafe`~~ | — | — | **retired** — no longer an accepted argument or CDF key; shade synthesizes no recipe-less builds ([`shade-pkg 03 §7`](../shade-pkg/03-recipe-format.md#7-unsafe-default-recipes)). Passing it is an unknown-argument error |
 | `description` | string | no | **not hashed** — carried on the value, dropped from CDF ([`shade-pkg 03 §2`](../shade-pkg/03-recipe-format.md#2-package)) |
 | `license` | string | no | **not hashed** — same |
 | `bootCritical` | bool | no | **not hashed** — carried to the generation manifest, not CDF ([`shade-pkg 03 §2`](../shade-pkg/03-recipe-format.md#2-package)) |

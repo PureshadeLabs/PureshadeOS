@@ -179,11 +179,12 @@ enclosing prism (via `$src<i>` / the input binding); the enclosing prism's
 `prism.shade`) is reached as a **remote prism reference**
 ([`07 §1`](07-cli.md#1-prism-reference-forms)), not as a git input — the two
 uses are distinct: a git *input* is source bytes, a git *prism* is an install
-unit. `TODO(open):` a raw git input with no builder in the enclosing prism
-(the old `--unsafe` synthesized-derivation case,
-[`03 §7`](03-recipe-format.md#7-unsafe-default-recipes)) — whether a `builder =
-default` convenience survives for recipe-less source trees; flagged in
-[`07 §2`](07-cli.md#2-commands) (install), leaning explicit-builder-required.
+unit. A raw git input with **no builder** declared by the enclosing prism is
+**not buildable** — the enclosing prism must give it explicit `phases`/`outputs`;
+shade does not synthesize a default builder for a recipe-less source tree, and
+resolution fails if none is provided ([`03 §7`](03-recipe-format.md#7-unsafe-default-recipes),
+decided **explicit-required**). A git input is thus always *just source bytes*;
+turning bytes into a build is always the enclosing prism's explicit job.
 
 ### 3.3 `local`
 
