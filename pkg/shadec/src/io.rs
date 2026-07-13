@@ -5,8 +5,10 @@
 //! has no such methods.
 //!
 //! Host implementation behind `std`; the OROS implementation (lythos-libstd
-//! VFS) lands with the `shade` binary wiring — TODO(open): blocked on argv
-//! plumbing through the ABI (see pkg/shade).
+//! VFS) lands with the `shade` binary wiring — TODO(open): blocked on an
+//! OROS `EvalIo` over lythos-libstd's VFS. (The former argv blocker is
+//! resolved — argv flows through SYS_EXEC and `lythos_rt::args`; see
+//! pkg/shade.)
 
 use alloc::string::String;
 use alloc::vec::Vec;

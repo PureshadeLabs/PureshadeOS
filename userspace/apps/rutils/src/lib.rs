@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use lythos_rt::{
     print, println,
     file_type, TaskInfo,
-    sys_close, sys_create, sys_exec, sys_mem_stat, sys_mkdir, sys_open,
+    sys_close, sys_create, sys_mem_stat, sys_mkdir, sys_open,
     sys_read_fd, sys_readdir, sys_serial_read, sys_setgid, sys_setuid,
     sys_stat, sys_task_kill, sys_task_list,
     sys_time, sys_unlink, sys_write_fd, sys_yield,
@@ -233,7 +233,7 @@ pub fn cmd_mkdir(path: &str) {
 
 /// Load and exec ELF at `path` (already absolute).
 pub fn cmd_exec(path: &str) {
-    cmd_exec_with_caps(path, &[])
+    cmd_exec_argv(path, &[], &[])
 }
 
 /// Like [`cmd_exec`], forwarding `caps` (handles in the caller's table) to
@@ -241,6 +241,12 @@ pub fn cmd_exec(path: &str) {
 /// allowlist of apps (e.g. rkilo) that need SYS_BRK heap growth beyond the
 /// 64 KiB bootstrap arena; generic children get no caps.
 pub fn cmd_exec_with_caps(path: &str, caps: &[u64]) {
+    cmd_exec_argv(path, &[], caps)
+}
+
+/// Like [`cmd_exec_with_caps`], passing command-line arguments: the child's
+/// argv is `[path, args...]` (argv[0] = program path, per convention).
+pub fn cmd_exec_argv(path: &str, args: &[&str], caps: &[u64]) {
     let stat = match sys_stat(path) {
         Some(s) => s,
         None    => { println!("exec: {}: not found", path); return; }
@@ -277,7 +283,10 @@ pub fn cmd_exec_with_caps(path: &str, caps: &[u64]) {
         return;
     }
 
-    match sys_exec(&elf, caps) {
+    let mut argv: Vec<&str> = Vec::with_capacity(args.len() + 1);
+    argv.push(path);
+    argv.extend_from_slice(args);
+    match lythos_rt::sys_exec_argv(&elf, caps, &argv) {
         Ok(tid) => {
             // Block until the child task exits so the shell doesn't race for
             // serial input while an interactive program (e.g. rkilo) is running.

@@ -811,3 +811,89 @@ pub static MOUNT_EINVAL_ELF: &[u8] = &[
     0x0F, 0x05,                                       // syscall
     0xEB, 0xFE,                                       // fail: jmp fail
 ];
+
+/// Ring-3 argv probe (p_vaddr=0x800000000).
+///
+/// Executed with argv = `["probe", "argv-ok!"]`. Reads the initial stack
+/// frame the kernel wrote (`write_initial_stack_frame`): requires argc == 2,
+/// argv[0] == "probe\0", argv[1] == "argv-ok!\0" — pointers followed and
+/// every byte compared, from genuine ring 3. On match it SYS_LOGs a report
+/// line (so the readback is visible on serial) and exits; on ANY mismatch it
+/// spins forever and the probe's reap deadline fails.
+///
+/// Assembly (entry at file offset 120 = VA 0x800000078):
+/// ```asm
+/// mov    rax, [rsp]          ; argc
+/// cmp    rax, 2
+/// jne    fail
+/// mov    rdi, [rsp+8]        ; argv[0]
+/// cmp    dword [rdi], 'prob'
+/// jne    fail
+/// cmp    word [rdi+4], 'e\0'
+/// jne    fail
+/// mov    rdi, [rsp+16]       ; argv[1]
+/// mov    rax, [rdi]
+/// movabs rbx, 'argv-ok!'
+/// cmp    rax, rbx
+/// jne    fail
+/// cmp    byte [rdi+8], 0
+/// jne    fail
+/// mov    eax, 11             ; SYS_LOG
+/// movabs rdi, 0x8000000D3    ; -> msg (in this segment, below)
+/// mov    esi, 57             ; msg len
+/// syscall
+/// mov    eax, 1              ; SYS_TASK_EXIT
+/// syscall
+/// fail: jmp fail
+/// db "[argv-echo] ring-3 argc=2 argv[0]=probe argv[1]=argv-ok!\n"
+/// ```
+pub static ARGV_ECHO_ELF: &[u8] = &[
+    // ── ELF header (64 bytes) ─────────────────────────────────────────────
+    0x7F, 0x45, 0x4C, 0x46, 0x02, 0x01, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x02, 0x00, 0x3E, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x78, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,  // e_entry: 0x800000078
+    0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // e_phoff: 64
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x40, 0x00, 0x38, 0x00, 0x01, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // ── PT_LOAD (56 bytes) ────────────────────────────────────────────────
+    0x01, 0x00, 0x00, 0x00,              // PT_LOAD
+    0x05, 0x00, 0x00, 0x00,              // PF_R | PF_X
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,  // p_vaddr: 0x800000000
+    0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
+    0x0C, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // p_filesz: 268
+    0x0C, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // p_memsz:  268
+    0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // ── Code (91 bytes at file offset 120) ────────────────────────────────
+    0x48, 0x8B, 0x04, 0x24,                           // mov  rax, [rsp]
+    0x48, 0x83, 0xF8, 0x02,                           // cmp  rax, 2
+    0x75, 0x4F,                                       // jne  fail (@89)
+    0x48, 0x8B, 0x7C, 0x24, 0x08,                    // mov  rdi, [rsp+8]
+    0x81, 0x3F, 0x70, 0x72, 0x6F, 0x62,              // cmp  dword [rdi], "prob"
+    0x75, 0x42,                                       // jne  fail
+    0x66, 0x81, 0x7F, 0x04, 0x65, 0x00,              // cmp  word [rdi+4], "e\0"
+    0x75, 0x3A,                                       // jne  fail
+    0x48, 0x8B, 0x7C, 0x24, 0x10,                    // mov  rdi, [rsp+16]
+    0x48, 0x8B, 0x07,                                 // mov  rax, [rdi]
+    0x48, 0xBB, 0x61, 0x72, 0x67, 0x76, 0x2D, 0x6F, 0x6B, 0x21, // movabs rbx, "argv-ok!"
+    0x48, 0x39, 0xD8,                                 // cmp  rax, rbx
+    0x75, 0x23,                                       // jne  fail
+    0x80, 0x7F, 0x08, 0x00,                           // cmp  byte [rdi+8], 0
+    0x75, 0x1D,                                       // jne  fail
+    0xB8, 0x0B, 0x00, 0x00, 0x00,                    // mov  eax, 11 (SYS_LOG)
+    0x48, 0xBF, 0xD3, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, // movabs rdi, 0x8000000D3
+    0xBE, 0x39, 0x00, 0x00, 0x00,                    // mov  esi, 57
+    0x0F, 0x05,                                       // syscall
+    0xB8, 0x01, 0x00, 0x00, 0x00,                    // mov  eax, 1 (SYS_TASK_EXIT)
+    0x0F, 0x05,                                       // syscall
+    0xEB, 0xFE,                                       // fail: jmp fail
+    // ── Message (57 bytes at file offset 211 = VA 0x8000000D3) ───────────
+    b'[', b'a', b'r', b'g', b'v', b'-', b'e', b'c', b'h', b'o', b']', b' ',
+    b'r', b'i', b'n', b'g', b'-', b'3', b' ',
+    b'a', b'r', b'g', b'c', b'=', b'2', b' ',
+    b'a', b'r', b'g', b'v', b'[', b'0', b']', b'=', b'p', b'r', b'o', b'b', b'e', b' ',
+    b'a', b'r', b'g', b'v', b'[', b'1', b']', b'=', b'a', b'r', b'g', b'v', b'-', b'o', b'k', b'!',
+    b'\n',
+];

@@ -919,6 +919,25 @@ pub extern "C" fn kernel_main() -> ! {
     } else {
         kprintln!("{VRB}[mount] probe skipped — no root volume{RST}");
     }
+
+    // ── Ring-3 argv probe (docs/spec/syscalls.md SYS_EXEC) ────────────────────
+    // exec with argv=["probe","argv-ok!"]; ARGV_ECHO_ELF reads the initial
+    // stack frame from ring 3, byte-compares both strings through the argv
+    // pointers, SYS_LOGs the readback ("[argv-echo] …" on serial), and exits
+    // only on an exact match — any mismatch spins and fails the reap deadline.
+    {
+        let argv_id = elf::exec(elf::ARGV_ECHO_ELF, &[], &["probe", "argv-ok!"])
+            .expect("argv probe: exec failed");
+        let deadline = apic::ticks() + 500;
+        while apic::ticks() < deadline && task::task_exists(argv_id) {
+            task::yield_task();
+        }
+        assert!(
+            !task::task_exists(argv_id),
+            "argv probe: ring-3 task did not read back its argv"
+        );
+        kprintln!("{TAG}[argv]{RST} ring-3 probe {OK}passed{RST} — argc/argv read back from the initial stack frame");
+    }
     } // end #[cfg(feature = "boot-tests")]
 
     // ── Locate lythd ELF ────────────────────────────────────────────────────

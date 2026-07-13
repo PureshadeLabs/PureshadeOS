@@ -41,6 +41,7 @@ extern crate alloc;
 
 mod allocator;         // GlobalAlloc — 64 KiB static arena + brk growth
 
+pub mod args;          // argv from the SYS_EXEC initial stack frame + entry!
 pub mod io;            // Read, Write, Stdout, BufWriter, Cursor, …
 pub mod sync;          // Mutex, RwLock, OnceLock, Arc
 pub mod time;          // Duration
@@ -291,11 +292,34 @@ pub fn sys_rollback() -> SysError {
 }
 
 /// Load and execute a static ELF64 binary. Returns the new `TaskId`.
+/// The task starts with an empty argv; see [`sys_exec_argv`].
 pub fn sys_exec(elf: &[u8], caps: &[u64]) -> Result<u64, SysError> {
+    sys_exec_argv(elf, caps, &[])
+}
+
+/// Load and execute a static ELF64 binary, passing `argv` to the new task.
+/// The task reads it back via [`args`](crate::args) (or lythos-libstd's
+/// `env::args()`); `argv[0]` is by convention the program name. The flat
+/// argv buffer must fit the kernel's 4000-byte cap
+/// (docs/spec/syscalls.md SYS_EXEC) or the call returns `Inval`.
+pub fn sys_exec_argv(elf: &[u8], caps: &[u64], argv: &[&str]) -> Result<u64, SysError> {
+    let (argv_ptr, argv_len, _buf);
+    if argv.is_empty() {
+        (argv_ptr, argv_len, _buf) = (0u64, 0u64, alloc::vec::Vec::new());
+    } else {
+        // Flat "arg0\0arg1\0…" buffer, the SYS_EXEC a5/a6 wire format.
+        let mut buf =
+            alloc::vec::Vec::with_capacity(argv.iter().map(|s| s.len() + 1).sum());
+        for a in argv {
+            buf.extend_from_slice(a.as_bytes());
+            buf.push(0);
+        }
+        (argv_ptr, argv_len, _buf) = (buf.as_ptr() as u64, buf.len() as u64, buf);
+    }
     let r = unsafe {
         syscall6(SYS_EXEC, elf.as_ptr() as u64, elf.len() as u64,
                  caps.as_ptr() as u64, caps.len() as u64,
-                 0, 0)
+                 argv_ptr, argv_len)
     };
     if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(r) }
 }

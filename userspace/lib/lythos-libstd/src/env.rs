@@ -34,16 +34,22 @@ pub fn var(_key: &str) -> Option<String> { None }
 /// Returns `"lythos"` — the platform identifier.
 pub fn consts() -> &'static str { "lythos" }
 
-/// Returns an empty vec — Lythos does not pass argv to tasks.
-pub fn args() -> Args { Args { idx: 0 } }
+/// The task's command-line arguments, `argv[0]` first.
+///
+/// Backed by the `SYS_EXEC` initial stack frame via `lythos_rt::args`.
+/// Non-empty only when the binary uses `lythos_rt::entry!` (which captures
+/// the frame) and the spawner passed argv (`sys_exec_argv`).
+pub fn args() -> Args { Args { inner: lythos_rt::args::args() } }
 
-pub struct Args { idx: usize }
+pub struct Args { inner: lythos_rt::args::Args }
 
 impl Iterator for Args {
     type Item = String;
-    fn next(&mut self) -> Option<Self::Item> { None }
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(String::from)
+    }
 }
 
 impl ExactSizeIterator for Args {
-    fn len(&self) -> usize { 0 }
+    fn len(&self) -> usize { self.inner.len() }
 }

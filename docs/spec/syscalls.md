@@ -309,6 +309,24 @@ Load an ELF binary from caller memory and spawn a new userspace task.
 kernel splits on null bytes to produce the argument list. `a6` must be ≤ 4000
 bytes; `a5` is ignored when `a6 == 0`.
 
+**Initial stack frame:** the new task's `rsp` is 16-byte aligned and points
+at a SysV-style frame the kernel wrote at the top of the task's stack
+(N = argc):
+
+| Offset from rsp | Contents |
+|---|---|
+| `+0` | argc |
+| `+8 … +8·N` | argv[0..N-1] — pointers into the string area |
+| `+8·(N+1)` | 0 (argv terminator) |
+| `+8·(N+2)` | 0 (envp terminator — Lythos has no environment) |
+| `+8·(N+3) … +8·(N+6)` | auxv: `AT_PAGESZ` (6), 4096, `AT_NULL` (0), 0 |
+| `+8·(N+7)` | string data: `"argv[0]\0argv[1]\0…"` |
+
+The strings live above the initial `rsp` and stay valid for the task's
+lifetime (the stack grows down). Runtime access: `lythos_rt::entry!`
+captures the frame; `lythos_rt::args` / lythos-libstd `env::args()` expose
+it. With no argv the frame is present with argc = 0.
+
 The kernel copies the ELF data, capability list, and argv from caller address
 space, parses and loads the ELF, allocates a user stack, writes the initial
 ABI frame, and spawns a kernel task. The new task's capability table is

@@ -380,9 +380,9 @@ fn dispatch_single(line: &str, cwd: &mut String, current_user: &mut String) {
         "exec" => match args.first() {
             Some(p) => {
                 let path = resolve(cwd, p);
-                rutils::cmd_exec_with_caps(&path, exec_caps(&path));
+                rutils::cmd_exec_argv(&path, &args[1..], exec_caps(&path));
             }
-            None => println!("usage: exec <path>"),
+            None => println!("usage: exec <path> [args…]"),
         },
 
         other => {
@@ -391,7 +391,7 @@ fn dispatch_single(line: &str, cwd: &mut String, current_user: &mut String) {
             for dir in &["/lth/bin", "/bin", "/sbin"] {
                 let path = alloc::format!("{}/{}", dir, other);
                 if lythos_rt::sys_stat(&path).map(|s| !s.is_dir()).unwrap_or(false) {
-                    rutils::cmd_exec_with_caps(&path, exec_caps(&path));
+                    rutils::cmd_exec_argv(&path, &args, exec_caps(&path));
                     found = true;
                     break;
                 }
