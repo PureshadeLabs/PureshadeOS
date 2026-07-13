@@ -114,7 +114,7 @@ impl Resolver for MockSubstituter {
     }
     fn resolve(&self, plan: &BuildPlan) -> std::io::Result<Option<PathBuf>> {
         self.consulted.fetch_add(1, Ordering::Relaxed);
-        Ok(self.hit.then(|| plan.paths.out_path.clone()))
+        Ok(self.hit.then(|| PathBuf::from(&plan.paths.out_path)))
     }
 }
 
@@ -195,8 +195,8 @@ fn same_recipe_same_path_twice() {
         assert_eq!(pa.paths.store_name, pb.paths.store_name);
         assert_eq!(pa.cdf, pb.cdf, "same recipe ⇒ same CDF bytes");
         // Only the root differs.
-        assert!(pa.paths.out_path.starts_with(&store_a));
-        assert!(pb.paths.out_path.starts_with(&store_b));
+        assert!(pa.paths.out_path.starts_with(store_a.to_str().unwrap()));
+        assert!(pb.paths.out_path.starts_with(store_b.to_str().unwrap()));
 
         // And realizing twice into the same root converges on one path.
         let builder = CountingBuilder::new(tmp.path(), b"x");
@@ -509,8 +509,8 @@ derivation {
         }
         assert_eq!(err.errno(), lythos_abi::errno::EINVAL);
         // Store untouched: no out path, no .drv.
-        assert!(!plan.paths.out_path.exists());
-        assert!(!plan.paths.drv_path.exists());
+        assert!(!Path::new(&plan.paths.out_path).exists());
+        assert!(!Path::new(&plan.paths.drv_path).exists());
         // Scratch (with any partial outputs) removed.
         assert!(!build.join(&plan.paths.store_name).exists());
     });
@@ -550,7 +550,7 @@ derivation {
             other => panic!("expected MissingOutput, got {other:?}"),
         }
         assert_eq!(err.errno(), lythos_abi::errno::ENOENT);
-        assert!(!plan.paths.out_path.exists());
+        assert!(!Path::new(&plan.paths.out_path).exists());
         assert!(!build.join(&plan.paths.store_name).exists());
     });
 }
@@ -584,7 +584,7 @@ derivation {
         exec.run(&recipe, Some("tc-1"), &io).unwrap_err();
         let scratch = build.join(&plan.paths.store_name);
         assert!(scratch.join("partial-artifact").exists(), "scratch kept with its contents");
-        assert!(!plan.paths.out_path.exists(), "store still untouched");
+        assert!(!Path::new(&plan.paths.out_path).exists(), "store still untouched");
     });
 }
 
@@ -1058,7 +1058,7 @@ derivation {
             panic!("expected output-confinement rejection, got {err}");
         };
         assert!(detail.contains("contraband"), "names the undeclared tree: {detail}");
-        assert!(!plan.paths.out_path.exists(), "store untouched");
-        assert!(!plan.paths.drv_path.exists());
+        assert!(!Path::new(&plan.paths.out_path).exists(), "store untouched");
+        assert!(!Path::new(&plan.paths.drv_path).exists());
     });
 }

@@ -37,6 +37,12 @@ use shadec::value::Value;
 
 pub use shade_store::StorePaths;
 
+/// shade-store's seam API is `&str`-pathed (`no_std` — no `std::path`); this
+/// crate's host-facing API stays `Path`-based and converts at the boundary.
+pub(crate) fn path_str(p: &Path) -> &str {
+    p.to_str().expect("store paths must be UTF-8")
+}
+
 mod executor;
 pub use executor::{
     BuildEnv, BuildSandbox, DbRegistrar, ExecOutcome, Executor, NoopRegistrar, PermissiveSandbox,
@@ -102,11 +108,9 @@ impl Resolver for LocalStore {
     fn resolve(&self, plan: &BuildPlan) -> io::Result<Option<PathBuf>> {
         // Immutable store: "exists ⇒ complete" (shade-store realize contract),
         // so existence alone is a hit.
-        Ok(plan
-            .paths
-            .out_path
+        Ok(Path::new(&plan.paths.out_path)
             .exists()
-            .then(|| plan.paths.out_path.clone()))
+            .then(|| PathBuf::from(&plan.paths.out_path)))
     }
 }
 
@@ -281,9 +285,21 @@ impl BuildError {
             BuildError::Store(shade_store::StoreError::DrvMismatch(_)) => e::EEXIST,
             BuildError::Store(shade_store::StoreError::Cdf(_))
             | BuildError::Store(shade_store::StoreError::OutputPathNotElidable(_)) => e::EINVAL,
-            BuildError::Store(shade_store::StoreError::Io(err))
-            | BuildError::Io(err)
-            | BuildError::Register(err) => io_errno(err),
+            // Seam errors already speak the errno vocabulary (shade-store's
+            // FsError mirrors the vfs-core/errno fold).
+            BuildError::Store(shade_store::StoreError::Fs { err, .. }) => match err {
+                shade_store::FsError::NotFound => e::ENOENT,
+                shade_store::FsError::Exists => e::EEXIST,
+                shade_store::FsError::NotDir => e::ENOTDIR,
+                shade_store::FsError::IsDir => e::EISDIR,
+                shade_store::FsError::NotEmpty => e::ENOTEMPTY,
+                shade_store::FsError::NoSpace => e::ENOSPC,
+                shade_store::FsError::Invalid => e::EINVAL,
+                shade_store::FsError::ReadOnly => e::EROFS,
+                shade_store::FsError::Device => e::EIO,
+                shade_store::FsError::Unsupported => e::ENOSYS,
+            },
+            BuildError::Io(err) | BuildError::Register(err) => io_errno(err),
         }
     }
 }
@@ -387,7 +403,7 @@ pub fn plan_value(
     let name = ev.force_attr_string(m, "name", &pos)?.s.to_string();
     let version = ev.force_attr_string(m, "version", &pos)?.s.to_string();
 
-    let paths = shade_store::store_paths_at(store_root, &name, &version, &cdf)?;
+    let paths = shade_store::store_paths_at(path_str(store_root), &name, &version, &cdf)?;
     let root = BuildPlan { name, version, cdf, paths };
     let closure = ev
         .drvs
@@ -426,16 +442,18 @@ pub fn build(
         }
     }
 
-    // Miss: build, then realize into the store (atomic / idempotent).
+    // Miss: build, then realize into the store (atomic / idempotent),
+    // through the host filesystem backend.
     let staged = builder.build(&plan).map_err(BuildError::Io)?;
     let realized = shade_store::realize_cdf(
-        store_root,
+        &mut shade_store::HostFs,
+        path_str(store_root),
         &plan.name,
         &plan.version,
         &plan.cdf,
-        &staged.root,
+        path_str(&staged.root),
     )?;
-    let result = Built::Realized { out_path: realized.paths.out_path.clone() };
+    let result = Built::Realized { out_path: PathBuf::from(&realized.paths.out_path) };
     Ok(Outcome { plan, result })
 }
 

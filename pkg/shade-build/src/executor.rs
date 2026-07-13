@@ -406,7 +406,8 @@ impl<'a> Executor<'a> {
         };
         let name = required("name")?;
         let version = required("version")?;
-        let paths = shade_store::store_paths_at(&self.store_root, &name, &version, cdf)?;
+        let paths =
+            shade_store::store_paths_at(crate::path_str(&self.store_root), &name, &version, cdf)?;
         let plan = BuildPlan { name, version, cdf: cdf.to_vec(), paths };
         Ok(Node {
             drv_key: drv_key.to_string(),
@@ -514,16 +515,17 @@ impl<'a> Executor<'a> {
         })?;
 
         let realized = shade_store::realize_cdf(
-            &self.store_root,
+            &mut shade_store::HostFs,
+            crate::path_str(&self.store_root),
             &node.plan.name,
             &node.plan.version,
             &node.plan.cdf,
-            staging,
+            crate::path_str(staging),
         )?;
 
         self.registrar
             .register(&Registration {
-                out_path: &realized.paths.out_path,
+                out_path: Path::new(&realized.paths.out_path),
                 store_name,
                 digest: &realized.paths.digest,
                 cdf_hash: &shade_cdf::blake3_hex(&node.plan.cdf),
@@ -531,7 +533,7 @@ impl<'a> Executor<'a> {
             })
             .map_err(BuildError::Register)?;
 
-        Ok(Built::Realized { out_path: realized.paths.out_path })
+        Ok(Built::Realized { out_path: PathBuf::from(realized.paths.out_path) })
     }
 }
 

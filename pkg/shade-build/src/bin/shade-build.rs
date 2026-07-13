@@ -127,7 +127,7 @@ fn run(opts: Opts) -> ExitCode {
         return match shade_build::plan(&recipe, &opts.store_root, opts.toolchain.as_deref(), &io)
         {
             Ok(p) => {
-                println!("{}", p.paths.out_path.display());
+                println!("{}", p.paths.out_path);
                 ExitCode::SUCCESS
             }
             Err(e) => {

@@ -39,7 +39,7 @@ default-members = [
     "fs/rfs2", # no_std+alloc lib, host-compilable; tests run on host
     "fs/vfs-core", # VFS mount table + realize guard; no_std+alloc, host tests (mount-syscall plan)
     "pkg/shade-cdf", # the one shared CDF canonicalizer (shade 08 §1); no_std+alloc, host tests
-    "pkg/shade-store", # input-addressed store realization (02 §2-3); std host crate, host tests
+    "pkg/shade-store", # input-addressed store realization (02 §2-3); no_std+alloc over the StoreFs seam (features: std → HostFs, oros → OrosFs), host tests
     "pkg/shade-store-db", # store db + GC roots + mark-and-sweep gc (02 §7); std host crate, host tests
     "pkg/shade-build", # shade build core: eval → digest → resolve → realize; std host crate, host tests
     "pkg/shade-gen",  # generations + profiles + activation (02 §5-6, 10); std host crate, host tests

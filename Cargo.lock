@@ -272,6 +272,8 @@ dependencies = [
 name = "shade-store"
 version = "0.1.0"
 dependencies = [
+ "lythos-abi",
+ "lythos-syscall",
  "shade-cdf",
 ]
 

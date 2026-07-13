@@ -2,7 +2,18 @@
 name = "shade-store"
 version = "0.1.0"
 edition = "2024"
-description = "Input-addressed store realization (docs/shade-pkg/02-store.md §2-3): digest, path construction, idempotent atomic realize. Track 1 — no build dispatch."
+description = "Input-addressed store realization (docs/shade-pkg/02-store.md §2-3): digest, path construction, idempotent atomic realize over an injected StoreFs backend. Track 1 — no build dispatch."
 
 [dependencies]
 shade-cdf = { path = "../shade-cdf" }
+# oros backend: raw syscall stubs + errno table (x86_64 target only).
+lythos-abi = { path = "../../abi/lythos-abi", optional = true }
+lythos-syscall = { path = "../../abi/lythos-syscall", optional = true }
+
+[features]
+# Core is no_std+alloc; realization I/O goes through the StoreFs seam.
+# `std` adds the HostFs backend (host suite, host tooling); `oros` the
+# on-target backend over the Lythos ABI.
+default = ["std"]
+std = []
+oros = ["dep:lythos-abi", "dep:lythos-syscall"]

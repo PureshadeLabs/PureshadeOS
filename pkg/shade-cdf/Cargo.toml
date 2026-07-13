@@ -7,5 +7,11 @@ description = "Canonical Derivation Form: the one shared canonicalizer (docs/sha
 [dependencies]
 blake3 = { version = "1", default-features = false }
 
+# Bare-metal (the x86_64-oros userspace target has os = "none"): force blake3's
+# pure-Rust implementation — its build.rs otherwise assembles x86_64 .S files
+# with the host cc, which breaks cross builds and links unix-ABI objects.
+[target.'cfg(target_os = "none")'.dependencies]
+blake3 = { version = "1", default-features = false, features = ["pure"] }
+
 [features]
 default = []
