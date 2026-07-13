@@ -171,8 +171,12 @@ produces a wrong store path.
 A string→string map of extra environment variables, set after the sandbox's
 scrubbed base environment ([`06 §4`](06-build.md#4-environment)). In Shade,
 the `env` attrset argument ([`shade 05 §2`](../shade/05-derivation.md#2-arguments)).
-Values may use §5.2 variables. CDF mapping: `env.<KEY>=<value>` per entry,
-unexpanded, sorted by key. Keys must match `[A-Z_][A-Z0-9_]*`. Setting a
+Values may use §5.2 variables. CDF mapping: `env.<key>=<value>` per entry,
+unexpanded, sorted by key, where `<key>` is the variable name folded to
+lowercase — CDF keys are lowercase-only
+([`02 §3.2`](02-store.md#32-canonical-derivation-form-cdf) rule 2); the fold
+is lossless (names contain no lowercase) and the builder restores the
+uppercase name. Recipe-side, keys must match `[A-Z_][A-Z0-9_]*`. Setting a
 variable the sandbox defines as fixed (`PATH`, `HOME`, `SOURCE_DATE_EPOCH`,
 … — the fixed list is [`06 §4`](06-build.md#4-environment)) is an error.
 

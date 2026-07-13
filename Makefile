@@ -2,11 +2,19 @@ ROOTFS_BIN := rootfs/lth/bin
 
 # Output dir: workspace-root target/ (cargo always writes here regardless of cwd)
 OROS_OUT := target/x86_64-oros/release
+# release-closed profile writes to a separate target subdir (see Cargo.toml).
+OROS_OUT_CLOSED := target/x86_64-oros/release-closed
 
 KERNEL_DEBUG   := target/x86_64-lythos/debug/lythos
 KERNEL_RELEASE := target/x86_64-lythos/release/lythos
+KERNEL_CLOSED  := target/x86_64-lythos/release-closed/lythos
 
 QEMU := qemu-system-x86_64
+# Guest RAM. QEMU's 128 MiB default is too small for Limine 11's high-memory
+# allocator to load the ~8 MB debug kernel (PANIC: High memory allocator OOM).
+# Must stay ≤ 1 GiB: the kernel boot-loops above that (early-boot access
+# outside the 1 GiB identity map — docs/plans/followup-code-tasks.md item 11).
+QEMU_MEM ?= 512M
 
 # ── Limine / OVMF ─────────────────────────────────────────────────────────────
 # Auto-detected for common setups; override by setting in the environment.
@@ -43,7 +51,7 @@ OVMF_VARS  ?= $(shell \
     [ -f "$$p" ] && echo "$$p" && break; \
   done)
 
-.PHONY: all oros kernel run run-release run-gui debug run-limine image run-iso-bios run-iso-uefi clean
+.PHONY: all oros kernel run run-release run-gui debug run-limine image run-iso-bios run-iso-uefi clean oros-closed kernel-closed closed
 
 all: oros kernel
 
@@ -68,6 +76,27 @@ oros:
 	cp $(OROS_OUT)/shade      $(ROOTFS_BIN)/shade
 	cp $(OROS_OUT)/lythd     rootfs/lth/system/init
 
+## Closed-source build (obfuscated). Uses the release-closed profile (Cargo.toml)
+## plus rustflags that a profile cannot set: strip absolute source paths, drop
+## panic file/line detail, and drop Debug format strings. -Z flags are nightly;
+## we already build with +nightly. Applied to both oros-closed and kernel-closed.
+CLOSED_RUSTFLAGS := --remap-path-prefix $(CURDIR)= \
+                    -Zlocation-detail=none \
+                    -Zfmt-debug=none
+
+oros-closed:
+	RUSTFLAGS="$(CLOSED_RUSTFLAGS)" \
+	  cargo +nightly build --profile release-closed -q $(OROS_FLAGS) $(OROS_PKGS)
+	mkdir -p $(ROOTFS_BIN)
+	cp $(OROS_OUT_CLOSED)/lythd     $(ROOTFS_BIN)/lythd
+	cp $(OROS_OUT_CLOSED)/lythdist  $(ROOTFS_BIN)/lythdist
+	cp $(OROS_OUT_CLOSED)/lythmsg   $(ROOTFS_BIN)/lythmsg
+	cp $(OROS_OUT_CLOSED)/lysh      $(ROOTFS_BIN)/lysh
+	cp $(OROS_OUT_CLOSED)/rutils    $(ROOTFS_BIN)/rutils
+	cp $(OROS_OUT_CLOSED)/rkilo     $(ROOTFS_BIN)/rkilo
+	cp $(OROS_OUT_CLOSED)/shade     $(ROOTFS_BIN)/shade
+	cp $(OROS_OUT_CLOSED)/lythd     rootfs/lth/system/init
+
 KERNEL_FLAGS := --target targets/x86_64-lythos.json \
                 -Z build-std=core,alloc,compiler_builtins \
                 -Z build-std-features=compiler-builtins-mem \
@@ -84,6 +113,14 @@ kernel-tests:
 
 kernel-release:
 	cargo +nightly build --release -q $(KERNEL_FLAGS) -p lythos
+
+## Kernel, obfuscated closed-source build (release-closed profile + rustflags).
+kernel-closed:
+	RUSTFLAGS="$(CLOSED_RUSTFLAGS)" \
+	  cargo +nightly build --profile release-closed -q $(KERNEL_FLAGS) -p lythos
+
+## Full obfuscated build: userspace → rootfs/lth/bin/, then kernel.
+closed: oros-closed kernel-closed
 
 ## Build a minimal UEFI boot image containing Limine + kernel + config.
 ## Requires: mtools (mformat + mcopy), Limine EFI binary, OVMF firmware.
@@ -131,6 +168,7 @@ run-gui: kernel limine.img
 	@chmod 644 /tmp/lythos-ovmf-vars.fd
 	$(QEMU) \
 	    -machine q35,usb=on \
+	    -m $(QEMU_MEM) \
 	    -drive if=pflash,format=raw,unit=0,file=$(OVMF_CODE),readonly=on \
 	    -drive if=pflash,format=raw,unit=1,file=/tmp/lythos-ovmf-vars.fd \
 	    -drive file=limine.img,format=raw,if=none,id=esp \
@@ -201,7 +239,7 @@ $(ISO): kernel-release limine.conf $(LIMINE_BIN_DIR)/limine
 
 ## Boot the ISO under SeaBIOS (legacy BIOS path).
 run-iso-bios: $(ISO)
-	$(QEMU) -machine q35 -cdrom $(ISO) \
+	$(QEMU) -machine q35 -m $(QEMU_MEM) -cdrom $(ISO) \
 	    -drive file=disk.img,format=raw,if=none,id=hd0 \
 	    -device virtio-blk-pci,drive=hd0 \
 	    -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
@@ -210,7 +248,7 @@ run-iso-bios: $(ISO)
 ## Boot the ISO under OVMF (UEFI path).
 run-iso-uefi: $(ISO)
 	cp $(OVMF_VARS) /tmp/pureshade-ovmf-vars.fd && chmod 644 /tmp/pureshade-ovmf-vars.fd
-	$(QEMU) -machine q35 \
+	$(QEMU) -machine q35 -m $(QEMU_MEM) \
 	    -drive if=pflash,format=raw,unit=0,file=$(OVMF_CODE),readonly=on \
 	    -drive if=pflash,format=raw,unit=1,file=/tmp/pureshade-ovmf-vars.fd \
 	    -cdrom $(ISO) \

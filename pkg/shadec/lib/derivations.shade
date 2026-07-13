@@ -1,0 +1,26 @@
+# Derivation and source helpers — MVP subset (07 §3.5-3.6):
+# isDerivation, placeholder, cleanSource.
+let
+  strings = import ./strings.shade;
+in
+{
+  # x.type or null == "derivation" (04 §6)
+  isDerivation = x: x.type or null == "derivation";
+
+  # the literal build sigil, expanded by shade at build time — never by
+  # shadec (05 §3.1)
+  placeholder = output: "$" + output;
+
+  # ingest with a default filter dropping .git/, target/, editor droppings
+  # (07 §3.6); the ingested hash covers only what survives (04 §4.2)
+  cleanSource = src:
+    builtins.filterSource
+      (path: type:
+        let base = baseNameOf path; in
+        !(
+          (type == "directory" && (base == ".git" || base == "target" || base == ".direnv"))
+          || strings.hasSuffix "~" base
+          || strings.hasSuffix ".swp" base
+        ))
+      src;
+}

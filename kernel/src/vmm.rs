@@ -129,6 +129,20 @@ struct PageTable([PageTableEntry; 512]);
 
 // ── VMM state ─────────────────────────────────────────────────────────────────
 
+/// One byte past the highest physical address covered by the kernel's
+/// identity map (init step 3) — and equally by the HHDM alias (step 3.5),
+/// which shares the *same* PD, so neither window reaches further. Physical
+/// frames at or above this limit are NOT reachable through any kernel direct
+/// map; touching them without an explicit `map_page` is a page fault. The
+/// PMM bitmap spans 4 GiB, so with enough guest RAM `alloc_frame` CAN return
+/// such frames — direct-map consumers (e.g. `vfs::RamDisk`) must validate
+/// against this limit before the first access.
+pub const IDENTITY_MAP_LIMIT: u64 = 1 << 30; // 1 GiB
+
+// The identity-map PD holds exactly 512 × 2 MiB entries; the limit and the
+// init loop must agree or the constant silently lies.
+const _: () = assert!(IDENTITY_MAP_LIMIT / (2 * 1024 * 1024) == 512);
+
 /// Physical address of the active PML4.
 static mut PML4_PHYS: u64 = 0;
 
@@ -500,9 +514,10 @@ pub fn init(kernel_phys_base: u64, kernel_virt_base: u64, kernel_phys_end: u64, 
         let p3 = table_ptr(p3_phys);
         unsafe { (*p3).0[0] = PageTableEntry::table(p2_phys); }
 
-        // PD[0..512]: 2 MiB huge pages, physical = i × 2 MiB
+        // PD[0..512]: 2 MiB huge pages, physical = i × 2 MiB — exactly
+        // IDENTITY_MAP_LIMIT bytes (const-asserted above).
         let p2 = table_ptr(p2_phys);
-        for i in 0..512_usize {
+        for i in 0..(IDENTITY_MAP_LIMIT / (2 * 1024 * 1024)) as usize {
             let base = (i as u64) * 2 * 1024 * 1024;
             unsafe { (*p2).0[i] = PageTableEntry(base | 0x83); }
         }

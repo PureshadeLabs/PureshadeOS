@@ -25,16 +25,28 @@ fn print_usage() {
     println!("  shade <command> [args]");
     println!();
     println!("COMMANDS:");
+    println!("  build   <recipe>   evaluate + build into the store (shade-build)");
     println!("  install <pkg>      install a package from the store");
     println!("  remove  <pkg>      remove an installed package");
     println!("  update             fetch and apply system updates");
     println!("  list               list installed packages");
     println!("  search  <query>    search available packages");
+    println!("  eval    <expr>     evaluate a Shade expression (shadec)");
+    println!("  cdf     <expr>     dump canonical CDF bytes (shadec)");
     println!("  snapshot           create a rollback snapshot");
     println!("  rollback           revert to the previous snapshot");
     println!("  status             show pending rollback state");
     println!();
     println!("This is a stub — commands are not yet implemented.");
+    // TODO(open): `shade eval` / `shade cdf` / `shade build` dispatch into
+    // the shadec/shade-build libraries is blocked on two gaps:
+    //   1. argv is not plumbed through the Lythos ABI (noted above) — the
+    //      subcommand cannot even be selected yet;
+    //   2. an OROS EvalIo implementation over lythos-libstd's VFS.
+    // Until then the host `shadec` binary (pkg/shadec) is the evaluator
+    // vehicle and the host `shade-build` binary (pkg/shade-build) is the
+    // build-executor vehicle, per the seed model in shade-pkg 09 §2; see
+    // docs/shade/build-executor.md.
 }
 
 #[panic_handler]

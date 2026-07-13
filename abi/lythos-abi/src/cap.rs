@@ -16,7 +16,7 @@
 //!
 //! Cross-check against `kernel/src/cap.rs`:
 //! - CapRights bits: READ=1, WRITE=2, GRANT=4, REVOKE=8, ALL=15 — match ✓
-//! - CapKind variants: Memory, Ipc, Device, Rollback — match ✓
+//! - CapKind variants: Memory, Ipc, Device, Rollback, Filesystem — match ✓
 //! - CapHandle inner type: u64 — match ✓
 
 // ── Rights bits ───────────────────────────────────────────────────────────────
@@ -55,6 +55,9 @@ pub enum CapKind {
     Device,
     /// Privileged kernel-rollback trigger.  Granted only to `lythd` at boot.
     Rollback,
+    /// Filesystem mount authority.  Grants `SYS_MOUNT` (WRITE right required).
+    /// Granted only to `lythd` at boot; delegable via `SYS_CAP_GRANT`.
+    Filesystem,
 }
 
 // ── CapHandle ─────────────────────────────────────────────────────────────────
@@ -92,8 +95,10 @@ impl CapHandle {
 // The kernel pre-creates these in lythd's capability table.
 
 /// Boot handle 0: Memory capability with ALL rights over the full PMM.
-pub const BOOT_CAP_MEMORY:   CapHandle = CapHandle(0);
+pub const BOOT_CAP_MEMORY:     CapHandle = CapHandle(0);
 /// Boot handle 1: Rollback capability with ALL rights.
-pub const BOOT_CAP_ROLLBACK: CapHandle = CapHandle(1);
+pub const BOOT_CAP_ROLLBACK:   CapHandle = CapHandle(1);
 /// Boot handle 2: IPC endpoint (BootInfo pre-queued) with ALL rights.
-pub const BOOT_CAP_IPC:      CapHandle = CapHandle(2);
+pub const BOOT_CAP_IPC:        CapHandle = CapHandle(2);
+/// Boot handle 3: Filesystem (mount authority) capability with ALL rights.
+pub const BOOT_CAP_FILESYSTEM: CapHandle = CapHandle(3);

@@ -47,13 +47,14 @@ The full syscall table (numbers 0–55), error sentinel values, register convent
 
 ## lythd boot protocol
 
-lythd (PID-1) receives three capability handles at fixed slots from `kmain`:
+lythd (PID-1) receives four capability handles at fixed slots from `kmain`:
 
 | Handle | Kind | Rights | Contents |
 |--------|------|--------|----------|
 | 0 | `Memory` | ALL | All free physical frames at boot |
 | 1 | `Rollback` | ALL | `SYS_ROLLBACK` gate — only lythd holds this |
 | 2 | `Ipc` | ALL | Boot IPC endpoint with one pre-queued `BootInfo` message |
+| 3 | `Filesystem` | ALL | `SYS_MOUNT` gate — mount authority, delegable |
 
 **First action must be** `SYS_IPC_RECV` on handle 2 to consume the `BootInfo` message (64 bytes). The `BootInfo` layout is in `docs/spec/ipc.md` and `abi/lythos-abi/src/structs.rs`.
 

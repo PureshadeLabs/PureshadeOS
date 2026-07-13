@@ -1,0 +1,23 @@
+[package]
+name = "shade-gen"
+version = "0.1.0"
+edition = "2024"
+description = "shade generations, per-user profiles, and activation (docs/shade-pkg/02-store.md §5-6, 10-system-prism.md, docs/shade/generations-profiles.md). Generation lines under /shade/gen/, atomic symlink-flip switch + rollback, boot activation of a pre-built system generation. std host crate."
+
+[lib]
+name = "shade_gen"
+path = "src/lib.rs"
+
+[dependencies]
+shadec = { path = "../shadec" }
+shade-build = { path = "../shade-build" }
+shade-store = { path = "../shade-store" }
+shade-store-db = { path = "../shade-store-db" }
+
+[[bin]]
+# Host seed vehicle for `shade os rebuild` / `shade home rebuild` /
+# `shade generations` / `shade rollback` (shade-pkg 09 §2), alongside the host
+# `shade-build` and `shade-gc` binaries. The OROS `shade` binary stays a
+# no_std stub until argv + an OROS EvalIo exist (pkg/shade/src/main.rs).
+name = "shade-gen"
+path = "src/bin/shade-gen.rs"

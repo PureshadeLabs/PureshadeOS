@@ -743,6 +743,15 @@ pub fn sys_mkdir(path: &str) -> Result<(), ()> {
     if (r as i64) < 0 { Err(()) } else { Ok(()) }
 }
 
+/// Mount a filesystem backend at `at` (SYS_MOUNT). Requires a Filesystem
+/// capability with WRITE right in the caller's table. `source` selects the
+/// backend (`MOUNT_SRC_RFS2_RAM`); `flags` may set `MOUNT_STORE` for
+/// read-only-after-realize store semantics. Returns the raw errno on failure.
+pub fn sys_mount(at: &str, source: u64, flags: u64) -> Result<(), i64> {
+    let r = unsafe { syscall4(SYS_MOUNT, at.as_ptr() as u64, at.len() as u64, source, flags) };
+    if (r as i64) < 0 { Err(r as i64) } else { Ok(()) }
+}
+
 /// Non-blocking receive from an IPC endpoint.
 ///
 /// Returns `Ok(bytes)` if a message was ready, or `Err(Again)` if the ring is empty.

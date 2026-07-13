@@ -1,0 +1,17 @@
+# lib.trivial — MVP subset (07 §3.7): id, const, flip, importJSON,
+# importTOML. `pipe` is tier 2.
+{
+  id = x: x;
+  const = a: b: a;
+  flip = f: a: b: f b a;
+
+  # TODO(open): 07 §3.7 marks importJSON/importTOML [MVP], but they are
+  # defined as `fromJSON (readFile p)` / `fromTOML (readFile p)` and both
+  # fromJSON and fromTOML are tier-2 builtins (07 §2.6) — the MVP marking
+  # contradicts its own dependencies. Stubbed with a clear throw until the
+  # tier-2 builtins land; never a silent wrong result.
+  importJSON = path:
+    throw "TODO(open): lib.importJSON requires builtins.fromJSON (tier 2, 07 §2.6)";
+  importTOML = path:
+    throw "TODO(open): lib.importTOML requires builtins.fromTOML (tier 2, 07 §2.6)";
+}

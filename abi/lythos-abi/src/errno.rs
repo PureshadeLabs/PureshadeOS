@@ -1,8 +1,8 @@
 //! Error code sentinels — transcribed from `docs/spec/syscalls.md` error table.
 //!
 //! All values are returned in RAX as two's-complement u64 (negative i64 reinterpreted).
-//! Twelve codes are defined: seven generic capability/syscall codes (-1..-7) plus
-//! five VFS-specific codes (-8..-12) returned by filesystem syscalls.
+//! Fourteen codes are defined: seven generic capability/syscall codes (-1..-7) plus
+//! seven VFS-specific codes (-8..-14) returned by filesystem syscalls.
 
 /// Unknown or unassigned syscall number.
 pub const ENOSYS:  u64 = (-1i64) as u64;   // 0xFFFF_FFFF_FFFF_FFFF
@@ -43,9 +43,17 @@ pub const EEXIST:  u64 = (-11i64) as u64;  // 0xFFFF_FFFF_FFFF_FFF5
 /// No space left on device (VFS: SYS_CREATE, SYS_MKDIR).
 pub const ENOSPC:  u64 = (-12i64) as u64;  // 0xFFFF_FFFF_FFFF_FFF4
 
+/// A mount already exists at the given mount point (SYS_MOUNT).
+pub const EMOUNTED: u64 = (-13i64) as u64; // 0xFFFF_FFFF_FFFF_FFF3
+
+/// Write to a read-only / sealed path (read-only-after-realize on the
+/// /shade/store mount: SYS_WRITE, SYS_CREATE, SYS_MKDIR, SYS_UNLINK,
+/// SYS_RENAME).
+pub const EROFS:   u64 = (-14i64) as u64;  // 0xFFFF_FFFF_FFFF_FFF2
+
 /// The lowest (most negative as i64) error sentinel value.
 /// Any return value ≥ ERR_MIN is an error.
-pub const ERR_MIN: u64 = ENOSPC;
+pub const ERR_MIN: u64 = EROFS;
 
 /// Return `true` if `v` is an error sentinel.
 #[inline(always)]

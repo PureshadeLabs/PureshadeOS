@@ -34,7 +34,8 @@ pub mod ipc;
 pub mod log;
 pub mod pmm;
 pub mod serial;
-pub mod rfs;
+pub mod rfs; // V1 driver — retired, superseded by vfs + fs/rfs2 (docs/rfs-v2/01 §4)
+pub mod vfs;
 pub mod syscall;
 pub mod task;
 pub mod time;
@@ -370,10 +371,10 @@ pub extern "C" fn kernel_main() -> ! {
             sects,
             sects / 2048,
         );
-        if rfs::init() {
-            kprintln!("{TAG}[rfs]{RST} mounted");
+        if vfs::init() {
+            kprintln!("{TAG}[vfs]{RST} rfs2 mounted");
         } else {
-            kprintln!("{VRB}[rfs] no RFS_V1 image on disk (pass -drive file=disk.img,... to QEMU){RST}");
+            kprintln!("{VRB}[vfs] no RFS V2 volume on disk (pass -drive file=disk.img,... to QEMU){RST}");
         }
     } else {
         kprintln!("{VRB}[virtio-blk] no device found (pass -device virtio-blk-pci to QEMU){RST}");
@@ -639,13 +640,259 @@ pub extern "C" fn kernel_main() -> ! {
             heap_delta, pmm_delta
         );
     }
+
+    // ── Mount syscall probe (stage 1, docs/plans/mount-syscall-shade-store.md) ─
+    // Routing logic is host-tested in fs/vfs-core; this probe covers the glue
+    // the host cannot: the real RFS2 root + RAM volume through vfs.rs, and the
+    // capability gate on the syscall boundary via syscall_dispatch.
+    if vfs::generation().is_some() {
+        // Cap gate, deny path: a task with no Filesystem capability gets
+        // ENOPERM before any argument is inspected (a1 deliberately null).
+        let mut frame = syscall::SyscallFrame {
+            r15: 0, r14: 0, r13: 0, r12: 0, rbx: 0, rbp: 0, r11: 0, rcx: 0,
+            nr: syscall::SYS_MOUNT, a1: 0, a2: 0, a3: 0, a4: 0, a5: 0, a6: 0,
+        };
+        task::set_bootstrap_cap_table(cap::CapabilityTable::new());
+        let r = syscall::syscall_dispatch(&mut frame);
+        assert_eq!(r as i64, -3, "mount probe: no-cap call must be ENOPERM, got {}", r as i64);
+
+        // Cap gate, pass path: with Filesystem+WRITE the gate opens and the
+        // next check (bad user pointer) reports EINVAL — proving the deny
+        // above came from the capability, not the arguments.
+        let fs_probe_obj = cap::create_object(cap::KernelObject::Filesystem)
+            .expect("mount probe: cap OOM");
+        let mut probe_caps = cap::CapabilityTable::new();
+        cap::create_root_cap(
+            &mut probe_caps, cap::CapKind::Filesystem, cap::CapRights::ALL, fs_probe_obj,
+        );
+        task::set_bootstrap_cap_table(probe_caps);
+        let r = syscall::syscall_dispatch(&mut frame);
+        assert_eq!(r as i64, -4, "mount probe: with-cap bad-args must be EINVAL, got {}", r as i64);
+
+        // Real mount: fresh RAM-backed RFS2 at /mnt (dir created on root if
+        // absent; EEXIST from a previous test boot is fine).
+        let root_gen_before = vfs::generation().expect("root mounted");
+        let r = vfs::mkdir(b"/mnt", 0, 0);
+        assert!(r == 0 || r == vfs::EEXIST, "mount probe: mkdir /mnt failed: {r}");
+        let root_gen_mkdir = vfs::generation().expect("root mounted");
+        let r = vfs::mount("/mnt", vfs::MOUNT_SRC_RFS2_RAM, 0);
+        assert_eq!(r, 0, "mount probe: mount /mnt failed: {r}");
+        assert!(vfs::is_mounted_at("/mnt"), "mount probe: /mnt not registered");
+
+        // Mounting must not mutate the root volume.
+        assert_eq!(
+            vfs::generation().expect("root mounted"), root_gen_mkdir,
+            "mount probe: mounting changed root generation"
+        );
+
+        // Resolution crosses the boundary: file created under /mnt lands on
+        // the RAM volume and reads back through the mount.
+        let fd = vfs::create(b"/mnt/probe.txt", 0, 0);
+        assert!(fd >= 0, "mount probe: create failed: {fd}");
+        assert_eq!(vfs::write(fd as u64, b"mount-probe"), 11);
+        assert_eq!(vfs::close(fd as u64), 0);
+        let fd = vfs::open(b"/mnt/probe.txt");
+        assert!(fd >= 0, "mount probe: reopen failed: {fd}");
+        let mut buf = [0u8; 16];
+        let n = vfs::read(fd as u64, &mut buf);
+        assert_eq!(&buf[..n as usize], b"mount-probe", "mount probe: readback mismatch");
+        assert_eq!(vfs::close(fd as u64), 0);
+
+        // The write went to the RAM volume, not root: root generation is
+        // still where mkdir left it.
+        assert_eq!(
+            vfs::generation().expect("root mounted"), root_gen_mkdir,
+            "mount probe: /mnt write leaked onto the root volume"
+        );
+        let _ = root_gen_before;
+
+        // Distinct backend instance: the RAM volume has its own generation
+        // counter (fresh volume, a handful of commits — root is far ahead).
+        let ram_gen = vfs::generation_at("/mnt").expect("ram volume mounted");
+        assert_ne!(
+            ram_gen,
+            vfs::generation().expect("root mounted"),
+            "mount probe: /mnt reports the root volume's generation"
+        );
+
+        // Double mount is rejected without side effects.
+        let r = vfs::mount("/mnt", vfs::MOUNT_SRC_RFS2_RAM, 0);
+        assert_eq!(r, vfs::EMOUNTED, "mount probe: double mount must be EMOUNTED, got {r}");
+
+        kprintln!("{TAG}[mount]{RST} stage-1 probe {OK}passed{RST} — cap gate, routing, root isolation");
+
+        // ── Stage-1 hardening: RamDisk direct-map ceiling + cap gate across
+        // the REAL ring-3 boundary (the dispatcher probe above never leaves
+        // ring 0) ──────────────────────────────────────────────────────────
+        {
+            // Direct-map ceiling predicate — exercises the rejection boundary
+            // without needing >1 GiB of guest RAM. RamDisk::new consults this
+            // before the first touch of every frame, so an out-of-range frame
+            // is a clean mount failure, never a page fault.
+            assert!(vfs::frame_in_direct_map(0), "ceiling: frame 0 must be mapped");
+            assert!(
+                vfs::frame_in_direct_map(vmm::IDENTITY_MAP_LIMIT - 4096),
+                "ceiling: last in-map frame must pass"
+            );
+            assert!(
+                !vfs::frame_in_direct_map(vmm::IDENTITY_MAP_LIMIT),
+                "ceiling: first out-of-map frame must be rejected"
+            );
+            assert!(
+                !vfs::frame_in_direct_map(vmm::IDENTITY_MAP_LIMIT + 4096),
+                "ceiling: high frame must be rejected"
+            );
+            assert!(
+                !vfs::frame_in_direct_map(u64::MAX - 4095),
+                "ceiling: overflow must be rejected"
+            );
+            assert!(!vfs::frame_in_direct_map(0x1234), "ceiling: unaligned must be rejected");
+
+            // Ring-3 DENY: a genuine userspace task with an EMPTY cap set
+            // makes a fully VALID mount request and must get ENOPERM. The
+            // ELF exits only on ENOPERM — any other answer (EINVAL would
+            // mean the gate is ordered after arg checks; 0 would mean an
+            // unprivileged mount succeeded) leaves it spinning and the reap
+            // deadline below fails.
+            let deny_id = elf::exec(elf::MOUNT_DENIED_ELF, &[], &[])
+                .expect("mount ring3: deny exec failed");
+            let deadline = apic::ticks() + 500;
+            while apic::ticks() < deadline && task::task_exists(deny_id) {
+                task::yield_task();
+            }
+            assert!(
+                !task::task_exists(deny_id),
+                "mount ring3: capless SYS_MOUNT did not answer ENOPERM"
+            );
+
+            // Ring-3 HOLDER: with a Filesystem cap (handle 0), deliberately
+            // bad args must answer EINVAL — proves the gate OPENED for the
+            // holder and argument validation did the rejecting. Same
+            // ordering assertion as the dispatcher probe, across the real
+            // privilege boundary. Exits only on EINVAL.
+            let fs_probe2_obj = cap::create_object(cap::KernelObject::Filesystem)
+                .expect("mount ring3: cap OOM");
+            let fs_probe2_cap = {
+                let tbl = unsafe { &mut *task::cap_table_ptr(0) };
+                cap::create_root_cap(
+                    tbl, cap::CapKind::Filesystem, cap::CapRights::ALL, fs_probe2_obj,
+                )
+            };
+            let holder_id = elf::exec(elf::MOUNT_EINVAL_ELF, &[fs_probe2_cap], &[])
+                .expect("mount ring3: holder exec failed");
+            let deadline = apic::ticks() + 500;
+            while apic::ticks() < deadline && task::task_exists(holder_id) {
+                task::yield_task();
+            }
+            assert!(
+                !task::task_exists(holder_id),
+                "mount ring3: cap-holder SYS_MOUNT bad-args did not answer EINVAL"
+            );
+
+            kprintln!(
+                "{TAG}[mount]{RST} ring-3 hardening probe {OK}passed{RST} — capless ENOPERM, holder EINVAL, direct-map ceiling enforced"
+            );
+        }
+
+        // ── Stage-2 probe: store mount + read-only-after-realize ──────────
+        // (design §4; RealizeGuard logic host-tested in fs/vfs-core — this
+        // covers the kernel wiring on a real MOUNT_STORE mount.)
+        let r = vfs::mkdir(b"/mnt-store", 0, 0);
+        assert!(r == 0 || r == vfs::EEXIST, "store probe: mkdir failed: {r}");
+        let root_gen = vfs::generation().expect("root mounted");
+        let r = vfs::mount("/mnt-store", vfs::MOUNT_SRC_RFS2_RAM, vfs::MOUNT_STORE);
+        assert_eq!(r, 0, "store probe: MOUNT_STORE mount failed: {r}");
+
+        // Distinct backend instance from root AND from the /mnt volume.
+        let store_gen = vfs::generation_at("/mnt-store").expect("store mounted");
+        assert_ne!(store_gen, vfs::generation().expect("root"), "store probe: not distinct from root");
+
+        // Realize: stage a temp dir tree, write into it (temp is writable),
+        // atomically rename onto the final store name.
+        const STORE_NAME: &[u8] = b"/mnt-store/abcd1234-demo-1.0";
+        assert_eq!(vfs::mkdir(b"/mnt-store/.tmp-w1", 0, 0), 0);
+        let fd = vfs::create(b"/mnt-store/.tmp-w1/demo.bin", 0, 0);
+        assert!(fd >= 0, "store probe: temp create failed: {fd}");
+        assert_eq!(vfs::write(fd as u64, b"realized-bytes"), 14);
+        assert_eq!(vfs::close(fd as u64), 0);
+        assert_eq!(
+            vfs::rename(b"/mnt-store/.tmp-w1", STORE_NAME), 0,
+            "store probe: realize rename failed"
+        );
+
+        // Sealed: any mutation of the realized entry is EROFS.
+        let r = vfs::create(b"/mnt-store/abcd1234-demo-1.0/inject", 0, 0);
+        assert_eq!(r, vfs::EROFS, "store probe: create into sealed must be EROFS, got {r}");
+        let r = vfs::mkdir(b"/mnt-store/abcd1234-demo-1.0/dir", 0, 0);
+        assert_eq!(r, vfs::EROFS, "store probe: mkdir into sealed must be EROFS, got {r}");
+        let r = vfs::unlink(b"/mnt-store/abcd1234-demo-1.0/demo.bin");
+        assert_eq!(r, vfs::EROFS, "store probe: unlink in sealed must be EROFS, got {r}");
+        let r = vfs::rename(STORE_NAME, b"/mnt-store/elsewhere");
+        assert_eq!(r, vfs::EROFS, "store probe: moving sealed must be EROFS, got {r}");
+
+        // Reads still work; content is the realized bytes.
+        let fd = vfs::open(b"/mnt-store/abcd1234-demo-1.0/demo.bin");
+        assert!(fd >= 0, "store probe: sealed open failed: {fd}");
+        let mut buf = [0u8; 32];
+        let n = vfs::read(fd as u64, &mut buf);
+        assert_eq!(&buf[..n as usize], b"realized-bytes");
+        assert_eq!(vfs::close(fd as u64), 0);
+
+        // Re-realize (second writer, same digest): distinct temp, rename onto
+        // the sealed name is a no-op success; the loser's temp survives for
+        // the caller to clean, and the winner's content is untouched.
+        assert_eq!(vfs::mkdir(b"/mnt-store/.tmp-w2", 0, 0), 0);
+        let fd = vfs::create(b"/mnt-store/.tmp-w2/demo.bin", 0, 0);
+        assert!(fd >= 0);
+        assert_eq!(vfs::write(fd as u64, b"LOSER CONTENT!"), 14);
+        // Keep this temp fd open across the no-op to test the stale-fd guard
+        // below? No — the seal happened at w1's rename; this fd is on an
+        // UNSEALED temp and stays writable. Close it normally.
+        assert_eq!(vfs::close(fd as u64), 0);
+        assert_eq!(
+            vfs::rename(b"/mnt-store/.tmp-w2", STORE_NAME), 0,
+            "store probe: re-realize must be a no-op success"
+        );
+        let fd = vfs::open(b"/mnt-store/abcd1234-demo-1.0/demo.bin");
+        let n = vfs::read(fd as u64, &mut buf);
+        assert_eq!(
+            &buf[..n as usize], b"realized-bytes",
+            "store probe: re-realize must not replace the winner's content"
+        );
+        assert_eq!(vfs::close(fd as u64), 0);
+        // Loser cleans its redundant temp (unsealed — still mutable).
+        assert_eq!(vfs::unlink(b"/mnt-store/.tmp-w2/demo.bin"), 0);
+
+        // Stale-fd seal: a writable fd staged into an entry sealed afterwards
+        // must be refused at write time.
+        assert_eq!(vfs::mkdir(b"/mnt-store/.tmp-w3", 0, 0), 0);
+        let stale = vfs::create(b"/mnt-store/.tmp-w3/f", 0, 0);
+        assert!(stale >= 0);
+        assert_eq!(vfs::write(stale as u64, b"pre-seal"), 8);
+        assert_eq!(
+            vfs::rename(b"/mnt-store/.tmp-w3", b"/mnt-store/ffff0000-late-2.0"), 0
+        );
+        let r = vfs::write(stale as u64, b"post-seal");
+        assert_eq!(r, vfs::EROFS, "store probe: stale fd into sealed must be EROFS, got {r}");
+        assert_eq!(vfs::close(stale as u64), 0);
+
+        // Root volume untouched by all of it.
+        assert_eq!(
+            vfs::generation().expect("root mounted"), root_gen,
+            "store probe: store activity leaked onto the root volume"
+        );
+
+        kprintln!("{TAG}[mount]{RST} stage-2 probe {OK}passed{RST} — store mount, realize seal, EROFS, re-realize no-op");
+    } else {
+        kprintln!("{VRB}[mount] probe skipped — no root volume{RST}");
+    }
     } // end #[cfg(feature = "boot-tests")]
 
     // ── Locate lythd ELF ────────────────────────────────────────────────────
     //
     // lythd (PID 1) lives at /lth/system/init (symlink → /lth/bin/lythd).
     // Populate via `make oros`.
-    let lythd_elf = rfs::load_file("/lth/system/init")
+    let lythd_elf = vfs::load_file("/lth/system/init")
         .expect("lythd: /lth/system/init not found — run `make oros` to populate rootfs/lth/bin/");
 
     // ── lythd bootstrap ───────────────────────────────────────────────────────
@@ -656,6 +903,7 @@ pub extern "C" fn kernel_main() -> ! {
     //   handle 0 — root memory capability (all physical frames)
     //   handle 1 — rollback capability    (privileged SYS_ROLLBACK gate)
     //   handle 2 — boot-info IPC endpoint (one pre-queued BootInfo message)
+    //   handle 3 — filesystem capability  (privileged SYS_MOUNT gate)
 
     // Root memory capability: covers the full physical address space.
     let mem_obj = cap::create_object(cap::KernelObject::Memory {
@@ -678,7 +926,11 @@ pub extern "C" fn kernel_main() -> ! {
     })
     .expect("lythd bootstrap: boot-info cap OOM");
 
-    // Insert all three caps into kernel_main's table so spawn_userspace_task can inherit them.
+    // Filesystem (mount authority) capability: exclusive privilege for lythd.
+    let fs_obj =
+        cap::create_object(cap::KernelObject::Filesystem).expect("lythd bootstrap: fs cap OOM");
+
+    // Insert all four caps into kernel_main's table so spawn_userspace_task can inherit them.
     let mut kmain_caps = cap::CapabilityTable::new();
     let mem_cap = cap::create_root_cap(
         &mut kmain_caps,
@@ -698,13 +950,19 @@ pub extern "C" fn kernel_main() -> ! {
         cap::CapRights::ALL,
         boot_ipc_obj,
     );
+    let fs_cap = cap::create_root_cap(
+        &mut kmain_caps,
+        cap::CapKind::Filesystem,
+        cap::CapRights::ALL,
+        fs_obj,
+    );
 
     // Temporarily give kernel_main's bootstrap task this cap table so
     // spawn_userspace_task can read from it during cap inheritance.
     task::set_bootstrap_cap_table(kmain_caps);
 
     let pf_before = pmm::free_frame_count();
-    elf::exec(lythd_elf.as_slice(), &[mem_cap, rollback_cap, boot_cap], &[])
+    elf::exec(lythd_elf.as_slice(), &[mem_cap, rollback_cap, boot_cap, fs_cap], &[])
         .expect("lythd bootstrap: exec failed");
     kprintln!(
         "{TAG}[exec-cost]{RST} lythd: {} frames",

@@ -21,6 +21,7 @@ is compromised, it cannot escalate beyond the capabilities it holds.
 | `Ipc` | One IPC endpoint | `SYS_IPC_SEND` / `SYS_IPC_RECV` and all IPC variants |
 | `Device` | Hardware device (IRQ line, port range, MMIO region) | Physical and MMIO memory mapping for the device's assigned range — this is the mechanism that keeps `SYS_MMAP` from accepting a physical-address argument |
 | `Rollback` | Kernel checkpoint | `SYS_ROLLBACK` |
+| `Filesystem` | Mount authority | `SYS_MOUNT` (requires the `WRITE` right) |
 
 ---
 
@@ -130,13 +131,14 @@ expected in OROS.
 
 ## Initial capabilities at boot
 
-`kmain` creates three capabilities and passes them to `lythd` via `SYS_EXEC`:
+`kmain` creates four capabilities and passes them to `lythd` via `SYS_EXEC`:
 
 | Handle | Kind | Rights | Description |
 |--------|------|--------|-------------|
 | 0 | `Memory` | `ALL` | All free physical frames at boot time |
 | 1 | `Rollback` | `ALL` | Access to the kernel rollback mechanism |
 | 2 | `Ipc` | `ALL` | Boot IPC endpoint with pre-queued `BootInfo` message |
+| 3 | `Filesystem` | `ALL` | Mount authority (`SYS_MOUNT`); delegable via `SYS_CAP_GRANT` |
 
 `lythd` splits and delegates these to child processes as appropriate. For
 example, it may grant child processes a `Memory` capability restricted to a

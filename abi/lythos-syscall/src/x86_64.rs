@@ -376,6 +376,13 @@ pub unsafe fn sys_rename(old_ptr: u64, old_len: u64, new_ptr: u64, new_len: u64)
     unsafe { syscall4(sys::SYS_RENAME, old_ptr, old_len, new_ptr, new_len) }
 }
 
+/// Mount a filesystem backend at a path. Requires a Filesystem capability
+/// with WRITE right. Returns 0 or error.
+#[inline(always)]
+pub unsafe fn sys_mount(at_ptr: u64, at_len: u64, source: u64, flags: u64) -> u64 {
+    unsafe { syscall4(sys::SYS_MOUNT, at_ptr, at_len, source, flags) }
+}
+
 /// Seek within an open fd. Returns new offset or error.
 #[inline(always)]
 pub unsafe fn sys_seek(fd: u64, offset: u64, whence: u64) -> u64 {

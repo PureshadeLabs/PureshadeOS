@@ -45,8 +45,10 @@ Errors are returned in RAX as large `u64` values (two's-complement negative
 | `0xFFFF_FFFF_FFFF_FFF6` | -10 | `EMFILE`  | Too many open file descriptors (SYS_OPEN, SYS_CREATE) |
 | `0xFFFF_FFFF_FFFF_FFF5` | -11 | `EEXIST`  | File or directory already exists (SYS_CREATE, SYS_MKDIR, SYS_RENAME) |
 | `0xFFFF_FFFF_FFFF_FFF4` | -12 | `ENOSPC`  | No space left on device (SYS_CREATE, SYS_MKDIR) |
+| `0xFFFF_FFFF_FFFF_FFF3` | -13 | `EMOUNTED` | A mount already exists at the mount point (SYS_MOUNT) |
+| `0xFFFF_FFFF_FFFF_FFF2` | -14 | `EROFS`   | Write to a read-only / sealed path — read-only-after-realize on the store mount (SYS_WRITE, SYS_CREATE, SYS_MKDIR, SYS_UNLINK, SYS_RENAME) |
 
-`SYSCALL_MAX = 55`. Syscall numbers above 55 and unassigned number 49
+`SYSCALL_MAX = 56`. Syscall numbers above 56 and unassigned number 49
 always return `ENOSYS`.
 
 ---
@@ -111,6 +113,7 @@ always return `ENOSYS`.
 | 53 | `SYS_RECVFROM` | Receive UDP datagram |
 | 54 | `SYS_NET_CLOSE` | Close a socket |
 | 55 | `SYS_POWEROFF` | Power off the machine |
+| 56 | `SYS_MOUNT` | Mount a filesystem backend at a path |
 
 ---
 
@@ -910,6 +913,46 @@ Power off the machine.
 **Returns:** does not return
 
 Issues ACPI S5 shutdown via QEMU PM1a port `0x604`.
+
+---
+
+### SYS_MOUNT — 56
+
+Mount a filesystem backend at a path. The mount table is generic
+(longest-prefix routing over N mounts); the root filesystem is the mount at
+`/` installed at boot.
+
+**Capability:** requires a `Filesystem` capability with the `WRITE` right in
+the caller's table. No ambient authority — without the capability the call
+returns `ENOPERM` regardless of arguments.
+
+**Arguments:**
+
+| Reg | Meaning |
+|-----|---------|
+| a1 | `at_ptr` — mount point path (UTF-8) |
+| a2 | `at_len` — path length in bytes |
+| a3 | `source` — backend selector: `0` = `MOUNT_SRC_RFS2_RAM` (fresh RAM-backed RFS V2, formatted at mount time) |
+| a4 | `flags` — bit 0 = `MOUNT_STORE` (attach read-only-after-realize store semantics to this mount) |
+
+**Returns:** 0 on success; `ENOPERM` if the caller holds no `Filesystem`
+capability with `WRITE`; `EMOUNTED` if a mount already exists at the mount
+point; `ENOENT` if the mount point does not exist in the covering
+filesystem; `ENOTDIR` if the mount point is not a directory; `EINVAL` for a
+bad pointer/length, non-UTF-8 or relative path, or unknown `source`/`flags`;
+`ENOMNT` if no root filesystem is mounted.
+
+The mount point must be an existing directory in the covering filesystem.
+Paths under it then resolve in the mounted backend (longest-prefix wins,
+component-wise); the covering filesystem's own entries beneath the mount
+point become unreachable until unmounted. Open fds keep addressing the
+backend they were opened on.
+
+With `MOUNT_STORE`, the mount enforces read-only-after-realize: a top-level
+entry `<digest>-<name>-<version>` becomes immutable (`EROFS` on any write
+into it) once a temp path is atomically renamed onto it; renaming onto an
+already-sealed name is an idempotent no-op success (re-realize); temp paths
+remain freely writable until sealed.
 
 ---
 

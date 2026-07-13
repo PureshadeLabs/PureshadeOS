@@ -12,7 +12,14 @@ members = [
     "userspace/apps/rkilo",
     "userspace/apps/rutils",
     "pkg/shade",
+    "pkg/shade-cdf",
+    "pkg/shade-store",
+    "pkg/shade-store-db",
+    "pkg/shade-build",
+    "pkg/shade-gen",
+    "pkg/shadec",
     "fs/rfs2",
+    "fs/vfs-core",
     "tools/orox-pack",
     "tools/lythos-toolchain/lythos-libc",
     "tools/lythos-toolchain/lythos-unwind",
@@ -30,6 +37,13 @@ default-members = [
     "tools/orox-pack",
     "tools/lythos-toolchain/sysroot-builder",
     "fs/rfs2", # no_std+alloc lib, host-compilable; tests run on host
+    "fs/vfs-core", # VFS mount table + realize guard; no_std+alloc, host tests (mount-syscall plan)
+    "pkg/shade-cdf", # the one shared CDF canonicalizer (shade 08 §1); no_std+alloc, host tests
+    "pkg/shade-store", # input-addressed store realization (02 §2-3); std host crate, host tests
+    "pkg/shade-store-db", # store db + GC roots + mark-and-sweep gc (02 §7); std host crate, host tests
+    "pkg/shade-build", # shade build core: eval → digest → resolve → realize; std host crate, host tests
+    "pkg/shade-gen",  # generations + profiles + activation (02 §5-6, 10); std host crate, host tests
+    "pkg/shadec",    # Shade evaluator lib + host shadec binary (seed vehicle, shade-pkg 09 §2)
 ]
 resolver = "2"
 
@@ -37,4 +51,33 @@ resolver = "2"
 panic = "abort"
 
 [profile.release]
+panic = "abort"
+
+# release-closed: closed-source release. Maximizes obfuscation + strips metadata.
+# What the Cargo profile system can do (settings below):
+#   - lto = "fat"         whole-program inlining across crates; flattens call graph
+#   - codegen-units = 1   no parallelism -> maximal cross-fn optimization/inlining
+#   - opt-level = 3        aggressive transforms further obscure source structure
+#   - strip = "symbols"   drop symbol table + debug info from the binary
+#   - debug = false / debug-assertions = false / overflow-checks = false
+#   - incremental = false  no incremental artifacts leaking structure
+#   - panic = "abort"      no unwind tables (also removes some fn-name landmarks)
+# What a profile CANNOT do (stable Cargo has no per-profile rustflags). For deeper
+# obfuscation add these when building with this profile, e.g. via RUSTFLAGS or a
+# dedicated .cargo/config.toml profile section:
+#   -C symbol-mangling-version=v0        (or hashed) to obscure symbol names
+#   -Z location-detail=none              strip file/line from panic paths (nightly)
+#   -Z fmt-debug=none                    drop Debug impls' format strings (nightly)
+#   --remap-path-prefix $PWD=.           remove absolute source paths from binary
+# String literals stay in cleartext regardless — use an `obfstr`-style crate for those.
+[profile.release-closed]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+debug = false
+debug-assertions = false
+overflow-checks = false
+incremental = false
 panic = "abort"

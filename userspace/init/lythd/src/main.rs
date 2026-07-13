@@ -45,9 +45,10 @@ use lythos_rt::{
     BootInfo,
     ipc::Endpoint,
     println, eprintln,
-    sys_close, sys_create, sys_ipc_create, sys_open, sys_read_fd, sys_readdir,
-    sys_rollback, sys_stat, sys_task_exit, sys_task_list, sys_task_status, sys_time,
-    sys_time_epoch, sys_nanosleep, sys_write_fd,
+    sys_close, sys_create, sys_ipc_create, sys_mkdir, sys_mount, sys_open, sys_read_fd,
+    sys_readdir, sys_rollback, sys_stat, sys_task_exit, sys_task_list, sys_task_status,
+    sys_time, sys_time_epoch, sys_nanosleep, sys_write_fd,
+    MOUNT_SRC_RFS2_RAM, MOUNT_STORE,
     TaskInfo,
     task::{yield_now, TaskId, TaskStatus},
 };
@@ -558,6 +559,22 @@ impl ManagedSvc {
     }
 }
 
+// ── Package store mount ───────────────────────────────────────────────────────
+
+/// Mount a dedicated RFS V2 instance at /shade/store (store semantics:
+/// read-only-after-realize). Failure is loud but non-fatal — the system
+/// boots without a package store; shade operations will fail until the
+/// mount succeeds.
+fn mount_shade_store() {
+    // mkdir -p /shade/store on the root volume; EEXIST is fine.
+    let _ = sys_mkdir("/shade");
+    let _ = sys_mkdir("/shade/store");
+    match sys_mount("/shade/store", MOUNT_SRC_RFS2_RAM, MOUNT_STORE) {
+        Ok(()) => println!("[lythd] /shade/store mounted (dedicated rfs2, store semantics)"),
+        Err(e) => eprintln!("[lythd] /shade/store mount FAILED (errno {})", e),
+    }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
@@ -573,6 +590,14 @@ pub extern "C" fn _start() -> ! {
              mem_mib, frames, info.vendor_str());
 
     verify_abis();
+
+    // 1b. Mount the package store: a dedicated RFS V2 instance at
+    // /shade/store with read-only-after-realize semantics (SYS_MOUNT,
+    // docs/plans/mount-syscall-shade-store.md §4). lythd holds the boot
+    // Filesystem capability (handle 3) — the kernel gates the syscall on it.
+    // The mount-point directories live on the root volume; EEXIST from a
+    // prior boot is fine.
+    mount_shade_store();
 
     // 2. Create the service registry endpoint.
     let registry = Endpoint::create().expect("lythd: registry endpoint alloc failed");

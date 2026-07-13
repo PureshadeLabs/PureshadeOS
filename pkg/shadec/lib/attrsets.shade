@@ -1,0 +1,40 @@
+# lib.attrsets — MVP subset (07 §3.3): filterAttrs, optionalAttrs,
+# recursiveUpdate, attrByPath, nameValuePair, mapAttrsToList. Rest tier 2.
+let
+  nameValuePair = name: value: { inherit name value; };
+
+  # deep `//` (04 §4): recurses where both sides are attrsets, otherwise
+  # the right side wins
+  recursiveUpdate = lhs: rhs:
+    builtins.listToAttrs (map
+      (name: {
+        inherit name;
+        value =
+          if (lhs ? ${name}) && (rhs ? ${name})
+            && builtins.isAttrs lhs.${name} && builtins.isAttrs rhs.${name}
+          then recursiveUpdate lhs.${name} rhs.${name}
+          else if rhs ? ${name} then rhs.${name}
+          else lhs.${name};
+      })
+      (builtins.attrNames (lhs // rhs)));
+
+  attrByPath = path: default: set:
+    if path == [ ] then
+      set
+    else
+      let h = builtins.head path; in
+      if builtins.isAttrs set && set ? ${h} then
+        attrByPath (builtins.tail path) default set.${h}
+      else
+        default;
+in
+{
+  inherit nameValuePair recursiveUpdate attrByPath;
+  filterAttrs = pred: set:
+    builtins.listToAttrs (builtins.concatLists (map
+      (name:
+        if pred name set.${name} then [ (nameValuePair name set.${name}) ] else [ ])
+      (builtins.attrNames set)));
+  optionalAttrs = b: as: if b then as else { };
+  mapAttrsToList = f: set: map (name: f name set.${name}) (builtins.attrNames set);
+}

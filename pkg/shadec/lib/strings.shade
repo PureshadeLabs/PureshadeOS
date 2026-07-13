@@ -1,0 +1,38 @@
+# lib.strings — MVP subset (07 §3.1): concatStringsSep, hasPrefix,
+# hasSuffix, optionalString, splitString, boolToString. Rest is tier 2.
+let
+  hasPrefix = pre: s:
+    builtins.substring 0 (builtins.stringLength pre) s == pre;
+
+  hasSuffix = suf: s:
+    let
+      sl = builtins.stringLength s;
+      fl = builtins.stringLength suf;
+    in
+    sl >= fl && builtins.substring (sl - fl) fl s == suf;
+
+  # Expressed over substring since builtins.split (regex) is tier 2.
+  # Recursion depth is O(matches); fine for config-sized strings.
+  splitString = sep: s:
+    let
+      sepLen = builtins.stringLength sep;
+      sLen = builtins.stringLength s;
+      go = start: i:
+        if i > sLen - sepLen then
+          [ (builtins.substring start (sLen - start) s) ]
+        else if builtins.substring i sepLen s == sep then
+          [ (builtins.substring start (i - start) s) ] ++ go (i + sepLen) (i + sepLen)
+        else
+          go start (i + 1);
+    in
+    if sepLen == 0 then
+      throw "lib.splitString: empty separator"
+    else
+      go 0 0;
+in
+{
+  inherit hasPrefix hasSuffix splitString;
+  concatStringsSep = builtins.concatStringsSep;
+  optionalString = b: s: if b then s else "";
+  boolToString = b: if b then "true" else "false";
+}

@@ -1,0 +1,18 @@
+# lib.lists — MVP subset (07 §3.2): optional, optionals, range, flatten,
+# unique, last. Rest is tier 2.
+let
+  flatten = x:
+    if builtins.isList x then
+      builtins.concatLists (map flatten x)
+    else
+      [ x ];
+in
+{
+  inherit flatten;
+  optional = b: x: if b then [ x ] else [ ];
+  optionals = b: xs: if b then xs else [ ];
+  range = a: b:
+    if a > b then [ ] else builtins.genList (i: a + i) (b - a + 1);
+  unique = builtins.foldl' (acc: x: if builtins.elem x acc then acc else acc ++ [ x ]) [ ];
+  last = xs: builtins.elemAt xs (builtins.length xs - 1);
+}

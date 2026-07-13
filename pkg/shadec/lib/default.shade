@@ -1,0 +1,13 @@
+# Shade `lib` — MVP subset (docs/shade/07-stdlib.md §3, entries marked [MVP]).
+# lib is Shade code over builtins, shipped as an importable tree (07 §3);
+# reaching it via the `shadepkgs` channel is tier 2 (06 §3).
+let
+  strings = import ./strings.shade;
+  lists = import ./lists.shade;
+  attrsets = import ./attrsets.shade;
+  trivial = import ./trivial.shade;
+  derivations = import ./derivations.shade;
+in
+strings // lists // attrsets // trivial // derivations // {
+  inherit strings lists attrsets trivial;
+}

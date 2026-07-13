@@ -56,9 +56,12 @@ A store path is:
 ```
 
 - `<digest>` — 32 characters: the first 160 bits (20 bytes) of
-  `BLAKE3-256(CDF bytes)` (§3.1), encoded in lowercase RFC 4648 base32
-  (alphabet `abcdefghijklmnopqrstuvwxyz234567`), no padding.
-  20 bytes × 8 / 5 = exactly 32 characters, no partial group.
+  `BLAKE3-256(CDF bytes)` (§3.1), base32-encoded MSB-first with the **pinned
+  alphabet** `0123456789abcdfghijklmnpqrsvwxyz` (Nix's alphabet — `0-9a-z`
+  minus `e o t u`, so a digest never forms a word in a path), no padding.
+  This is **not** RFC 4648 and not any stdlib base32; it is a frozen
+  constant (`shade_cdf::BASE32_ALPHABET`) — changing it moves every store
+  path. 20 bytes × 8 / 5 = exactly 32 characters, no partial group.
 - `<name>` — matches `[a-z0-9][a-z0-9_-]*`, max 64 bytes. Recipe names are
   normalized to this set before hashing ([`03 §2`](03-recipe-format.md#2-package)).
 - `<version>` — matches `[0-9a-z.+-]+`, max 32 bytes.
@@ -73,7 +76,7 @@ Store path component grammar (final component after `/shade/store/`):
 ```
 store-name   = digest "-" name "-" version [".drv"]
 digest       = 32 * base32-char
-base32-char  = %x61-7A / "2"-"7"        ; a-z 2-7
+base32-char  = %x30-39 / %x61-7A         ; 0-9 a-z, minus e o t u (pinned alphabet)
 ```
 
 Anything under `/shade/store/` not matching this grammar is invalid and is
@@ -107,8 +110,12 @@ Format rules:
 
 1. Lines are `key=value`, terminated by a single LF (`0x0A`). No CR. The file
    ends with a trailing LF. Key is everything up to the **first** `=`.
-2. Keys match `[a-z0-9._-]+` and appear in strict bytewise-ascending sorted
-   order, except line 1.
+2. Keys match `[a-z0-9._-]+` — **lowercase-only, no exceptions**: keys are
+   hash inputs, and case-fold collisions or case-insensitive-platform
+   inconsistency are unacceptable in a hashed key. Keys appear in strict
+   bytewise-ascending sorted order, except line 1. Where a source value is
+   uppercase by nature (env var names, §3.3), the key records its lowercase
+   fold; the uppercase form is restored outside CDF.
 3. Line 1 is always the format header: `shade-drv=1`. The format version is
    bumped on any change to this section; a version bump changes every hash,
    deliberately.
@@ -139,7 +146,7 @@ is exhaustive; adding a key requires bumping `shade-drv`.
 | `source.<i>.type` | `crates-io` \| `git` \| `local` \| `pspackage` | resolved source [`04 §3`](04-sources.md#3-resolution-per-source-type) |
 | `source.<i>.*` | type-specific identity keys (crate+version+sha256; commit; tree hash) — always the pinned object identity, never a URL or symbolic ref; exact keys in [`04 §3`](04-sources.md#3-resolution-per-source-type) | lockfile |
 | `dep.<i>` | full store path of a build-time dependency (its digest embeds *its* whole input closure — recursion does the rest) | resolution [`05`](05-dependencies.md) |
-| `env.<KEY>` | extra build env var, literal value | recipe build env ([`03 §5.3`](03-recipe-format.md#53-buildenv)) |
+| `env.<key>` | extra build env var, literal value; `<key>` is the variable name **folded to lowercase** (§3.2 rule 2 charset is lowercase-only) — lossless, since variable names match `[A-Z_][A-Z0-9_]*` and contain no lowercase; the builder restores the uppercase name ([`06 §4`](06-build.md#4-environment)) | recipe build env ([`03 §5.3`](03-recipe-format.md#53-buildenv)) |
 | `phase.<i>` | build phase command line | recipe [`03 §5`](03-recipe-format.md#5-build) |
 | `output.<i>` | declared output entry | recipe [`03 §6`](03-recipe-format.md#6-outputs) |
 
@@ -169,7 +176,7 @@ Example CDF (illustrative values):
 ```
 shade-drv=1
 dep.0=/shade/store/c4fq3m2z7xj5kx2apwrn6uu3drhtbz3i-lythos-libstd-0.3.0
-env.RUSTFLAGS=-C opt-level=3
+env.rustflags=-C opt-level=3
 name=rkilo
 output.0=bin/rkilo
 phase.0=cargo build --release --offline --target x86_64-oros
@@ -215,7 +222,7 @@ partitioned into **one system line** and **one line per user**
 ├── system/                the system generation line (built by `shade os rebuild`)
 │   ├── 1/
 │   ├── 2/
-│   │   ├── manifest.toml  what is installed and why (schema below)
+│   │   ├── manifest       what is installed and why (schema below)
 │   │   ├── prism.lock      the lockfile snapshot that produced this generation
 │   │   └── profile/
 │   │       ├── bin/       symlink forest into /shade/store/*/bin/
@@ -225,7 +232,7 @@ partitioned into **one system line** and **one line per user**
 └── users/                 per-user generation lines (built by `shade home rebuild`)
     └── <user>/            one independent line per user, same layout as system/
         ├── 1/
-        ├── 2/  (manifest.toml, prism.lock, profile/)
+        ├── 2/  (manifest, prism.lock, profile/)
         └── current -> 2   the user's own activation symlink
 ```
 
@@ -243,27 +250,27 @@ installed set (`install`, `remove`, `rollback` — [`07`](07-cli.md)) creates a
 linear and append-only, like `git revert`, so "which generation am I on"
 never requires interpreting a detached state.
 
-`manifest.toml` schema **[OS-general]** (TOML here is a machine-written state
-serialization, not a recipe or config language — shade writes it, no human
-authors it; [`01 §1`](01-overview.md#1-goals)):
+`manifest` schema **[OS-general]** — the canonical line record every
+`/shade/` subsystem uses (the CDF / `db/valid` discipline, §3.2 / §7.2:
+header line, then lowercase `key=value` in bytewise-sorted key order, one LF
+per line, trailing LF; list fields as indexed keys). No TOML anywhere under
+`/shade/`. The `shade-gen=1` header is bumped on any record-shape change,
+exactly as `shade-db` and `shade-drv` are. Serialization is byte-stable
+(canonical writer ⇒ parse → re-serialize is the identity):
 
-```toml
-schema = 1
-created = "2026-07-04T12:00:00Z"   # informational; NOT hashed anywhere
-parent = 1                          # generation this was derived from; 0 = none
-reason = "install rkilo"           # human-readable, set by the CLI
-
-[[package]]
-name = "rkilo"
-version = "1.2.0"
-store-path = "/shade/store/<digest>-rkilo-1.2.0"
-requested = true        # explicitly asked for (GC/remove semantics), vs pulled in as a dep
-
-[[package]]
-name = "lythos-libstd"
-version = "0.3.0"
-store-path = "/shade/store/<digest>-lythos-libstd-0.3.0"
-requested = false
+```
+shade-gen=1
+created=1783814400                    unix seconds; informational, NOT hashed anywhere
+package.0.name=rkilo
+package.0.path=/shade/store/<digest>-rkilo-1.2.0
+package.0.requested=1                 1 = explicitly asked for (GC/remove semantics), 0 = dep
+package.0.version=1.2.0
+package.1.name=lythos-libstd
+package.1.path=/shade/store/<digest>-lythos-libstd-0.3.0
+package.1.requested=0
+package.1.version=0.3.0
+parent=1                              generation this was derived from; 0 = none
+reason=install rkilo                  human-readable, set by the CLI
 ```
 
 The profile is built by symlinking every file of every package's declared
@@ -380,7 +387,7 @@ recording the snapshot ID. The flip stays the commit point either way.
 The live set is the union of closures (§7.2) of:
 
 1. Every generation's manifest store paths — all of
-   `/shade/gen/system/*/manifest.toml` **and** `/shade/gen/users/*/*/manifest.toml`.
+   `/shade/gen/system/*/manifest` **and** `/shade/gen/users/*/*/manifest`.
    (Deleting old generations — `shade os clean` / `shade home clean`, or
    explicit `generations delete` — is how store space is actually reclaimed;
    [`07 §2.1`](07-cli.md#21-shade-os).)

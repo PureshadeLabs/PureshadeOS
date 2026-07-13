@@ -57,6 +57,9 @@ pub enum CapKind {
     Device,
     /// Privileged rollback trigger — granted only to `lythd` at boot.
     Rollback,
+    /// Filesystem mount authority (SYS_MOUNT) — granted only to `lythd` at
+    /// boot, delegable via SYS_CAP_GRANT.
+    Filesystem,
 }
 
 // ── CapRights ─────────────────────────────────────────────────────────────────
@@ -91,6 +94,8 @@ pub enum KernelObject {
     Device { irq: Option<u8> },
     /// Privileged rollback trigger.
     Rollback,
+    /// Filesystem mount authority.
+    Filesystem,
 }
 
 // ── KernelObjectRef ───────────────────────────────────────────────────────────

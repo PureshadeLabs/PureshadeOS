@@ -256,8 +256,10 @@ Errors are **not values** — Shade has no exceptions, no `try` that catches
 arbitrary failures. An error aborts evaluation with a message and a source
 trace. The only catchable failure is via `builtins.tryEval`
 ([`07 §2.1`](07-stdlib.md#21-core)), which catches
-`throw`/`abort`/assertion/type errors reached while forcing its argument
-to WHNF and reports success/failure — it does **not** catch
+`throw`/assertion/type errors reached while forcing its argument
+to WHNF and reports success/failure. `abort` **escapes** `tryEval` —
+uncatchable, a hard stop distinct from recoverable error (the table below
+and [`07 §2.1`](07-stdlib.md#21-core)); it also does **not** catch
 infinite-recursion or resource-limit aborts (those are non-recoverable).
 
 Error kinds (all carry a source position and a forcing trace):

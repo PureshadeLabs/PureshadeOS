@@ -1,0 +1,25 @@
+[package]
+name = "shadec"
+version = "0.1.0"
+edition = "2024"
+description = "Shade evaluator (docs/shade/01..08): lexer, parser, lazy evaluator, builtins, CDF emission via shade-cdf"
+
+[lib]
+name = "shadec"
+path = "src/lib.rs"
+
+[[bin]]
+name = "shadec"
+path = "src/bin/shadec.rs"
+required-features = ["cli"]
+
+[dependencies]
+shade-cdf = { path = "../shade-cdf" }
+
+[features]
+# Core is no_std+alloc so the OROS `shade` binary can link it once argv is
+# plumbed through the ABI; `std` adds the host EvalIo; `cli` the host binary
+# (the seed-shadec vehicle, docs/shade-pkg/09-bootstrap.md §2).
+default = ["std", "cli"]
+std = []
+cli = ["std"]

@@ -25,8 +25,14 @@ SOCK="/tmp/lythos-serial-$$.sock"
 
 # OVMF_CODE / OVMF_VARS: explicit paths override auto-detection.
 # Leave empty to let QEMU's Q35 machine auto-load firmware from its share dir.
+# The two positional args are consumed here and MUST be shifted away —
+# anything left in "$@" is appended verbatim to the qemu command line, and a
+# bare firmware path there becomes a phantom IDE disk (index collision,
+# "drive with bus=0, unit=0 (index=0) exists").
 OVMF_CODE="${1:-${OVMF_CODE:-}}"
 OVMF_VARS="${2:-${OVMF_VARS:-}}"
+if [ $# -ge 1 ]; then shift; fi
+if [ $# -ge 1 ]; then shift; fi
 
 # ── Pre-flight checks ──────────────────────────────────────────────────────────
 if [ ! -f "$BOOT_IMG" ]; then
@@ -60,8 +66,12 @@ else
 fi
 
 # ── Launch QEMU ────────────────────────────────────────────────────────────────
+# -m: QEMU's default 128 MiB is too small for Limine 11's high-memory
+# allocator to load the ~8 MB debug kernel ("PANIC: High memory allocator:
+# Out of memory"). Override with QEMU_MEM=...
 qemu-system-x86_64 \
     -machine q35,usb=on \
+    -m "${QEMU_MEM:-512M}" \
     $OVMF_FLAGS \
     -drive  file="$BOOT_IMG",format=raw,if=none,id=esp \
     -device usb-storage,drive=esp \

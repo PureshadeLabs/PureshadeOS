@@ -225,10 +225,14 @@ pub const SYS_RECVFROM: u64 = 53;
 pub const SYS_NET_CLOSE: u64 = 54;
 /// Power off the machine (ACPI S5 via QEMU PM1a port 0x604). No arguments. Does not return.
 pub const SYS_POWEROFF:  u64 = 55;
+/// Mount a filesystem backend at a path. Requires CapKind::Filesystem with WRITE.
+/// a1=at_ptr, a2=at_len, a3=source (0 = fresh RAM-backed RFS V2), a4=flags.
+/// Returns 0 or negative errno (ENOPERM, EMOUNTED, ENOENT, ENOTDIR, EINVAL, …).
+pub const SYS_MOUNT:     u64 = 56;
 
 /// Highest assigned syscall number. Update this when adding a new syscall.
 /// Used by the fuzz test in main.rs to verify that numbers above this return ENOSYS.
-pub const SYSCALL_MAX: u64 = SYS_POWEROFF;
+pub const SYSCALL_MAX: u64 = SYS_MOUNT;
 
 // ── Error sentinel ────────────────────────────────────────────────────────────
 
@@ -1020,12 +1024,12 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             unsafe { with_user_access(|| core::ptr::copy_nonoverlapping(
                 frame.a1 as *const u8, kpath.as_mut_ptr(), path_len,
             )); }
-            let mut stat = crate::rfs::Stat::default();
-            if !crate::rfs::stat_path(&kpath, &mut stat) { return ENOENT; }
+            let mut stat = crate::vfs::Stat::default();
+            if !crate::vfs::stat_path(&kpath, &mut stat) { return ENOENT; }
             let uid = crate::task::current_task_uid();
             let gid = crate::task::current_task_gid();
             if !dac_check(stat.mode, stat.uid, stat.gid, uid, gid, 0x4) { return ENOPERM; }
-            let fd = crate::rfs::open(&kpath);
+            let fd = crate::vfs::open(&kpath);
             fd as u64
         }
         SYS_READ => {
@@ -1033,7 +1037,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             let len = (frame.a3 as usize).min(1024 * 1024);
             if len > 0 && !valid_user_range(frame.a2, frame.a3) { return EINVAL; }
             let mut kbuf = alloc::vec![0u8; len];
-            let n = crate::rfs::read(frame.a1, &mut kbuf);
+            let n = crate::vfs::read(frame.a1, &mut kbuf);
             if n < 0 { return n as u64; }
             if n > 0 {
                 unsafe { with_user_access(|| core::ptr::copy_nonoverlapping(
@@ -1052,12 +1056,12 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
                     frame.a2 as *const u8, kbuf.as_mut_ptr(), len,
                 )); }
             }
-            let n = crate::rfs::write(frame.a1, &kbuf);
+            let n = crate::vfs::write(frame.a1, &kbuf);
             n as u64
         }
         SYS_CLOSE => {
             // a1=fd
-            let r = crate::rfs::close(frame.a1);
+            let r = crate::vfs::close(frame.a1);
             r as u64
         }
         SYS_STAT => {
@@ -1070,8 +1074,8 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             unsafe { with_user_access(|| core::ptr::copy_nonoverlapping(
                 frame.a1 as *const u8, kpath.as_mut_ptr(), path_len,
             )); }
-            let mut stat = crate::rfs::Stat::default();
-            if !crate::rfs::stat_path(&kpath, &mut stat) { return ENOENT; }
+            let mut stat = crate::vfs::Stat::default();
+            if !crate::vfs::stat_path(&kpath, &mut stat) { return ENOENT; }
             // Serialise Stat into a 48-byte user buffer (all LE, canonical layout):
             // [0..8]=size [8..16]=mtime [16..24]=ctime [24..28]=flags [28..32]=uid
             // [32..36]=gid [36..40]=nlink [40..42]=mode [42..48]=_pad
@@ -1101,7 +1105,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             unsafe { with_user_access(|| core::ptr::copy_nonoverlapping(
                 frame.a1 as *const u8, kpath.as_mut_ptr(), path_len,
             )); }
-            let entries = match crate::rfs::readdir_path(&kpath) {
+            let entries = match crate::vfs::readdir_path(&kpath) {
                 Some(e) => e,
                 None    => return ENOENT,
             };
@@ -1135,10 +1139,10 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             let uid = crate::task::current_task_uid();
             let gid = crate::task::current_task_gid();
             let parent = parent_of(&kpath);
-            let mut pstat = crate::rfs::Stat::default();
-            if !crate::rfs::stat_path(&parent, &mut pstat) { return ENOENT; }
+            let mut pstat = crate::vfs::Stat::default();
+            if !crate::vfs::stat_path(&parent, &mut pstat) { return ENOENT; }
             if !dac_check(pstat.mode, pstat.uid, pstat.gid, uid, gid, 0x2) { return ENOPERM; }
-            crate::rfs::create(&kpath, uid, gid) as u64
+            crate::vfs::create(&kpath, uid, gid) as u64
         }
         SYS_UNLINK => {
             // a1=path_ptr, a2=path_len
@@ -1152,10 +1156,10 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             let uid = crate::task::current_task_uid();
             let gid = crate::task::current_task_gid();
             let parent = parent_of(&kpath);
-            let mut pstat = crate::rfs::Stat::default();
-            if !crate::rfs::stat_path(&parent, &mut pstat) { return ENOENT; }
+            let mut pstat = crate::vfs::Stat::default();
+            if !crate::vfs::stat_path(&parent, &mut pstat) { return ENOENT; }
             if !dac_check(pstat.mode, pstat.uid, pstat.gid, uid, gid, 0x2) { return ENOPERM; }
-            crate::rfs::unlink(&kpath) as u64
+            crate::vfs::unlink(&kpath) as u64
         }
         SYS_MKDIR => {
             // a1=path_ptr, a2=path_len
@@ -1169,10 +1173,10 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             let uid = crate::task::current_task_uid();
             let gid = crate::task::current_task_gid();
             let parent = parent_of(&kpath);
-            let mut pstat = crate::rfs::Stat::default();
-            if !crate::rfs::stat_path(&parent, &mut pstat) { return ENOENT; }
+            let mut pstat = crate::vfs::Stat::default();
+            if !crate::vfs::stat_path(&parent, &mut pstat) { return ENOENT; }
             if !dac_check(pstat.mode, pstat.uid, pstat.gid, uid, gid, 0x2) { return ENOPERM; }
-            crate::rfs::mkdir(&kpath, uid, gid) as u64
+            crate::vfs::mkdir(&kpath, uid, gid) as u64
         }
         SYS_SERIAL_AVAIL => {
             if crate::keyboard::data_ready() || crate::serial::SERIAL.lock().data_ready() { 1 } else { 0 }
@@ -1221,19 +1225,19 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             let gid = crate::task::current_task_gid();
             let old_parent = parent_of(&old_path);
             let new_parent = parent_of(&new_path);
-            let mut pstat = crate::rfs::Stat::default();
-            if !crate::rfs::stat_path(&old_parent, &mut pstat) { return ENOENT; }
+            let mut pstat = crate::vfs::Stat::default();
+            if !crate::vfs::stat_path(&old_parent, &mut pstat) { return ENOENT; }
             if !dac_check(pstat.mode, pstat.uid, pstat.gid, uid, gid, 0x2) { return ENOPERM; }
-            if !crate::rfs::stat_path(&new_parent, &mut pstat) { return ENOENT; }
+            if !crate::vfs::stat_path(&new_parent, &mut pstat) { return ENOENT; }
             if !dac_check(pstat.mode, pstat.uid, pstat.gid, uid, gid, 0x2) { return ENOPERM; }
-            crate::rfs::rename(&old_path, &new_path) as u64
+            crate::vfs::rename(&old_path, &new_path) as u64
         }
 
         SYS_SEEK => {
             // a1=fd, a2=offset (i64 as u64), a3=whence (0=SET,1=CUR,2=END)
             let offset = frame.a2 as i64;
             let whence = frame.a3 as u32;
-            crate::rfs::seek(frame.a1, offset, whence) as u64
+            crate::vfs::seek(frame.a1, offset, whence) as u64
         }
 
         SYS_PS => {
@@ -1636,6 +1640,35 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
 
         SYS_POWEROFF => {
             crate::acpi::shutdown();
+        }
+
+        SYS_MOUNT => {
+            // a1=at_ptr, a2=at_len, a3=source, a4=flags.
+            //
+            // Capability gate FIRST, on the syscall boundary: mounting requires
+            // CapKind::Filesystem with the WRITE right — no ambient authority,
+            // and no argument validation before the authority check (a caller
+            // without the cap learns nothing about the mount table).
+            let current_id = crate::task::current_task_id();
+            let table_ptr  = crate::task::cap_table_ptr(current_id);
+            if table_ptr.is_null() { return ENOPERM; }
+            let table = unsafe { &*table_ptr };
+            if !table.has_kind_with_rights(
+                crate::cap::CapKind::Filesystem,
+                crate::cap::CapRights::WRITE,
+            ) {
+                return ENOPERM;
+            }
+
+            let path_len = frame.a2 as usize;
+            if path_len == 0 || path_len > 4096 { return EINVAL; }
+            if !valid_user_range(frame.a1, frame.a2) { return EINVAL; }
+            let mut kpath = alloc::vec![0u8; path_len];
+            unsafe { with_user_access(|| core::ptr::copy_nonoverlapping(
+                frame.a1 as *const u8, kpath.as_mut_ptr(), path_len,
+            )); }
+            let Ok(at) = core::str::from_utf8(&kpath) else { return EINVAL; };
+            crate::vfs::mount(at, frame.a3, frame.a4) as u64
         }
 
         _ => ENOSYS,

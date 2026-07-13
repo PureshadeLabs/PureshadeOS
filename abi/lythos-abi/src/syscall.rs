@@ -183,8 +183,24 @@ pub const SYS_NET_CLOSE:         u64 = 54;
 /// Power off the machine (ACPI S5). Does not return.
 pub const SYS_POWEROFF:          u64 = 55;
 
+// ── Mount management ──────────────────────────────────────────────────────────
+
+/// Mount a filesystem backend at a path. Requires a Filesystem capability
+/// with WRITE right (no ambient authority).
+/// a1=at_ptr, a2=at_len (mount point, UTF-8), a3=source (MOUNT_SRC_*),
+/// a4=flags (MOUNT_* bitfield). Returns 0 or negative errno
+/// (ENOPERM, EMOUNTED, ENOENT, ENOTDIR, EINVAL, …).
+pub const SYS_MOUNT:             u64 = 56;
+
+/// SYS_MOUNT a3: fresh RAM-backed RFS V2 instance, formatted at mount time.
+pub const MOUNT_SRC_RFS2_RAM:    u64 = 0;
+
+/// SYS_MOUNT a4 flag: attach the realize-guard (read-only-after-realize
+/// store semantics) to this mount.
+pub const MOUNT_STORE:           u64 = 1 << 0;
+
 // ── Bookkeeping ───────────────────────────────────────────────────────────────
 
 /// Highest assigned syscall number. Calls above this return ENOSYS.
 /// Number 49 is an unassigned gap and also returns ENOSYS.
-pub const SYSCALL_MAX:           u64 = SYS_POWEROFF;
+pub const SYSCALL_MAX:           u64 = SYS_MOUNT;

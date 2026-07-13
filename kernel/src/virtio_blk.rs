@@ -121,8 +121,16 @@ const VIRTQ_DESC_F_WRITE: u16 = 2; // device writes into this buffer (device→g
 
 // ── Block request type codes ──────────────────────────────────────────────────
 
-const VIRTIO_BLK_T_IN:  u32 = 0; // read  (device writes sector data into guest buffer)
-const VIRTIO_BLK_T_OUT: u32 = 1; // write (guest writes sector data into device)
+const VIRTIO_BLK_T_IN:    u32 = 0; // read  (device writes sector data into guest buffer)
+const VIRTIO_BLK_T_OUT:   u32 = 1; // write (guest writes sector data into device)
+const VIRTIO_BLK_T_FLUSH: u32 = 4; // flush device write cache (requires F_FLUSH)
+
+// ── Device feature bits ───────────────────────────────────────────────────────
+
+/// VIRTIO_BLK_F_FLUSH (legacy bit 9): device supports the T_FLUSH command.
+/// Without it the device operates write-through — completed writes are already
+/// durable and `flush()` is a correct no-op.
+const FEATURE_BLK_F_FLUSH: u32 = 1 << 9;
 
 // ── Sizing ────────────────────────────────────────────────────────────────────
 
@@ -239,6 +247,7 @@ struct VirtioBlkDev {
     io_base:   u16,  // BAR0 I/O port base
     q_size:    u16,  // negotiated virtqueue size (≤ QUEUE_SIZE_MAX)
     capacity:  u64,  // total 512-byte sectors on the disk
+    has_flush: bool, // VIRTIO_BLK_F_FLUSH negotiated
     vq_phys:   u64,  // physical (= virtual) base of the virtqueue allocation
     hdr_phys:  u64,  // physical (= virtual) base of request-header DMA frame
     dat_phys:  u64,  // physical (= virtual) base of sector-data DMA frame
@@ -286,13 +295,16 @@ impl VirtioBlkDev {
         }
     }
 
-    /// Submit a single-sector read or write.
+    /// Submit one request and block until completion.
+    ///
+    /// `req_type`: VIRTIO_BLK_T_IN / T_OUT / T_FLUSH. For T_IN/T_OUT, `count`
+    /// sectors (1..=8, one DMA frame) starting at `sector`; T_FLUSH carries no
+    /// data descriptor (`count` ignored, `sector` must be 0).
     ///
     /// Returns `true` on success (device status byte == 0).
-    /// Submit one request transferring `count` sectors (1..=8, one DMA frame)
-    /// starting at `sector`.  Blocks until completion.
-    fn submit(&mut self, sector: u64, count: u32, write: bool) -> bool {
-        debug_assert!(count >= 1 && count as usize * SECTOR_SIZE <= 4096);
+    fn submit(&mut self, req_type: u32, sector: u64, count: u32) -> bool {
+        let is_flush = req_type == VIRTIO_BLK_T_FLUSH;
+        debug_assert!(is_flush || (count >= 1 && count as usize * SECTOR_SIZE <= 4096));
         let rflags: u64;
         unsafe { core::arch::asm!("pushfq; pop {0}", out(reg) rflags, options(nomem)) };
 
@@ -303,9 +315,7 @@ impl VirtioBlkDev {
         //   [8..16) sector (u64)
         let hdr = self.hdr_phys as *mut u8;
         unsafe {
-            (hdr        as *mut u32).write_volatile(
-                if write { VIRTIO_BLK_T_OUT } else { VIRTIO_BLK_T_IN }
-            );
+            (hdr        as *mut u32).write_volatile(req_type);
             (hdr.add(4) as *mut u32).write_volatile(0); // ioprio
             (hdr.add(8) as *mut u64).write_volatile(sector);
         }
@@ -314,22 +324,31 @@ impl VirtioBlkDev {
         let status_pa = self.hdr_phys + 16;
         unsafe { (status_pa as *mut u8).write_volatile(0xFF) }; // poison → device overwrites
 
-        // ── Build 3-descriptor chain ─────────────────────────────────────────
+        // ── Build descriptor chain ───────────────────────────────────────────
         //
         // desc[0]: request header (device reads)  → NEXT → desc[1]
-        // desc[1]: data buffer
+        // desc[1]: data buffer (T_IN/T_OUT only)
         //          read : WRITE | NEXT (device writes sector data)
         //          write: NEXT        (device reads from our buffer)
-        // desc[2]: status byte (device writes)    → no NEXT
-        let data_flags = if write {
-            VIRTQ_DESC_F_NEXT                       // device reads data
+        // desc[N]: status byte (device writes)    → no NEXT
+        //
+        // T_FLUSH is a 2-descriptor chain: header → status.
+        if is_flush {
+            unsafe {
+                self.write_desc(0, self.hdr_phys, 16, VIRTQ_DESC_F_NEXT, 1);
+                self.write_desc(1, status_pa,     1,  VIRTQ_DESC_F_WRITE, 0);
+            }
         } else {
-            VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE  // device writes data
-        };
-        unsafe {
-            self.write_desc(0, self.hdr_phys,  16,          VIRTQ_DESC_F_NEXT, 1);
-            self.write_desc(1, self.dat_phys,  count * SECTOR_SIZE as u32, data_flags, 2);
-            self.write_desc(2, status_pa,      1,           VIRTQ_DESC_F_WRITE, 0);
+            let data_flags = if req_type == VIRTIO_BLK_T_OUT {
+                VIRTQ_DESC_F_NEXT                       // device reads data
+            } else {
+                VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE  // device writes data
+            };
+            unsafe {
+                self.write_desc(0, self.hdr_phys,  16,          VIRTQ_DESC_F_NEXT, 1);
+                self.write_desc(1, self.dat_phys,  count * SECTOR_SIZE as u32, data_flags, 2);
+                self.write_desc(2, status_pa,      1,           VIRTQ_DESC_F_WRITE, 0);
+            }
         }
 
         // ── Post descriptor chain to available ring ───────────────────────────
@@ -423,9 +442,13 @@ pub fn init() -> bool {
     unsafe { outb(io + REG_DEVICE_STATUS, STATUS_ACKNOWLEDGE) };
     // 3. Declare driver support.
     unsafe { outb(io + REG_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER) };
-    // 4. Read & accept device features (we require none).
-    let _features = unsafe { inl(io + REG_DEVICE_FEATURES) };
-    unsafe { outl(io + REG_GUEST_FEATURES, 0) };
+    // 4. Read device features; accept F_FLUSH if offered (required for the
+    //    RFS V2 commit barrier — without it the device is write-through and
+    //    flush degrades to a no-op).
+    let features = unsafe { inl(io + REG_DEVICE_FEATURES) };
+    let accepted = features & FEATURE_BLK_F_FLUSH;
+    unsafe { outl(io + REG_GUEST_FEATURES, accepted) };
+    let has_flush = accepted & FEATURE_BLK_F_FLUSH != 0;
 
     // ── Read disk capacity ────────────────────────────────────────────────────
     let cap_lo = unsafe { inl(io + REG_BLK_CAPACITY_LO) };
@@ -503,7 +526,12 @@ pub fn init() -> bool {
         crate::kprintln!("[virtio-blk] device FAILED status={:#x}", dev_status);
         return false;
     }
-    crate::kprintln!("[virtio-blk] device status after DRIVER_OK={:#x}", dev_status);
+    crate::kprintln!(
+        "[virtio-blk] device status after DRIVER_OK={:#x} features={:#x} flush={}",
+        dev_status,
+        features,
+        if has_flush { "T_FLUSH" } else { "write-through (F_FLUSH not offered)" },
+    );
 
     // ── Store global state ────────────────────────────────────────────────────
     unsafe {
@@ -511,6 +539,7 @@ pub fn init() -> bool {
             io_base: io,
             q_size,
             capacity,
+            has_flush,
             vq_phys,
             hdr_phys,
             dat_phys,
@@ -549,7 +578,7 @@ pub fn read_sectors(sector: u64, buf: &mut [u8]) -> bool {
         None    => return false,
     };
     if sector + count as u64 > dev.capacity { return false; }
-    if !dev.submit(sector, count, false) { return false; }
+    if !dev.submit(VIRTIO_BLK_T_IN, sector, count) { return false; }
     // Copy from DMA buffer to caller.
     unsafe {
         core::ptr::copy_nonoverlapping(
@@ -581,7 +610,22 @@ pub fn write_sectors(sector: u64, buf: &[u8]) -> bool {
             buf.len(),
         );
     }
-    dev.submit(sector, count, true)
+    dev.submit(VIRTIO_BLK_T_OUT, sector, count)
+}
+
+/// Flush the device write cache: every write completed before this call is
+/// durable on the backing medium when it returns `true`.
+///
+/// When VIRTIO_BLK_F_FLUSH was not offered, the device operates write-through
+/// (completed writes are already durable per the virtio spec) and this is a
+/// correct no-op. The RFS V2 commit barrier (COW-3) rides on this call.
+pub fn flush() -> bool {
+    let dev = match dev_mut() {
+        Some(d) => d,
+        None    => return false,
+    };
+    if !dev.has_flush { return true; }
+    dev.submit(VIRTIO_BLK_T_FLUSH, 0, 0)
 }
 
 /// Read one 512-byte sector from the disk into `buf`.

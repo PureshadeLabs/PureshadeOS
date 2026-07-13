@@ -1,0 +1,20 @@
+[package]
+name = "shade-store-db"
+version = "0.1.0"
+edition = "2024"
+description = "shade store database, GC roots, and mark-and-sweep garbage collection (docs/shade-pkg/02-store.md §7, docs/shade/store-db-gc.md). Records realized paths + references, tracks the live set (roots + build locks), reclaims unreachable store paths. std host crate."
+
+[lib]
+name = "shade_store_db"
+path = "src/lib.rs"
+
+[dependencies]
+shade-cdf = { path = "../shade-cdf" }
+shade-store = { path = "../shade-store" }
+
+[[bin]]
+# Host seed vehicle for `shade gc` / root management (shade-pkg 09 §2),
+# alongside the host `shade-build` binary. The OROS `shade` binary stays a
+# no_std stub until argv + an OROS EvalIo exist (pkg/shade/src/main.rs).
+name = "shade-gc"
+path = "src/bin/shade-gc.rs"

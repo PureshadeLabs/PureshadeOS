@@ -1,0 +1,11 @@
+[package]
+name = "shade-cdf"
+version = "0.1.0"
+edition = "2024"
+description = "Canonical Derivation Form: the one shared canonicalizer (docs/shade-pkg/02-store.md §3.2-3.3, docs/shade/08-interop.md §1)"
+
+[dependencies]
+blake3 = { version = "1", default-features = false }
+
+[features]
+default = []

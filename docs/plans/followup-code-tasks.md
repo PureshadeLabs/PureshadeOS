@@ -270,3 +270,114 @@ Measured under QEMU TCG (debug kernel, Limine/OVMF). Three changes:
 
 Run the gated suite (`make kernel-tests && make run`) before touching the
 scheduler, PMM, heap, ELF loader, or cap system.
+
+---
+
+## 9. RFS V2 kernel wiring. LANDED (2026-07-06)
+
+The `fs/rfs2` crate (COW filesystem, `docs/rfs-v2/`) is now the live backing
+store for the FS syscalls, replacing the V1 driver (`kernel/src/rfs.rs`, kept
+in-tree but no longer wired). Integration only — no on-disk format or FS logic
+changed.
+
+**What landed:**
+- **virtio-blk `BlockDevice`** (`kernel/src/vfs.rs::VirtioDisk`): 4096-B blocks
+  over the existing 8-sector virtio-blk requests. Driver gained
+  `VIRTIO_BLK_F_FLUSH` negotiation + `VIRTIO_BLK_T_FLUSH` (`virtio_blk::flush`);
+  boot confirms `flush=T_FLUSH` on QEMU 10.x. Without F_FLUSH the device is
+  write-through and `flush()` is a correct no-op.
+- **Mount at boot** (`vfs::init`, called from `main.rs`): `Rfs2::mount` runs
+  slot selection + mark-and-sweep free-space reconstruction + orphan reclaim on
+  the real volume. Boot log: `[vfs] rfs2 mounted: gen=N slot=A blocks=X/Y`.
+- **Syscall switchover**: `SYS_OPEN/READ/WRITE/CLOSE/STAT/READDIR/CREATE/`
+  `UNLINK/MKDIR/RENAME/SEEK` and exec's `load_file` route through `vfs.rs` to
+  V2. Syscall surface unchanged; errno mapping preserves the V1 ABI values.
+  lythd's `abi-verify` self-test passes against the mounted volume.
+- **Image builder** `tools/mkrfs2` links `fs/rfs2` and formats via the
+  reference `mkfs`; `kernel/build.rs` now calls it. `--verify` walks/reads the
+  whole tree; `--crash-test` is the acceptance harness.
+- **Crash-consistency gate PASS** (`mkrfs2 --crash-test disk.img`): a torn
+  superblock write (only first sector lands) is rejected by `read_slot`
+  (payload gen ≠ trailer gen_copy) and remount recovers to last-good gen K; a
+  clean commit advances to K+1; a recovered volume stays writable. Pointer-flip
+  atomicity holds on the real commit path.
+
+**Flush/barrier verification (how):** the driver reads device feature bits,
+accepts only F_FLUSH, and issues a 2-descriptor T_FLUSH request that blocks on
+the device status byte — same completion path as read/write, so the barrier
+provably reaches the device before `flush()` returns. Confirmed on boot via the
+`flush=T_FLUSH` diagnostic. On a device that does not offer F_FLUSH the spec
+guarantees write-through durability, so the no-op path is correct.
+
+**TODO(open) surfaced during wiring:**
+- **create/mkdir ownership**: `Rfs2::create`/`mkdir` (doc 07 §3, doc 06 §1)
+  take no uid/gid and stamp 0/0 mode 0644/0755. The V1 driver recorded the
+  caller's uid/gid. `vfs::create`/`mkdir` accept `uid`/`gid` for ABI
+  compatibility but ignore them. Needs a spec-defined set-ownership operation
+  (chown-equivalent) before multi-user DAC on V2 files is meaningful.
+- **ENOTEMPTY**: `rmdir` on a non-empty dir returns `Error::NotEmpty`; the
+  syscall spec has no distinct errno for it (noted in `fs.rs`), so `vfs::errno`
+  folds it into `EINVAL`. Assign a sentinel in `docs/spec/syscalls.md` +
+  `abi/lythos-abi/errno.rs` if callers need to distinguish it.
+- **EIO sentinel**: device/integrity faults (`Io`, `Auth`, `Corrupt`,
+  `BadHeader`, `NoSuperblock`, `Unsupported`) map to `ENODEV` — the V1 surface
+  has no dedicated I/O-error code. A real `EIO` would let userspace tell "no
+  device" from "block failed authentication" (CONSIST-2 detected fault).
+- **V1 driver retirement**: `kernel/src/rfs.rs` is dead once V2 is trusted;
+  left in place this pass to keep the diff integration-only. Remove in a
+  follow-up (also drops the mkrfs V1 tool and its build.rs references).
+- **Crypto layer**: out of scope by design — `IdentityTransform` (no-op) is the
+  active seam. Torn-write detection under identity rests on the plaintext
+  `gen_copy` trailer check, not GCM auth; the real `GcmTransform` is a separate
+  KAT-gated workstream (doc 08, `fs/rfs2/src/transform.rs`).
+
+## 10. errno scheme collision: vfs-local codes shadow abi/errno.rs
+
+`kernel/src/vfs.rs` defines local negative error codes carried over from the
+retired V1 `rfs.rs` ABI: `ENODEV=-1, EINVAL=-4, ENOENT=-5, EBADF=-6, EISDIR=-7,
+ENOTDIR=-8, ENOMNT=-9, EMFILE=-10, EEXIST=-11, ENOSPC=-12`. These **shadow**
+`abi/lythos-abi/src/errno.rs`, where the same numeric values mean different
+things (`ENOSYS=-1, ENOCAP=-2, ENOPERM=-3, EINVAL=-4, ENOENT=-5, EBADF=-6,
+EAGAIN=-7, ENOTDIR=-8, ENOMNT=-9, EMFILE=-10, EEXIST=-11, ENOSPC=-12`). Where
+the two tables agree (-4..-6, -8..-12) it is coincidence, not design; -1/-7
+actively disagree (`ENODEV`/`EISDIR` vs `ENOSYS`/`EAGAIN`).
+
+A userspace caller that interprets an FS syscall return through
+`abi::errno` gets the wrong meaning for -1 and -7. Latent because current
+callers mostly test `< 0` rather than decode the specific code.
+
+**Deferred deliberately** (surfaced by the mount-syscall task,
+`docs/plans/mount-syscall-shade-store.md` §6.1 — that task adds `EMOUNTED=-13`
+and `EROFS=-14` to both tables cleanly but does **not** touch the collision).
+
+**Fix (when scheduled):** make `vfs.rs` return the canonical `abi::errno`
+values (fold `ENODEV`→a real `EIO` sentinel — see item 9's EIO note — and
+`EISDIR`→its own sentinel), update `docs/spec/syscalls.md`'s error table, and
+audit userspace FS callers for hardcoded numeric assumptions. Cross-cutting ABI
+change; do with the EIO/ENOTEMPTY sentinel work above in one errno pass.
+
+## 11. Kernel boot-loops with guest RAM > 1 GiB
+
+Found 2026-07-12 during mount-hardening verification. `-m 512M` boots fully
+green; `-m 1536M` enters the kernel and boot-loops (repeated
+`lythos kernel initializing` banners = crash+reset before serial diagnostics);
+`-m 2G` wedges even earlier, inside Limine/OVMF (`Loading executable` repaint
+loop — kernel never entered, possibly an EDK2/Limine-11-on-nix-QEMU quirk).
+
+The crash at 1536M happens in EARLY boot, long before VFS/RamDisk/mount code
+runs — likely something (Limine response structures, memory-map walk, early
+page-table bootstrap) touching physical addresses above the 1 GiB window that
+`vmm::IDENTITY_MAP_LIMIT` covers, i.e. the same unmapped-frame bug class the
+mount hardening fixed for RamDisk, but in the boot path. `pmm::MAX_FRAMES`
+spans 4 GiB, so PMM init itself is a suspect (bitmap marking is address-only —
+fine — but anything that *touches* high usable regions is not).
+
+Not caused by the 2026-07-12 hardening: the vmm identity-map loop is
+byte-identical in behavior (512 × 2 MiB, now expressed via
+`IDENTITY_MAP_LIMIT` with a const assert), and the RamDisk validation code is
+unreachable at the observed crash point.
+
+**Fix (when scheduled):** boot under `-d int,cpu_reset` (`make debug`) with
+`-m 1536M`, find the faulting access, and either extend the identity map /
+HHDM alias beyond 1 GiB or gate the offending walk. Until then QEMU_MEM must
+stay ≤ 1 GiB (default 512M).

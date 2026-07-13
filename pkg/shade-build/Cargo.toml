@@ -1,0 +1,25 @@
+[package]
+name = "shade-build"
+version = "0.1.0"
+edition = "2024"
+description = "shade build core: eval → digest → resolve → realize (LOOKUP-THEN-BUILD). Drives shadec (evaluator) into shade-store (realization). std host crate; the OROS shade binary is a deferred no_std wrapper."
+
+[lib]
+name = "shade_build"
+path = "src/lib.rs"
+
+[dependencies]
+# shadec's std feature adds HostIo; default already enables it.
+shadec = { path = "../shadec" }
+shade-store = { path = "../shade-store" }
+shade-store-db = { path = "../shade-store-db" }
+shade-cdf = { path = "../shade-cdf" }
+# errno constants only (BuildError::errno) — pure types, host-compilable.
+lythos-abi = { path = "../../abi/lythos-abi" }
+
+[[bin]]
+# Host seed vehicle for `shade build` (shade-pkg 09 §2), alongside the host
+# `shadec` binary. The OROS `shade` binary (pkg/shade) stays a no_std stub
+# until argv + an OROS EvalIo exist.
+name = "shade-build"
+path = "src/bin/shade-build.rs"

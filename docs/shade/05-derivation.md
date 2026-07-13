@@ -41,7 +41,7 @@ attribute; anything else → error):
 | `sandbox` | int | no | `sandbox` (default `1`, the only profile, [`shade-pkg 06 §3.1`](../shade-pkg/06-build.md#31-contract-sandbox-profile-1)) |
 | `sources` | list of source-specs | no | `source.<i>.*` (§4) |
 | `deps` | list of derivations | no | `dep.<i>` — each element's `outPath` store path; sorted bytewise ([`shade-pkg 02 §3.3`](../shade-pkg/02-store.md#33-hash-inputs) ordering rule) |
-| `env` | attrset (string→string) | no | `env.<KEY>` — keys must match `[A-Z_][A-Z0-9_]*`, values string-coerced; setting a sandbox-fixed var ([`shade-pkg 06 §4`](../shade-pkg/06-build.md#4-environment)) is an error |
+| `env` | attrset (string→string) | no | `env.<key>` — argument keys must match `[A-Z_][A-Z0-9_]*` and are recorded folded to lowercase (CDF keys are lowercase-only, [`shade-pkg 02 §3.2`](../shade-pkg/02-store.md#32-canonical-derivation-form-cdf) rule 2; lossless fold, builder restores uppercase); values string-coerced; setting a sandbox-fixed var ([`shade-pkg 06 §4`](../shade-pkg/06-build.md#4-environment)) is an error |
 | `phases` | list of strings | no | `phase.<i>` in list order (execution order) |
 | `outputs` | attrset `{ bin=[…]; lib=[…]; share=[…]; }` | yes | `output.<i>` in `bin`,`lib`,`share` order then list order ([`shade-pkg 03 §6`](../shade-pkg/03-recipe-format.md#6-outputs)) |
 | ~~`unsafe`~~ | — | — | **retired** — no longer an accepted argument or CDF key; shade synthesizes no recipe-less builds ([`shade-pkg 03 §7`](../shade-pkg/03-recipe-format.md#7-unsafe-default-recipes)). Passing it is an unknown-argument error |
@@ -107,7 +107,7 @@ runs this total procedure:
    exclusions.
 5. **Canonicalize** — sort keys bytewise ascending except the `shade-drv`
    header first; index the repeated lists (`source.<i>`, `dep.<i>`,
-   `env.<KEY>`, `phase.<i>`, `output.<i>`) per the ordering rules
+   `env.<key>`, `phase.<i>`, `output.<i>`) per the ordering rules
    ([`shade-pkg 02 §3.3`](../shade-pkg/02-store.md#33-hash-inputs)); percent-escape
    values ([`shade-pkg 02 §3.2`](../shade-pkg/02-store.md#32-canonical-derivation-form-cdf)
    rule 4); emit `key=value\n` lines with a trailing LF.

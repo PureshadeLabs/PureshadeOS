@@ -1,0 +1,8 @@
+[package]
+name = "shade-store"
+version = "0.1.0"
+edition = "2024"
+description = "Input-addressed store realization (docs/shade-pkg/02-store.md §2-3): digest, path construction, idempotent atomic realize. Track 1 — no build dispatch."
+
+[dependencies]
+shade-cdf = { path = "../shade-cdf" }
