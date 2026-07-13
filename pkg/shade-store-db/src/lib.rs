@@ -19,8 +19,11 @@
 //!   digests found by [reference scanning](StoreDb::register) the output.
 //!
 //! Mutations serialize on `db/lock` (exclusive-create — the flock-equivalent
-//! 02 §7.2 calls for; the OROS VFS exclusive-create primitive is the eventual
-//! backing, see that section's `TODO(open)`).
+//! 02 §7.2 calls for). On target the backing primitive is `SYS_CREATE`:
+//! atomic create-if-absent, exactly one winner, losers get `EEXIST`
+//! (docs/spec/syscalls.md, SYS_CREATE exclusive-create guarantee; verified
+//! by the `make kernel-tests` exclusive-create boot probe). The host seed
+//! uses `OpenOptions::create_new` — same semantics.
 //!
 //! ## The live set (02 §7.1)
 //!

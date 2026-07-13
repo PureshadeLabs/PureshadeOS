@@ -47,6 +47,9 @@ Errors are returned in RAX as large `u64` values (two's-complement negative
 | `0xFFFF_FFFF_FFFF_FFF4` | -12 | `ENOSPC`  | No space left on device (SYS_CREATE, SYS_MKDIR) |
 | `0xFFFF_FFFF_FFFF_FFF3` | -13 | `EMOUNTED` | A mount already exists at the mount point (SYS_MOUNT) |
 | `0xFFFF_FFFF_FFFF_FFF2` | -14 | `EROFS`   | Write to a read-only / sealed path — read-only-after-realize on the store mount (SYS_WRITE, SYS_CREATE, SYS_MKDIR, SYS_UNLINK, SYS_RENAME) |
+| `0xFFFF_FFFF_FFFF_FFF1` | -15 | `EISDIR`  | Path is a directory where a regular file is required (SYS_OPEN) |
+| `0xFFFF_FFFF_FFFF_FFF0` | -16 | `ENOTEMPTY` | Directory not empty (SYS_RENAME onto a non-empty directory; future rmdir) |
+| `0xFFFF_FFFF_FFFF_FFEF` | -17 | `EIO`     | I/O or integrity fault — block device error, failed authentication, corrupt on-disk structure (any FS syscall, SYS_MOUNT). Distinct from ENOMNT |
 
 `SYSCALL_MAX = 56`. Syscall numbers above 56 and unassigned number 49
 always return `ENOSYS`.
@@ -471,9 +474,9 @@ Open a file on the RFS filesystem.
 - a1 — pointer to path string in user address space
 - a2 — path length in bytes
 
-**Returns:** file descriptor (≥ 0) on success; `ENOENT` if not found; `EMFILE`
-if the per-process fd table is full; `ENOMNT` if the filesystem is not mounted;
-`EINVAL` on bad arguments
+**Returns:** file descriptor (≥ 0) on success; `ENOENT` if not found; `EISDIR`
+if the path is a directory; `EMFILE` if the per-process fd table is full;
+`ENOMNT` if the filesystem is not mounted; `EINVAL` on bad arguments
 
 ---
 
@@ -562,6 +565,15 @@ Create a new empty regular file.
 exists; `ENOTDIR` if a path component is not a directory; `EMFILE` if the fd
 table is full; `ENOSPC` if the device has no free blocks; `ENOMNT` if not
 mounted; `EINVAL` on bad arguments
+
+**Exclusive-create guarantee:** `SYS_CREATE` is atomic create-if-absent —
+the existence check and the creation happen inside one uninterrupted syscall
+(the kernel is single-threaded and FS paths are never preempted). Of any
+number of concurrent creators of the same path, exactly one receives a
+writable fd; every other caller receives `EEXIST`. There is no truncate-if-
+exists mode. This is the locking primitive for userspace lock files
+(e.g. the shade store-db lock): winner holds the lock, losers back off on
+`EEXIST`, release is `SYS_UNLINK`.
 
 ---
 

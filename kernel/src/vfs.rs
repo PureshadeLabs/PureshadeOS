@@ -13,8 +13,8 @@
 //!   open-handle pins (doc 06 §5);
 //! - symlink-following path resolution over the mount table (per-hop, so a
 //!   symlink target crossing a mount boundary re-routes correctly);
-//! - errno mapping to the same negative codes the retired V1 driver returned
-//!   (plus `EMOUNTED`/`EROFS`, mirrored in `abi/lythos-abi/src/errno.rs`);
+//! - errno mapping to the canonical `abi/lythos-abi/src/errno.rs` values
+//!   (the V1-era local scheme is gone — followup item 10);
 //! - the commit policy: every mutating operation commits immediately on its
 //!   backend (doc 04 §3; commit-per-syscall, matching V1-observed durability).
 //!
@@ -41,26 +41,35 @@ use vfs_core::{
 
 use crate::virtio_blk;
 
-// ── Error codes (V1 rfs.rs ABI + the two new mount-era codes) ─────────────────
+// ── Error codes (canonical abi/lythos-abi/src/errno.rs values) ────────────────
 //
-// NOTE: this local scheme predates abi/errno.rs and collides with it for
-// -1/-7 (see docs/plans/followup-code-tasks.md item 10 — deferred). The two
-// new codes are value-identical in both tables.
+// The kernel crate has no dependency on lythos-abi, so the values are
+// restated here — they MUST stay identical to `abi/lythos-abi/src/errno.rs`
+// and the table in `docs/spec/syscalls.md`. The old V1-era local scheme
+// (`ENODEV=-1`, `EISDIR=-7`) collided with the ABI table
+// (docs/plans/followup-code-tasks.md item 10 — resolved 2026-07-13):
+// device/integrity faults now report `EIO=-17` and directory-vs-file misuse
+// `EISDIR=-15`; `FsError::NotEmpty` gets its own `ENOTEMPTY=-16` instead of
+// folding into EINVAL.
 
-pub const ENODEV:   i64 = -1;
-pub const EINVAL:   i64 = -4;
-pub const ENOENT:   i64 = -5;
-pub const EBADF:    i64 = -6;
-pub const EISDIR:   i64 = -7;
-pub const ENOTDIR:  i64 = -8;
-pub const ENOMNT:   i64 = -9;
-pub const EMFILE:   i64 = -10;
-pub const EEXIST:   i64 = -11;
-pub const ENOSPC:   i64 = -12;
+pub const EINVAL:    i64 = -4;
+pub const ENOENT:    i64 = -5;
+pub const EBADF:     i64 = -6;
+pub const ENOTDIR:   i64 = -8;
+pub const ENOMNT:    i64 = -9;
+pub const EMFILE:    i64 = -10;
+pub const EEXIST:    i64 = -11;
+pub const ENOSPC:    i64 = -12;
 /// A mount already exists at the mount point (SYS_MOUNT).
-pub const EMOUNTED: i64 = -13;
+pub const EMOUNTED:  i64 = -13;
 /// Write to a read-only / sealed path (read-only-after-realize, stage 2).
-pub const EROFS:    i64 = -14;
+pub const EROFS:     i64 = -14;
+/// Path is a directory where a regular file is required.
+pub const EISDIR:    i64 = -15;
+/// Directory not empty (rename onto a non-empty dir; future rmdir).
+pub const ENOTEMPTY: i64 = -16;
+/// I/O / integrity fault: device error, failed auth, corrupt structure.
+pub const EIO:       i64 = -17;
 
 /// `vfs_core::FsError` → errno.
 fn errno_fs(e: FsError) -> i64 {
@@ -70,9 +79,10 @@ fn errno_fs(e: FsError) -> i64 {
         FsError::NotDir => ENOTDIR,
         FsError::IsDir => EISDIR,
         FsError::NoSpace => ENOSPC,
-        FsError::Invalid | FsError::NotEmpty => EINVAL,
+        FsError::Invalid => EINVAL,
+        FsError::NotEmpty => ENOTEMPTY,
         FsError::ReadOnly => EROFS,
-        FsError::Device => ENODEV,
+        FsError::Device => EIO,
     }
 }
 
@@ -515,13 +525,13 @@ pub fn mount(at: &str, source: u64, flags: u64) -> i64 {
     };
     let opts = rfs2::MkfsOptions { uuid: [0u8; 16], label: "ram", now: clock_ns() };
     if rfs2::mkfs(&mut dev, &IdentityTransform, &opts).is_err() {
-        return ENODEV;
+        return EIO;
     }
     let fs = match Rfs2::mount(dev, IdentityTransform, clock_ns) {
         Ok(fs) => fs,
         Err(e) => {
             crate::kprintln!("[vfs] ram rfs2 mount failed: {:?}", e);
-            return ENODEV;
+            return EIO;
         }
     };
     match v.table.mount(at, Box::new(Rfs2Backend { fs })) {

@@ -157,9 +157,10 @@ layer only *reads* roots either way.)
 `StoreDb::gc` ([`02 §7.3`](../shade-pkg/02-store.md#73-sweep)):
 
 1. **Lock.** Take `/shade/db/lock` (exclusive-create — the flock-equivalent
-   [`02 §7.2`](../shade-pkg/02-store.md#72-references) calls for; the eventual
-   backing is the OROS VFS exclusive-create primitive). Refuse if any build
-   lock is present (a build is in flight) unless `--force`.
+   [`02 §7.2`](../shade-pkg/02-store.md#72-references) calls for; on target
+   backed by `SYS_CREATE`'s atomic create-if-absent guarantee,
+   `docs/spec/syscalls.md`). Refuse if any build lock is present (a build is
+   in flight) unless `--force`.
 2. **Mark.** Collect the root digests (§3), then BFS their closure over
    `refs/`. The result is the live digest set.
 3. **Sweep.** For every entry under `/shade/store/`: if its name is a valid

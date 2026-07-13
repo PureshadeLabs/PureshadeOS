@@ -315,14 +315,12 @@ guarantees write-through durability, so the no-op path is correct.
   caller's uid/gid. `vfs::create`/`mkdir` accept `uid`/`gid` for ABI
   compatibility but ignore them. Needs a spec-defined set-ownership operation
   (chown-equivalent) before multi-user DAC on V2 files is meaningful.
-- **ENOTEMPTY**: `rmdir` on a non-empty dir returns `Error::NotEmpty`; the
-  syscall spec has no distinct errno for it (noted in `fs.rs`), so `vfs::errno`
-  folds it into `EINVAL`. Assign a sentinel in `docs/spec/syscalls.md` +
-  `abi/lythos-abi/errno.rs` if callers need to distinguish it.
-- **EIO sentinel**: device/integrity faults (`Io`, `Auth`, `Corrupt`,
-  `BadHeader`, `NoSuperblock`, `Unsupported`) map to `ENODEV` — the V1 surface
-  has no dedicated I/O-error code. A real `EIO` would let userspace tell "no
-  device" from "block failed authentication" (CONSIST-2 detected fault).
+- ~~**ENOTEMPTY**~~ RESOLVED 2026-07-13 with item 10: sentinel `-16` in both
+  errno tables; `vfs::errno_fs` no longer folds `NotEmpty` into `EINVAL`.
+- ~~**EIO sentinel**~~ RESOLVED 2026-07-13 with item 10: sentinel `-17` in
+  both errno tables; device/integrity faults (`Io`, `Auth`, `Corrupt`,
+  `BadHeader`, `NoSuperblock`, `Unsupported`) now report `EIO`, distinct
+  from `ENOMNT` ("no device / not mounted").
 - **V1 driver retirement**: `kernel/src/rfs.rs` is dead once V2 is trusted;
   left in place this pass to keep the diff integration-only. Remove in a
   follow-up (also drops the mkrfs V1 tool and its build.rs references).
@@ -331,7 +329,23 @@ guarantees write-through durability, so the no-op path is correct.
   `gen_copy` trailer check, not GCM auth; the real `GcmTransform` is a separate
   KAT-gated workstream (doc 08, `fs/rfs2/src/transform.rs`).
 
-## 10. errno scheme collision: vfs-local codes shadow abi/errno.rs
+## 10. errno scheme collision: vfs-local codes shadow abi/errno.rs. RESOLVED (2026-07-13)
+
+**Resolution:** `kernel/src/vfs.rs` now returns the canonical
+`abi/lythos-abi/src/errno.rs` values. Three new sentinels added to both
+tables and `docs/spec/syscalls.md`: `EISDIR=-15` (was vfs-local -7, which
+aliased `EAGAIN`), `ENOTEMPTY=-16` (was folded into `EINVAL` — closes item
+9's ENOTEMPTY TODO), `EIO=-17` for device/integrity faults (was vfs-local
+`ENODEV=-1`, which aliased `ENOSYS` — closes item 9's EIO TODO; distinct
+from `ENOMNT` "not mounted"). `ERR_MIN` moved to `EIO`. Userspace:
+`lythos-rt::SysError` gained `Mounted/RoFs/IsDir/NotEmpty/Io` variants,
+`from_raw`/`is_err_raw` now derive from `lythos_abi::errno` (the old
+hardcoded `is_err_raw` boundary at -12 silently treated `EMOUNTED`/`EROFS`
+as success values). Audit found no userspace callers decoding the old -1/-7
+numerics. The retired V1 driver `kernel/src/rfs.rs` keeps its local table
+(unwired; removed with item 9's V1-retirement task). Boot probe: the
+exclusive-create probe (`make kernel-tests`) asserts `open(dir) == -15` live.
+Original report follows.
 
 `kernel/src/vfs.rs` defines local negative error codes carried over from the
 retired V1 `rfs.rs` ABI: `ENODEV=-1, EINVAL=-4, ENOENT=-5, EBADF=-6, EISDIR=-7,

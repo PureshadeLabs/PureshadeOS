@@ -119,30 +119,47 @@ pub enum SysError {
     Exist,
     /// No space left on device (`ENOSPC`).
     NoSpc,
+    /// A mount already exists at the mount point (`EMOUNTED`).
+    Mounted,
+    /// Write to a read-only / sealed path (`EROFS`).
+    RoFs,
+    /// Path is a directory where a regular file is required (`EISDIR`).
+    IsDir,
+    /// Directory not empty (`ENOTEMPTY`).
+    NotEmpty,
+    /// I/O or integrity fault — device error, failed auth, corruption (`EIO`).
+    Io,
     Unknown(u64),
 }
 
 impl SysError {
     pub fn from_raw(v: u64) -> Self {
+        use lythos_abi::errno as e;
         match v {
-            0xFFFF_FFFF_FFFF_FFFF => SysError::NoSys,
-            0xFFFF_FFFF_FFFF_FFFE => SysError::NoCap,
-            0xFFFF_FFFF_FFFF_FFFD => SysError::NoPerm,
-            0xFFFF_FFFF_FFFF_FFFC => SysError::Inval,
-            0xFFFF_FFFF_FFFF_FFFB => SysError::NoEnt,
-            0xFFFF_FFFF_FFFF_FFFA => SysError::BadFd,
-            0xFFFF_FFFF_FFFF_FFF9 => SysError::Again,
-            0xFFFF_FFFF_FFFF_FFF8 => SysError::NotDir,
-            0xFFFF_FFFF_FFFF_FFF7 => SysError::NoMnt,
-            0xFFFF_FFFF_FFFF_FFF6 => SysError::MFile,
-            0xFFFF_FFFF_FFFF_FFF5 => SysError::Exist,
-            0xFFFF_FFFF_FFFF_FFF4 => SysError::NoSpc,
-            other                  => SysError::Unknown(other),
+            e::ENOSYS    => SysError::NoSys,
+            e::ENOCAP    => SysError::NoCap,
+            e::ENOPERM   => SysError::NoPerm,
+            e::EINVAL    => SysError::Inval,
+            e::ENOENT    => SysError::NoEnt,
+            e::EBADF     => SysError::BadFd,
+            e::EAGAIN    => SysError::Again,
+            e::ENOTDIR   => SysError::NotDir,
+            e::ENOMNT    => SysError::NoMnt,
+            e::EMFILE    => SysError::MFile,
+            e::EEXIST    => SysError::Exist,
+            e::ENOSPC    => SysError::NoSpc,
+            e::EMOUNTED  => SysError::Mounted,
+            e::EROFS     => SysError::RoFs,
+            e::EISDIR    => SysError::IsDir,
+            e::ENOTEMPTY => SysError::NotEmpty,
+            e::EIO       => SysError::Io,
+            other        => SysError::Unknown(other),
         }
     }
 
+    /// Whether a raw syscall return is an error sentinel (`errno::is_err`).
     #[inline]
-    pub fn is_err_raw(v: u64) -> bool { v >= 0xFFFF_FFFF_FFFF_FFF4 }
+    pub fn is_err_raw(v: u64) -> bool { lythos_abi::errno::is_err(v) }
 }
 
 impl core::fmt::Display for SysError {

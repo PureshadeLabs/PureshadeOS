@@ -1,8 +1,8 @@
 //! Error code sentinels — transcribed from `docs/spec/syscalls.md` error table.
 //!
 //! All values are returned in RAX as two's-complement u64 (negative i64 reinterpreted).
-//! Fourteen codes are defined: seven generic capability/syscall codes (-1..-7) plus
-//! seven VFS-specific codes (-8..-14) returned by filesystem syscalls.
+//! Seventeen codes are defined: seven generic capability/syscall codes (-1..-7) plus
+//! ten VFS-specific codes (-8..-17) returned by filesystem syscalls.
 
 /// Unknown or unassigned syscall number.
 pub const ENOSYS:  u64 = (-1i64) as u64;   // 0xFFFF_FFFF_FFFF_FFFF
@@ -51,9 +51,21 @@ pub const EMOUNTED: u64 = (-13i64) as u64; // 0xFFFF_FFFF_FFFF_FFF3
 /// SYS_RENAME).
 pub const EROFS:   u64 = (-14i64) as u64;  // 0xFFFF_FFFF_FFFF_FFF2
 
+/// Path is a directory where a regular file is required (VFS: SYS_OPEN).
+pub const EISDIR:  u64 = (-15i64) as u64;  // 0xFFFF_FFFF_FFFF_FFF1
+
+/// Directory is not empty (VFS: SYS_RENAME onto a non-empty directory;
+/// future rmdir).
+pub const ENOTEMPTY: u64 = (-16i64) as u64; // 0xFFFF_FFFF_FFFF_FFF0
+
+/// I/O or integrity fault: block device error, failed authentication,
+/// corrupt/unsupported on-disk structure (VFS: any FS syscall; SYS_MOUNT).
+/// Distinct from ENOMNT ("no device / not mounted").
+pub const EIO:     u64 = (-17i64) as u64;  // 0xFFFF_FFFF_FFFF_FFEF
+
 /// The lowest (most negative as i64) error sentinel value.
 /// Any return value ≥ ERR_MIN is an error.
-pub const ERR_MIN: u64 = EROFS;
+pub const ERR_MIN: u64 = EIO;
 
 /// Return `true` if `v` is an error sentinel.
 #[inline(always)]

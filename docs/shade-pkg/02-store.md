@@ -440,9 +440,10 @@ catches paths embedded by the compiler, e.g. in panic messages or
 
 `/shade/db/` is a plain directory-of-files database in v1 — no binary format, no
 locking beyond an exclusive `flock`-equivalent on `/shade/db/lock` for mutations.
-`TODO(open):` this needs the OROS VFS to provide an exclusive-create
-primitive; verify against `docs/spec/syscalls.md` VFS surface before
-implementation.
+The OROS VFS exclusive-create primitive backing this is `SYS_CREATE`: atomic
+create-if-absent, exactly one winner among concurrent creators, losers get
+`EEXIST`, release via `SYS_UNLINK` (`docs/spec/syscalls.md`, SYS_CREATE
+exclusive-create guarantee — resolved 2026-07-13, was `TODO(open)`).
 
 ### 7.3 Sweep
 

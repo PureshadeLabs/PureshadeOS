@@ -883,6 +883,39 @@ pub extern "C" fn kernel_main() -> ! {
         );
 
         kprintln!("{TAG}[mount]{RST} stage-2 probe {OK}passed{RST} — store mount, realize seal, EROFS, re-realize no-op");
+
+        // ── Exclusive-create probe (docs/spec/syscalls.md SYS_CREATE) ─────
+        // SYS_CREATE is the atomic create-if-absent primitive: existence
+        // check + creation happen inside one uninterrupted syscall, so of N
+        // racing creators exactly one wins. The kernel is single-threaded —
+        // the tightest race two creators can produce is back-to-back calls,
+        // modeled here with the winner's fd still open. Runs on the /mnt RAM
+        // volume so the root disk image is untouched.
+        {
+            let winner = vfs::create(b"/mnt/excl.lock", 0, 0);
+            assert!(winner >= 0, "excl probe: first create failed: {winner}");
+            let loser = vfs::create(b"/mnt/excl.lock", 0, 0);
+            assert_eq!(loser, vfs::EEXIST, "excl probe: racing create must be EEXIST, got {loser}");
+            assert_eq!(vfs::close(winner as u64), 0);
+            // Still EEXIST after the winner's fd closes — the path's
+            // existence excludes, not the open fd.
+            let again = vfs::create(b"/mnt/excl.lock", 0, 0);
+            assert_eq!(again, vfs::EEXIST, "excl probe: create on existing must be EEXIST, got {again}");
+            // Unlink releases the path for the next creator (lock release).
+            assert_eq!(vfs::unlink(b"/mnt/excl.lock"), 0);
+            let retake = vfs::create(b"/mnt/excl.lock", 0, 0);
+            assert!(retake >= 0, "excl probe: create after unlink failed: {retake}");
+            assert_eq!(vfs::close(retake as u64), 0);
+            assert_eq!(vfs::unlink(b"/mnt/excl.lock"), 0);
+
+            // Errno canonicalization (followup item 10): open() on a
+            // directory reports the ABI's EISDIR (-15), not the retired
+            // V1 scheme's -7.
+            let r = vfs::open(b"/mnt");
+            assert_eq!(r, vfs::EISDIR, "excl probe: open(dir) must be EISDIR(-15), got {r}");
+
+            kprintln!("{TAG}[vfs]{RST} exclusive-create probe {OK}passed{RST} — one winner, loser EEXIST, unlink releases, open(dir)=EISDIR(-15)");
+        }
     } else {
         kprintln!("{VRB}[mount] probe skipped — no root volume{RST}");
     }
