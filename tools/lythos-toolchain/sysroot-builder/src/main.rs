@@ -90,23 +90,39 @@ fn run(cmd: &mut Command, verbose: bool) -> Result<(), String> {
     }
 }
 
+/// Base `cargo` invocation for every stage. Runs the cargo shipped in the
+/// caller's `--toolchain-root` (`<root>/bin/cargo`) so the sysroot is built
+/// with *that* toolchain — its rustc, its `rust-src` for `-Z build-std`.
+///
+/// Previously every stage shelled out to `cargo +nightly`, which resolves to
+/// whatever rustup marks as the ambient nightly and silently ignored
+/// `--toolchain-root` entirely: the arg was required, then never read. A
+/// caller that pointed it at a specific toolchain got the ambient one instead,
+/// with no diagnostic. Using the root's own cargo makes the advertised
+/// contract true (and needs no `+nightly` selector — that cargo *is* the
+/// pinned toolchain).
+fn cargo(args: &Args) -> Command {
+    Command::new(args.toolchain_root.join("bin/cargo"))
+}
+
 /// Stage 0: build core + compiler_builtins via `-Z build-std`.
+fn stage0_cmd(args: &Args) -> Command {
+    let mut cmd = cargo(args);
+    cmd.args([
+        "build",
+        "--release",
+        "-Z", "build-std=core,compiler_builtins",
+        "-Z", "build-std-features=compiler-builtins-mem",
+        "--target", args.target_spec.to_str().unwrap(),
+        "--manifest-path", "tools/lythos-toolchain/lythos-libc/Cargo.toml",
+    ])
+    .env("RUSTFLAGS", "-C panic=abort");
+    cmd
+}
+
 fn stage0(args: &Args) -> Result<(), String> {
     eprintln!("==> Stage 0: core + compiler_builtins");
-    run(
-        Command::new("cargo")
-            .args([
-                "+nightly",
-                "build",
-                "--release",
-                "-Z", "build-std=core,compiler_builtins",
-                "-Z", "build-std-features=compiler-builtins-mem",
-                "--target", args.target_spec.to_str().unwrap(),
-                "--manifest-path", "tools/lythos-toolchain/lythos-libc/Cargo.toml",
-            ])
-            .env("RUSTFLAGS", "-C panic=abort"),
-        args.verbose,
-    )
+    run(&mut stage0_cmd(args), args.verbose)
 }
 
 /// Stage 1: build lythos-libc + lythos-unwind.
@@ -114,9 +130,8 @@ fn stage1(args: &Args) -> Result<(), String> {
     eprintln!("==> Stage 1: lythos-libc + lythos-unwind");
 
     run(
-        Command::new("cargo")
+        cargo(args)
             .args([
-                "+nightly",
                 "build",
                 "--release",
                 "-Z", "build-std=core,alloc,compiler_builtins",
@@ -128,9 +143,8 @@ fn stage1(args: &Args) -> Result<(), String> {
     )?;
 
     run(
-        Command::new("cargo")
+        cargo(args)
             .args([
-                "+nightly",
                 "build",
                 "--release",
                 "-Z", "build-std=core,compiler_builtins",
@@ -146,9 +160,8 @@ fn stage1(args: &Args) -> Result<(), String> {
 fn stage2(args: &Args) -> Result<(), String> {
     eprintln!("==> Stage 2: lythos-libstd");
     run(
-        Command::new("cargo")
+        cargo(args)
             .args([
-                "+nightly",
                 "build",
                 "--release",
                 "-Z", "build-std=core,alloc,compiler_builtins",
@@ -219,4 +232,56 @@ fn main() -> ExitCode {
     eprintln!("    [build]");
     eprintln!("    rustflags = [\"--sysroot\", \"{}\"]", args.out_sysroot.display());
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args_with_root(root: &str) -> Args {
+        Args {
+            toolchain_root: PathBuf::from(root),
+            out_sysroot: PathBuf::from("lythos-sysroot"),
+            target_spec: PathBuf::from("tools/lythos-toolchain/target-specs/x86_64-lythos-sysroot.json"),
+            verbose: false,
+        }
+    }
+
+    /// Regression (sysroot-builder toolchain caveat): every stage must build
+    /// with the cargo from `--toolchain-root`, never the ambient `cargo
+    /// +nightly`. The root used to be parsed-then-ignored, so a caller that
+    /// named a toolchain silently got whatever rustup resolved as nightly.
+    #[test]
+    fn stages_use_the_named_toolchain_not_ambient_nightly() {
+        let root = "/opt/rust/nightly-x86_64-unknown-linux-gnu";
+        let args = args_with_root(root);
+
+        // The shared base invocation runs the root's own cargo binary.
+        let base = cargo(&args);
+        assert_eq!(
+            base.get_program(),
+            PathBuf::from(root).join("bin/cargo").as_os_str(),
+            "cargo() must invoke the toolchain-root's cargo",
+        );
+
+        // A representative stage carries the build args off that same cargo and
+        // never selects a toolchain with `+nightly` (its cargo *is* the pinned
+        // toolchain).
+        let stage0 = stage0_cmd(&args);
+        assert_eq!(
+            stage0.get_program(),
+            PathBuf::from(root).join("bin/cargo").as_os_str(),
+        );
+        let argv: Vec<String> =
+            stage0.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(
+            !argv.iter().any(|a| a.starts_with('+')),
+            "no rustup toolchain override (`+nightly`) — got {argv:?}",
+        );
+        assert!(argv.iter().any(|a| a == "build"), "still a cargo build: {argv:?}");
+        assert!(
+            argv.iter().any(|a| a.contains("build-std=core,compiler_builtins")),
+            "keeps the -Z build-std spec: {argv:?}",
+        );
+    }
 }
