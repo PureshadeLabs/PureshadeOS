@@ -51,8 +51,10 @@ Errors are returned in RAX as large `u64` values (two's-complement negative
 | `0xFFFF_FFFF_FFFF_FFF0` | -16 | `ENOTEMPTY` | Directory not empty (SYS_RENAME onto a non-empty directory; future rmdir) |
 | `0xFFFF_FFFF_FFFF_FFEF` | -17 | `EIO`     | I/O or integrity fault — block device error, failed authentication, corrupt on-disk structure (any FS syscall, SYS_MOUNT). Distinct from ENOMNT |
 
-`SYSCALL_MAX = 56`. Syscall numbers above 56 and unassigned number 49
-always return `ENOSYS`.
+`SYSCALL_MAX = 66`. Syscall numbers above 66 and the unassigned gaps 49, 50–54
+and 59 always return `ENOSYS` (59 = retired `SYS_UNSEAL`; 50–54 = retired UDP
+socket API — networking moved to a userspace `netd` driver over the device
+framework; never reuse any of these numbers).
 
 ---
 
@@ -110,13 +112,37 @@ always return `ENOSYS`.
 | 47 | `SYS_SETUID` | Set calling task's UID |
 | 48 | `SYS_SETGID` | Set calling task's GID |
 | 49 | *(unassigned)* | Return `ENOSYS` |
-| 50 | `SYS_SOCKET` | Create UDP socket |
-| 51 | `SYS_BIND` | Bind socket to local port |
-| 52 | `SYS_SENDTO` | Send UDP datagram |
-| 53 | `SYS_RECVFROM` | Receive UDP datagram |
-| 54 | `SYS_NET_CLOSE` | Close a socket |
+| 50–54 | *(retired)* | Was UDP socket API — networking is now userspace (`netd`); return `ENOSYS`, never reuse |
 | 55 | `SYS_POWEROFF` | Power off the machine |
 | 56 | `SYS_MOUNT` | Mount a filesystem backend at a path |
+| 57 | `SYS_SYMLINK` | Create a symbolic link |
+| 58 | `SYS_READLINK` | Read a symlink's target |
+| 59 | *(retired)* | Was `SYS_UNSEAL`; return `ENOSYS`, never reuse |
+| 60 | `SYS_STORE_REMOVE` | Remove an unreferenced store path |
+| 61 | `SYS_DEV_CLAIM` | Claim a registered device (Rollback-gated); mint its Device cap |
+| 62 | `SYS_DEV_CFG_READ` | Read the device's PCI config space (Device-cap gated) |
+| 63 | `SYS_DEV_MMIO_MAP` | Map a device MMIO BAR uncacheable (Device-cap gated) |
+| 64 | `SYS_DEV_DMA_ALLOC` | Allocate a DMA buffer, return its phys addr (Device-cap gated) |
+| 65 | `SYS_DEV_IRQ_WAIT` | Block until the device raises its IRQ (Device-cap gated) |
+| 66 | `SYS_DEV_IRQ_ACK` | Acknowledge/unmask the device IRQ (Device-cap gated) |
+
+---
+
+## Userspace device-driver framework (61–66)
+
+A ring-3 driver owns exactly one PCI device via an unforgeable `CapKind::Device`
+capability. The kernel enumerates devices it does not drive into a registry;
+`SYS_DEV_CLAIM` (gated on the Rollback cap, so only lythd claims) mints one
+Device cap per device, which lythd hands to the intended driver. The driver then
+reads its config space, maps its MMIO BARs (uncacheable), allocates DMA buffers,
+and waits on its IRQ — all gated on that one cap, gate-before-args (a caller with
+no Device cap gets `ENOPERM` before any argument is examined). No ambient
+authority: with no Device cap a process can touch no device. virtio-blk stays
+kernel-owned and is deliberately not registered. DMA is trusted-for-DMA (no
+IOMMU) but routed through `SYS_DEV_DMA_ALLOC` so an IOMMU can later be programmed
+there. IRQ model: on the device IRQ the kernel masks the IOAPIC line, wakes the
+waiter, and requires `SYS_DEV_IRQ_ACK` (after the driver clears the device ISR)
+to unmask — so a level-triggered PCI line does not storm.
 
 ---
 
@@ -962,7 +988,7 @@ returns `ENOPERM` regardless of arguments.
 |-----|---------|
 | a1 | `at_ptr` — mount point path (UTF-8) |
 | a2 | `at_len` — path length in bytes |
-| a3 | `source` — backend selector: `0` = `MOUNT_SRC_RFS2_RAM` (fresh RAM-backed RFS V2, formatted at mount time) |
+| a3 | `source` — backend selector: `0` = `MOUNT_SRC_RFS2_RAM` (fresh RAM-backed RFS V2, formatted at mount time, volatile); `1` = `MOUNT_SRC_RFS2_BLK` (persistent RFS V2 on the secondary virtio-blk device, formatted on first-ever boot then mounted, survives a power cycle) |
 | a4 | `flags` — bit 0 = `MOUNT_STORE` (attach read-only-after-realize store semantics to this mount) |
 
 **Returns:** 0 on success; `ENOPERM` if the caller holds no `Filesystem`
@@ -982,7 +1008,28 @@ With `MOUNT_STORE`, the mount enforces read-only-after-realize: a top-level
 entry `<digest>-<name>-<version>` becomes immutable (`EROFS` on any write
 into it) once a temp path is atomically renamed onto it; renaming onto an
 already-sealed name is an idempotent no-op success (re-realize); temp paths
-remain freely writable until sealed.
+remain freely writable until sealed. The seal is **absolute** — no syscall
+lifts it in place. On a persistent (`MOUNT_SRC_RFS2_BLK`) store mount the seal
+set is reconstructed from the on-disk store contents at mount time, so it holds
+across a power cycle. Dead store entries are reclaimed only by whole-path
+removal (`SYS_STORE_REMOVE`, below), never by making sealed content writable.
+
+### SYS_STORE_REMOVE (60)
+
+Remove an entire unreferenced store path — the sole store-reclamation
+primitive. `a1=path_ptr`, `a2=path_len`. The whole tree is deleted (files
+unlinked, directories rmdir'd, blocks freed) **below** the seal — it never opens
+a sealed file for write — and the entry's in-kernel seal is dropped as the last
+lifecycle step. Requires a `Filesystem` capability with `WRITE` (store-owner
+authority — a builder cannot reclaim). `path` must name a single top-level entry
+on a store (realize-guarded) mount. Returns 0 (idempotent; already-gone is
+success) or `ENOPERM` / `EINVAL` (not a store mount, or a nested path) / mount
+errnos. Safe under input-addressing: a later realize of the same digest
+reproduces byte-identical content.
+
+> **Number 59 (`SYS_UNSEAL`) is retired** — a permanently-unassigned `ENOSYS`
+> gap (like 49). It once lifted a seal to make sealed content writable for GC;
+> that is gone by design (the seal is absolute). Never reuse 59.
 
 ---
 

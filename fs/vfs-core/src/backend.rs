@@ -76,11 +76,19 @@ pub trait FsBackend {
     fn lookup(&mut self, path: &str) -> FsResult<u64>;
     fn stat(&mut self, path: &str) -> FsResult<InodeMeta>;
     fn readlink(&mut self, path: &str) -> FsResult<String>;
+    /// Create a symlink at `link` (backend-relative) storing `target`
+    /// verbatim — never resolved, dangling is legal. `Exists` if `link`
+    /// already names anything.
+    fn symlink(&mut self, target: &str, link: &str) -> FsResult<u64>;
     fn read_at(&mut self, ino: u64, off: u64, out: &mut [u8]) -> FsResult<usize>;
     fn write_at(&mut self, ino: u64, off: u64, data: &[u8]) -> FsResult<()>;
     fn create(&mut self, path: &str) -> FsResult<u64>;
     fn mkdir(&mut self, path: &str) -> FsResult<u64>;
     fn unlink(&mut self, path: &str) -> FsResult<()>;
+    /// Remove an empty directory at `path` (backend-relative). `NotEmpty` if it
+    /// still holds entries; `NotDir` if `path` is not a directory. Used by the
+    /// store whole-tree reclamation (kernel `store_remove_tree`).
+    fn rmdir(&mut self, path: &str) -> FsResult<()>;
     fn rename(&mut self, old: &str, new: &str) -> FsResult<()>;
     fn readdir(&mut self, path: &str) -> FsResult<Vec<DirEntry>>;
     fn pin(&mut self, ino: u64) -> FsResult<()>;

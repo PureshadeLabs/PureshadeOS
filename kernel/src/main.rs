@@ -23,14 +23,14 @@ pub mod ioapic;
 pub mod smp;
 pub mod pci;
 pub mod virtio_blk;
-pub mod virtio_net;
-pub mod net;
+pub mod device;
 pub mod elf;
 mod exceptions;
 mod gdt;
 pub mod heap;
 mod idt;
 pub mod ipc;
+pub mod kdf;
 pub mod log;
 pub mod pmm;
 pub mod serial;
@@ -380,17 +380,29 @@ pub extern "C" fn kernel_main() -> ! {
         kprintln!("{VRB}[virtio-blk] no device found (pass -device virtio-blk-pci to QEMU){RST}");
     }
 
-    if virtio_net::init() {
-        let mac = virtio_net::mac_addr();
+    // Secondary virtio-blk device (instance 1) backs the persistent
+    // /shade/store volume (store.img). Probed here so it is ready when lythd
+    // issues SYS_MOUNT with MOUNT_SRC_RFS2_BLK; the RFS2 mount/format happens
+    // lazily at that mount, not now. Absence is non-fatal — the store mount
+    // then fails loud in lythd (no persistent store this boot).
+    if virtio_blk::init_store() {
+        let sects = virtio_blk::capacity_sectors_dev(virtio_blk::DEV_STORE);
         kprintln!(
-            "{TAG}[virtio-net]{RST} device ready — MAC {STAT}{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}{RST}  IP 10.0.2.15",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+            "{TAG}[virtio-blk]{RST} store device ready — {STAT}{} sectors ({} MiB){RST}",
+            sects,
+            sects / 2048,
         );
-        net::init();
-        kprintln!("{TAG}[net]{RST} stack initialised");
     } else {
-        kprintln!("{VRB}[virtio-net] no device found (pass -netdev user,id=net0 -device virtio-net-pci,netdev=net0){RST}");
+        kprintln!("{VRB}[virtio-blk] no persistent store device (pass a 2nd -device virtio-blk-pci for store.img){RST}");
     }
+
+    // Enumerate PCI devices the kernel does NOT drive (e.g. virtio-net) into
+    // the device registry. Each becomes claimable by lythd via SYS_DEV_CLAIM,
+    // which mints a Device capability handed to the intended userspace driver
+    // (e.g. `netd`). The kernel never touches a registered device's registers,
+    // IRQ, or DMA — only the driver holding its Device cap does. virtio-blk is
+    // deliberately NOT registered (kernel-owned root disk + persistent store).
+    pci::init_device_registry();
 
     // Smoke-test: sleep ~50 ms by polling the tick counter.
     let t0 = apic::ticks();
@@ -916,6 +928,60 @@ pub extern "C" fn kernel_main() -> ! {
 
             kprintln!("{TAG}[vfs]{RST} exclusive-create probe {OK}passed{RST} — one winner, loser EEXIST, unlink releases, open(dir)=EISDIR(-15)");
         }
+
+        // ── Symlink probe (SYS_SYMLINK/SYS_READLINK, docs/spec/syscalls.md) ──
+        // On the /mnt RAM volume: create target file, absolute + relative
+        // links, readlink round-trip, follow-through-open, EEXIST on an
+        // occupied name, unlink removes the link not the target; on the
+        // /mnt-store guarded mount: a link into a sealed entry is EROFS.
+        {
+            let fd = vfs::create(b"/mnt/ln-target", 0, 0);
+            assert!(fd >= 0, "symlink probe: target create failed: {fd}");
+            assert_eq!(vfs::write(fd as u64, b"link-bytes"), 10);
+            assert_eq!(vfs::close(fd as u64), 0);
+
+            // Absolute-target link + readlink round-trip.
+            assert_eq!(vfs::symlink(b"/mnt/ln-target", b"/mnt/ln-abs"), 0);
+            let mut buf = [0u8; 64];
+            let n = vfs::readlink(b"/mnt/ln-abs", &mut buf);
+            assert_eq!(&buf[..n as usize], b"/mnt/ln-target", "readlink target mismatch");
+
+            // Follow: open() resolves the link to the target's bytes.
+            let fd = vfs::open(b"/mnt/ln-abs");
+            assert!(fd >= 0, "symlink probe: open through link failed: {fd}");
+            let n = vfs::read(fd as u64, &mut buf);
+            assert_eq!(&buf[..n as usize], b"link-bytes");
+            assert_eq!(vfs::close(fd as u64), 0);
+
+            // Relative target follows within the link's directory.
+            assert_eq!(vfs::symlink(b"ln-target", b"/mnt/ln-rel"), 0);
+            let fd = vfs::open(b"/mnt/ln-rel");
+            assert!(fd >= 0, "symlink probe: relative link follow failed: {fd}");
+            assert_eq!(vfs::close(fd as u64), 0);
+
+            // Occupied name is EEXIST; readlink on a non-link is EINVAL.
+            let r = vfs::symlink(b"/x", b"/mnt/ln-abs");
+            assert_eq!(r, vfs::EEXIST, "symlink onto existing must be EEXIST, got {r}");
+            let r = vfs::readlink(b"/mnt/ln-target", &mut buf);
+            assert_eq!(r, vfs::EINVAL, "readlink(non-link) must be EINVAL, got {r}");
+
+            // Unlink removes the link; the target survives.
+            assert_eq!(vfs::unlink(b"/mnt/ln-abs"), 0);
+            assert_eq!(vfs::unlink(b"/mnt/ln-rel"), 0);
+            let fd = vfs::open(b"/mnt/ln-target");
+            assert!(fd >= 0, "symlink probe: target must survive link unlink");
+            assert_eq!(vfs::close(fd as u64), 0);
+
+            // Store mount: link into a sealed entry is EROFS; a link at an
+            // unsealed top-level name is allowed (roots/current live free).
+            let r = vfs::symlink(b"/anywhere", b"/mnt-store/abcd1234-demo-1.0/ln");
+            assert_eq!(r, vfs::EROFS, "symlink into sealed must be EROFS, got {r}");
+            assert_eq!(vfs::symlink(b"abcd1234-demo-1.0", b"/mnt-store/ln-free"), 0);
+            let n = vfs::readlink(b"/mnt-store/ln-free", &mut buf);
+            assert_eq!(&buf[..n as usize], b"abcd1234-demo-1.0");
+
+            kprintln!("{TAG}[vfs]{RST} symlink probe {OK}passed{RST} — create/readlink/follow, EEXIST, EROFS in sealed, unlink keeps target");
+        }
     } else {
         kprintln!("{VRB}[mount] probe skipped — no root volume{RST}");
     }
@@ -1097,6 +1163,39 @@ fn core_smoke() {
         assert_eq!(result, syscall::ENOCAP, "step14: ENOCAP check failed");
     }
     kprintln!("{TAG}[integration]{RST} ENOCAP check {OK}passed{RST}");
+
+    // ── Device-driver framework: no-Device-cap → ENOPERM (gate-before-args) ────
+    // The bootstrap task holds no CapKind::Device capability, so every device
+    // syscall must reject it up front — a process with no Device cap can map no
+    // MMIO, wait on no IRQ, and allocate no DMA. Bogus argument values prove the
+    // cap is checked BEFORE the arguments (gate-before-args, like SYS_MOUNT).
+    {
+        for &(nr, label) in &[
+            (syscall::SYS_DEV_MMIO_MAP,  "MMIO_MAP"),
+            (syscall::SYS_DEV_DMA_ALLOC, "DMA_ALLOC"),
+            (syscall::SYS_DEV_IRQ_WAIT,  "IRQ_WAIT"),
+            (syscall::SYS_DEV_CFG_READ,  "CFG_READ"),
+        ] {
+            let mut frame: syscall::SyscallFrame = unsafe { core::mem::zeroed() };
+            frame.nr = nr;
+            frame.a1 = 0xDEAD_BEEF_0000_0000u64; // bogus (non-Device) cap handle
+            frame.a2 = 0xFFFF_FFFFu64;           // bogus arg — must not be reached
+            frame.a3 = 0xFFFF_FFFFu64;
+            let result = syscall::syscall_dispatch(&mut frame);
+            assert_eq!(result, syscall::ENOPERM,
+                "device gate: SYS_DEV_{} without Device cap must return ENOPERM", label);
+        }
+        // SYS_DEV_CLAIM is Rollback-gated: the bootstrap task holds no Rollback
+        // cap here, so it too must be denied.
+        let mut frame: syscall::SyscallFrame = unsafe { core::mem::zeroed() };
+        frame.nr = syscall::SYS_DEV_CLAIM;
+        frame.a1 = 0x1000u64; // any user ptr
+        frame.a2 = 4u64;
+        let result = syscall::syscall_dispatch(&mut frame);
+        assert_eq!(result, syscall::ENOPERM,
+            "device gate: SYS_DEV_CLAIM without Rollback cap must return ENOPERM");
+    }
+    kprintln!("{TAG}[integration]{RST} device-cap gate (ENOPERM) check {OK}passed{RST}");
 
     // ── Check 4 + 5: IPC between two userspace tasks ──────────────────────────
     // Create a fresh IPC endpoint and add a cap to the bootstrap task's table

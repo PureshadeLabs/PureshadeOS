@@ -188,8 +188,8 @@ fn same_recipe_same_path_twice() {
         let store_b = tmp.path().join("b");
         let io = HostIo;
 
-        let pa = plan(&demo_recipe(), &store_a, Some("tc-1"), &io).expect("plan a");
-        let pb = plan(&demo_recipe(), &store_b, Some("tc-1"), &io).expect("plan b");
+        let pa = plan(&demo_recipe(), store_a.to_str().unwrap(), Some("tc-1"), &io).expect("plan a");
+        let pb = plan(&demo_recipe(), store_b.to_str().unwrap(), Some("tc-1"), &io).expect("plan b");
 
         assert_eq!(pa.paths.digest, pb.paths.digest, "same recipe ⇒ same digest");
         assert_eq!(pa.paths.store_name, pb.paths.store_name);
@@ -470,6 +470,93 @@ derivation {
     });
 }
 
+/// Wraps [`PermissiveSandbox`], recording the `$out` each phase actually runs
+/// with — makes "every phase of a multi-phase build sees the identical, correct
+/// `$out`" observable at the seam.
+struct OutRecordingSandbox {
+    inner: PermissiveSandbox,
+    per_phase_out: Mutex<Vec<String>>,
+}
+impl OutRecordingSandbox {
+    fn new() -> Self {
+        OutRecordingSandbox { inner: PermissiveSandbox, per_phase_out: Mutex::new(Vec::new()) }
+    }
+}
+impl BuildSandbox for OutRecordingSandbox {
+    fn prepare(&self, spec: &SandboxSpec) -> std::io::Result<BuildEnv> {
+        self.inner.prepare(spec)
+    }
+    fn spawn(&self, env: &BuildEnv, command: &str, log: &fs::File) -> std::io::Result<i32> {
+        let out = env
+            .vars
+            .iter()
+            .find(|(k, _)| k == "out")
+            .map(|(_, v)| v.clone())
+            .expect("$out must be set for every phase");
+        self.per_phase_out.lock().unwrap().push(out);
+        self.inner.spawn(env, command, log)
+    }
+    fn collect_outputs(&self, env: &BuildEnv, declared: &[String]) -> std::io::Result<Vec<PathBuf>> {
+        self.inner.collect_outputs(env, declared)
+    }
+}
+
+/// Regression (`$out` under phased builds): every phase of a multi-phase build
+/// runs with the **same** `$out` — the per-node staging dir prepared once, not
+/// re-derived per phase. Each phase records its own view of `$out`; the seam's
+/// per-phase capture and the on-disk trace the phases wrote must all agree.
+#[test]
+fn out_is_identical_across_every_phase() {
+    with_stack(|| {
+        let tmp = TmpDir::new("exec-out-phases");
+        let (store, build, log) = exec_roots(&tmp);
+        let io = HostIo;
+        // Four phases: one to make the tree, three that each append their view
+        // of `$out`. If any phase saw a different (or empty) `$out`, the trace
+        // lines diverge or the writes miss the staging tree entirely.
+        let recipe = RecipeRef::Expr {
+            src: r#"
+derivation {
+  name = "phased";
+  version = "1.0";
+  system = "x86_64-oros";
+  phases = [
+    "mkdir -p $out/bin"
+    "printf '%s\n' \"$out\" >> $out/bin/trace"
+    "printf '%s\n' \"$out\" >> $out/bin/trace"
+    "printf '%s\n' \"$out\" >> $out/bin/trace"
+  ];
+  outputs = { bin = [ "trace" ]; };
+}"#
+            .to_string(),
+            base_dir: "/base".to_string(),
+        };
+        let local = LocalStore;
+        let resolvers: [&dyn Resolver; 1] = [&local];
+        let sandbox = OutRecordingSandbox::new();
+        let registrar = NoopRegistrar;
+        let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+
+        let out = exec.run(&recipe, Some("tc-1"), &io).expect("run");
+
+        // Seam view: four phases, four recorded `$out`s, all identical, each the
+        // `<scratch>/out` staging dir (never empty, never re-derived).
+        let recorded = sandbox.per_phase_out.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 4, "one $out recorded per phase");
+        let staging = &recorded[0];
+        assert!(!staging.is_empty(), "$out must be non-empty");
+        assert!(staging.ends_with("/out"), "$out is the staging dir: {staging}");
+        assert!(recorded.iter().all(|o| o == staging), "phases saw different $out: {recorded:?}");
+
+        // On-disk view: the three append phases each wrote the same staging
+        // `$out`, and that value matches what the seam recorded.
+        let trace = fs::read_to_string(out.root_result().out_path().join("bin/trace")).unwrap();
+        let lines: Vec<&str> = trace.lines().collect();
+        assert_eq!(lines.len(), 3, "three append phases, three lines: {trace:?}");
+        assert!(lines.iter().all(|l| *l == staging), "trace disagrees with $out: {trace:?}");
+    });
+}
+
 /// A nonzero phase exit fails the derivation: correct error (with errno),
 /// scratch cleaned, log kept, store untouched.
 #[test]
@@ -490,7 +577,7 @@ derivation {
             .to_string(),
             base_dir: "/base".to_string(),
         };
-        let plan = plan(&recipe, &store, Some("tc-1"), &io).expect("plan");
+        let plan = plan(&recipe, store.to_str().unwrap(), Some("tc-1"), &io).expect("plan");
         let local = LocalStore;
         let resolvers: [&dyn Resolver; 1] = [&local];
         let (sandbox, registrar) = (PermissiveSandbox, NoopRegistrar);
@@ -536,7 +623,7 @@ derivation {
             .to_string(),
             base_dir: "/base".to_string(),
         };
-        let plan = plan(&recipe, &store, Some("tc-1"), &io).expect("plan");
+        let plan = plan(&recipe, store.to_str().unwrap(), Some("tc-1"), &io).expect("plan");
         let local = LocalStore;
         let resolvers: [&dyn Resolver; 1] = [&local];
         let (sandbox, registrar) = (PermissiveSandbox, NoopRegistrar);
@@ -574,7 +661,7 @@ derivation {
             .to_string(),
             base_dir: "/base".to_string(),
         };
-        let plan = plan(&recipe, &store, Some("tc-1"), &io).expect("plan");
+        let plan = plan(&recipe, store.to_str().unwrap(), Some("tc-1"), &io).expect("plan");
         let local = LocalStore;
         let resolvers: [&dyn Resolver; 1] = [&local];
         let (sandbox, registrar) = (PermissiveSandbox, NoopRegistrar);
@@ -681,7 +768,7 @@ in derivation {
         assert!(db.read_refs(dep_digest).unwrap().is_empty(), "leaf dep has no refs");
 
         // GATE tail: root top → gc keeps both; unroot → gc collects both.
-        db.add_root("test-top", &out.root_result().out_path()).unwrap();
+        db.add_root("test-top", out.root_result().out_path().to_str().unwrap()).unwrap();
         let r1 = db.gc(&shade_store_db::GcOptions::default()).unwrap();
         assert_eq!(r1.collected.len(), 0, "rooted closure fully kept");
         assert!(store.join(dep_name).exists() && store.join(top_name).exists());
@@ -703,7 +790,7 @@ fn non_derivation_is_rejected() {
         let store = tmp.path().join("store");
         let io = HostIo;
         let recipe = RecipeRef::Expr { src: "42".to_string(), base_dir: "/base".to_string() };
-        let err = plan(&recipe, &store, Some("tc-1"), &io).unwrap_err();
+        let err = plan(&recipe, store.to_str().unwrap(), Some("tc-1"), &io).unwrap_err();
         assert!(matches!(err, BuildError::NotADerivation), "got {err}");
     });
 }
@@ -1045,7 +1132,7 @@ derivation {
             .to_string(),
             base_dir: "/base".to_string(),
         };
-        let plan = plan(&recipe, &store, Some("tc-1"), &HostIo).expect("plan");
+        let plan = plan(&recipe, store.to_str().unwrap(), Some("tc-1"), &HostIo).expect("plan");
         let io = HostIo;
         let local = LocalStore;
         let resolvers: [&dyn Resolver; 1] = [&local];
@@ -1060,5 +1147,167 @@ derivation {
         assert!(detail.contains("contraband"), "names the undeclared tree: {detail}");
         assert!(!Path::new(&plan.paths.out_path).exists(), "store untouched");
         assert!(!Path::new(&plan.paths.drv_path).exists());
+    });
+}
+
+// ---- StoreFs seam routing (B3) --------------------------------------------------
+
+/// A shared handle to one [`shade_store::MemFs`] so the executor's injected
+/// backend and the sandbox test double see the same in-memory tree.
+#[derive(Clone)]
+struct SharedMem(std::rc::Rc<std::cell::RefCell<shade_store::MemFs>>);
+
+impl SharedMem {
+    fn new() -> Self {
+        SharedMem(std::rc::Rc::new(std::cell::RefCell::new(shade_store::MemFs::new())))
+    }
+    fn read(&self, path: &str) -> Vec<u8> {
+        use shade_store::StoreFs;
+        self.0.borrow_mut().read_file(path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+    }
+    fn has(&self, path: &str) -> bool {
+        use shade_store::StoreFs;
+        self.0.borrow_mut().exists(path)
+    }
+}
+
+impl shade_store::StoreFs for SharedMem {
+    fn metadata(&mut self, path: &str) -> shade_store::FsResult<shade_store::NodeMeta> {
+        self.0.borrow_mut().metadata(path)
+    }
+    fn read_file(&mut self, path: &str) -> shade_store::FsResult<Vec<u8>> {
+        self.0.borrow_mut().read_file(path)
+    }
+    fn write_file(&mut self, path: &str, data: &[u8], exec: bool) -> shade_store::FsResult<()> {
+        self.0.borrow_mut().write_file(path, data, exec)
+    }
+    fn create_exclusive(&mut self, path: &str, data: &[u8]) -> shade_store::FsResult<()> {
+        self.0.borrow_mut().create_exclusive(path, data)
+    }
+    fn mkdir(&mut self, path: &str) -> shade_store::FsResult<()> {
+        self.0.borrow_mut().mkdir(path)
+    }
+    fn rename(&mut self, old: &str, new: &str) -> shade_store::FsResult<()> {
+        self.0.borrow_mut().rename(old, new)
+    }
+    fn unlink(&mut self, path: &str) -> shade_store::FsResult<()> {
+        self.0.borrow_mut().unlink(path)
+    }
+    fn rmdir(&mut self, path: &str) -> shade_store::FsResult<()> {
+        self.0.borrow_mut().rmdir(path)
+    }
+    fn read_dir(&mut self, path: &str) -> shade_store::FsResult<Vec<(String, shade_store::NodeKind)>> {
+        self.0.borrow_mut().read_dir(path)
+    }
+    fn read_link(&mut self, path: &str) -> shade_store::FsResult<String> {
+        self.0.borrow_mut().read_link(path)
+    }
+    fn symlink(&mut self, target: &str, link: &str) -> shade_store::FsResult<()> {
+        self.0.borrow_mut().symlink(target, link)
+    }
+    fn unique_token(&mut self) -> u64 {
+        use shade_store::StoreFs;
+        self.0.borrow_mut().unique_token()
+    }
+}
+
+/// Sandbox double that stages the declared output **through the seam** and
+/// writes its phase output to the sandbox log fd — the executor around it
+/// must not need the host filesystem for scratch, staging, log, or store.
+struct SeamSandbox(SharedMem);
+
+impl BuildSandbox for SeamSandbox {
+    fn prepare(&self, spec: &SandboxSpec) -> std::io::Result<BuildEnv> {
+        Ok(BuildEnv {
+            cwd: spec.scratch.to_path_buf(),
+            staging: spec.staging.to_path_buf(),
+            vars: Vec::new(),
+        })
+    }
+    fn spawn(&self, env: &BuildEnv, command: &str, log: &fs::File) -> std::io::Result<i32> {
+        // Phase output goes to the sandbox-provided fd, like a real child.
+        use std::io::Write;
+        writeln!(&mut &*log, "SEAM-PHASE ran: {command}")?;
+        // "Build": stage the declared output tree through the shared seam.
+        let staging = env.staging.to_str().unwrap();
+        let mut fs = self.0.clone();
+        let bin = format!("{staging}/bin");
+        shade_store::backend::create_dir_all(&mut fs, &bin)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let demo = format!("{bin}/demo");
+        if !fs.0.borrow_mut().exists(&demo) {
+            fs.write_file(&demo, b"hi", true)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        Ok(0)
+    }
+    fn collect_outputs(&self, env: &BuildEnv, declared: &[String]) -> std::io::Result<Vec<PathBuf>> {
+        let staging = env.staging.to_str().unwrap();
+        let mut out = Vec::new();
+        for rel in declared {
+            let p = format!("{staging}/{rel}");
+            if !self.0.clone().0.borrow_mut().exists(&p) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("declared output `{rel}` was not staged"),
+                ));
+            }
+            out.push(PathBuf::from(p));
+        }
+        Ok(out)
+    }
+}
+
+/// GATE (B3): every filesystem operation the executor does *itself* —
+/// scratch setup/teardown, the build log, the store realization — goes
+/// through the injected [`StoreFs`] backend. A full build against a MemFs
+/// under the canonical `/shade` roots leaves output, `.drv`, and log in the
+/// MemFs, cleans the scratch there, and never creates `/shade` on the host.
+/// Together with the (default-`HostFs`) suite above, this is the
+/// both-backends proof.
+#[test]
+fn executor_scratch_log_store_route_through_seam() {
+    with_stack(|| {
+        let mem = SharedMem::new();
+        let sandbox = SeamSandbox(mem.clone());
+        let resolvers: [&dyn Resolver; 0] = [];
+        let registrar = NoopRegistrar;
+        let mut exec = Executor::new(
+            "/shade/store",
+            "/shade/build",
+            "/shade/log",
+            &resolvers,
+            &sandbox,
+            &registrar,
+        );
+        exec.set_fs(mem.clone());
+
+        let out = exec.run(&trivial_recipe(), Some("tc-1"), &HostIo).expect("seam build");
+        let Built::Realized { out_path } = out.root_result() else {
+            panic!("expected Realized, got {:?}", out.root_result());
+        };
+        let out_str = out_path.to_str().unwrap();
+        let store_name = &out.root.paths.store_name;
+
+        // Output + .drv realized in the MemFs, addressed under /shade/store.
+        assert!(out_str.starts_with("/shade/store/"), "canonical root: {out_str}");
+        assert_eq!(mem.read(&format!("{out_str}/bin/demo")), b"hi");
+        assert_eq!(mem.read(&out.root.paths.drv_path), out.root.cdf);
+
+        // Log written through the seam: executor phase headers interleaved
+        // with the child output the sandbox streamed to the log fd.
+        let log = String::from_utf8(mem.read(&format!("/shade/log/{store_name}.log"))).unwrap();
+        assert!(log.contains("phase 0: mkdir -p $out/bin"), "phase header: {log}");
+        assert!(log.contains("SEAM-PHASE ran:"), "child output folded in: {log}");
+
+        // Scratch created and cleaned in the MemFs.
+        assert!(!mem.has(&format!("/shade/build/{store_name}")), "scratch cleaned");
+
+        // The host filesystem never saw the canonical roots.
+        assert!(
+            !Path::new("/shade/build").join(store_name).exists()
+                && !Path::new("/shade/store").join(store_name).exists(),
+            "host /shade untouched"
+        );
     });
 }

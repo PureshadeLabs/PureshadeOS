@@ -724,52 +724,51 @@ pub fn sys_ipc_send_timeout(cap: u64, msg: &[u8], timeout_ms: u64) -> Result<(),
     if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(()) }
 }
 
-/// Create a UDP socket. Returns the socket fd on success.
-pub fn sys_socket() -> Result<u64, SysError> {
-    let r = unsafe { syscall0(SYS_SOCKET) };
+// ── Userspace device-driver framework ─────────────────────────────────────────
+//
+// Networking moved out of the kernel: a `netd` driver owns the virtio-net
+// device through a CapKind::Device capability and these syscalls. The old UDP
+// socket wrappers (sys_socket/bind/sendto/recvfrom/net_close) are retired.
+
+/// Claim a PCI device by name from the kernel registry, minting a Device cap.
+/// Rollback-cap gated (lythd-exclusive). Returns the Device CapHandle.
+pub fn sys_dev_claim(name: &str) -> Result<u64, SysError> {
+    let r = unsafe { syscall2(SYS_DEV_CLAIM, name.as_ptr() as u64, name.len() as u64) };
     if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(r) }
 }
 
-/// Bind a UDP socket to a local port.
-pub fn sys_bind(fd: u64, port: u16) -> Result<(), SysError> {
-    let r = unsafe { syscall2(SYS_BIND, fd, port as u64) };
+/// Read one 32-bit dword from the device's PCI config space (Device-cap gated).
+pub fn sys_dev_cfg_read(dev_cap: u64, offset: u32) -> Result<u32, SysError> {
+    let r = unsafe { syscall2(SYS_DEV_CFG_READ, dev_cap, offset as u64) };
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(r as u32) }
+}
+
+/// Map device MMIO BAR `bar` (uncacheable) at `virt`. Returns the BAR length.
+pub fn sys_dev_mmio_map(dev_cap: u64, bar: u32, virt: u64) -> Result<u64, SysError> {
+    let r = unsafe { syscall3(SYS_DEV_MMIO_MAP, dev_cap, bar as u64, virt) };
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(r) }
+}
+
+/// Allocate a zeroed contiguous DMA buffer at `virt` of `size` bytes.
+/// Returns the buffer's physical address (to program into the device).
+pub fn sys_dev_dma_alloc(dev_cap: u64, virt: u64, size: u64) -> Result<u64, SysError> {
+    let mut phys: u64 = 0;
+    let r = unsafe {
+        syscall4(SYS_DEV_DMA_ALLOC, dev_cap, virt, size, &mut phys as *mut u64 as u64)
+    };
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(phys) }
+}
+
+/// Block until the device raises its IRQ (Device-cap gated).
+pub fn sys_dev_irq_wait(dev_cap: u64) -> Result<(), SysError> {
+    let r = unsafe { syscall1(SYS_DEV_IRQ_WAIT, dev_cap) };
     if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(()) }
 }
 
-/// Send a UDP datagram.
-///
-/// `dst_ip` is an IPv4 address in host byte order (e.g. `0x0A00_0202` = 10.0.2.2).
-/// Returns `Err(EAGAIN)` if the ARP entry for `dst_ip` is not yet resolved.
-pub fn sys_sendto(fd: u64, buf: &[u8], dst_ip: u32, dst_port: u16) -> Result<(), SysError> {
-    let r = unsafe {
-        syscall6(SYS_SENDTO, fd, buf.as_ptr() as u64, buf.len() as u64,
-                 dst_ip as u64, dst_port as u64, 0)
-    };
+/// Acknowledge/unmask the device IRQ after servicing (Device-cap gated).
+pub fn sys_dev_irq_ack(dev_cap: u64) -> Result<(), SysError> {
+    let r = unsafe { syscall1(SYS_DEV_IRQ_ACK, dev_cap) };
     if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(()) }
-}
-
-/// Receive a UDP datagram (blocking).
-///
-/// Returns `(bytes_received, src_ip, src_port)`.
-pub fn sys_recvfrom(fd: u64, buf: &mut [u8]) -> Result<(usize, u32, u16), SysError> {
-    let mut src_ip:   u32 = 0;
-    let mut src_port: u16 = 0;
-    let r = unsafe {
-        syscall6(SYS_RECVFROM, fd, buf.as_mut_ptr() as u64, buf.len() as u64,
-                 &mut src_ip   as *mut u32 as u64,
-                 &mut src_port as *mut u16 as u64,
-                 0)
-    };
-    if SysError::is_err_raw(r) {
-        Err(SysError::from_raw(r))
-    } else {
-        Ok((r as usize, src_ip, src_port))
-    }
-}
-
-/// Close a socket.
-pub fn sys_net_close(fd: u64) {
-    unsafe { syscall1(SYS_NET_CLOSE, fd) };
 }
 
 /// Power off the machine via ACPI S5. Does not return.

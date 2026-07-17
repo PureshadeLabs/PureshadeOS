@@ -51,7 +51,8 @@ Do not state x86_64 or aarch64 behavior from memory. Verify against the SDM or A
 | `src/pmm.rs` | physical memory manager, bitmap allocator |
 | `src/heap.rs` | kernel heap (coalescing free list; `HEAP_INIT_PAGES = 512`, 2 MiB) |
 | `src/elf.rs` | ELF64 loader, `exec()`, user stack allocation |
-| `src/virtio_net.rs` | virtio-net driver (PMM-backed rings and buffers, device-sized queues) |
+| `src/pci.rs` | PCI enumeration + device registry (claimable devices for userspace drivers) |
+| `src/device.rs` | userspace device-driver framework: Device-cap gate, MMIO map, DMA alloc, IRQ delivery |
 
 ---
 
@@ -92,7 +93,9 @@ See `docs/plans/followup-code-tasks.md` — read it before declaring something a
 
 **`sweep_dead` stack leak (stale — verified fixed):** `sweep_dead` frees the kernel stack Vec, restores the guard page, and frees the user page table. The `[sweep]`/`[sweep-user]` boot probes in `src/main.rs` measure 0 B heap / 0 frames PMM leaked per spawn/reap and exec/reap cycle; they are feature-gated behind `boot-tests` (build with `make kernel-tests`) since 2026-07-03 — run them before scheduler/PMM/heap changes.
 
-**Sustained RX untested:** the virtio-net ring rework (device-sized queues, packed RX pool) has only been verified for boot + light traffic. Exercise >32 in-flight RX packets when a userspace network workload exists.
+**Networking is userspace now:** the in-kernel virtio-net driver and TCP/IP stack were torn down. Networking is a `netd` driver process that owns the virtio-net device via a `CapKind::Device` capability over the userspace device-driver framework (`src/device.rs`, syscalls 61–66). virtio-blk stays in-kernel and untouched. UDP socket syscalls 50–54 are retired (return `ENOSYS`).
+
+**Device-driver framework follow-ups:** (1) DMA buffers are zeroed on alloc but there is no `SYS_DEV_DMA_FREE` — buffers are reclaimed at task teardown (leaf frames without the `MMIO_NOFREE` PTE bit are returned to the PMM); add wipe-on-free when a free path is needed. (2) On a shared PCI INTx line (device IRQ sharing virtio-blk's GSI), masking-on-fire degrades virtio-blk to polling until `SYS_DEV_IRQ_ACK`; move device drivers to MSI/MSI-X for isolated, edge-triggered vectors. (3) No IOMMU — a Device-cap holder is trusted-for-DMA; program VT-d/virtio-iommu inside `SYS_DEV_DMA_ALLOC` when required.
 
 **aarch64 syscall stubs:** `abi/lythos-syscall` is x86_64 only — `#[cfg(target_arch = "x86_64")]` guard; aarch64 compiles as an empty module, breaking any userspace link targeting aarch64.
 

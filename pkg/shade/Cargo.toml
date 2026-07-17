@@ -2,6 +2,7 @@
 name = "shade"
 version = "0.1.0"
 edition = "2024"
+description = "shade — the on-target Lythos package manager CLI. Dispatches into the no_std shade crates over the OROS seams (OrosFs StoreFs backend, OrosIo EvalIo): build (bringup phase interpreter — the native BuildSandbox is deferred), generations, rollback, gc, boot activation, and the e2e bringup probe."
 
 [[bin]]
 name = "shade"
@@ -9,3 +10,9 @@ path = "src/main.rs"
 
 [dependencies]
 lythos-rt = { path = "../../userspace/lib/lythos-rt" }
+shadec = { path = "../shadec", default-features = false, features = ["oros"] }
+shade-cdf = { path = "../shade-cdf" }
+shade-store = { path = "../shade-store", default-features = false, features = ["oros"] }
+shade-store-db = { path = "../shade-store-db", default-features = false, features = ["oros"] }
+shade-build = { path = "../shade-build", default-features = false, features = ["oros"] }
+shade-gen = { path = "../shade-gen", default-features = false, features = ["oros"] }

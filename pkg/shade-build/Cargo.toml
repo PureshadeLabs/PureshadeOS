@@ -2,24 +2,34 @@
 name = "shade-build"
 version = "0.1.0"
 edition = "2024"
-description = "shade build core: eval → digest → resolve → realize (LOOKUP-THEN-BUILD). Drives shadec (evaluator) into shade-store (realization). std host crate; the OROS shade binary is a deferred no_std wrapper."
+description = "shade build core: eval → digest → resolve → realize (LOOKUP-THEN-BUILD). Drives shadec (evaluator) into shade-store (realization). no_std+alloc plan/scaffolding core over the StoreFs seam (features: std → host executor + sandboxes, oros → OrosFs); the on-target BuildSandbox is deferred."
 
 [lib]
 name = "shade_build"
 path = "src/lib.rs"
 
 [dependencies]
-# shadec's std feature adds HostIo; default already enables it.
-shadec = { path = "../shadec" }
-shade-store = { path = "../shade-store" }
-shade-store-db = { path = "../shade-store-db" }
+shadec = { path = "../shadec", default-features = false }
+shade-store = { path = "../shade-store", default-features = false }
+shade-store-db = { path = "../shade-store-db", default-features = false }
 shade-cdf = { path = "../shade-cdf" }
 # errno constants only (BuildError::errno) — pure types, host-compilable.
 lythos-abi = { path = "../../abi/lythos-abi" }
 
+[features]
+# Core (plan/address + executor scratch/log scaffolding) is no_std+alloc; all
+# I/O goes through the injected StoreFs backend. `std` adds the executor run
+# loop, both host sandboxes, the DbRegistrar, and the host binary; `oros` the
+# on-target backend over the Lythos ABI (the native BuildSandbox — audit step
+# 3(b) — is still deferred, so the run loop stays host-only).
+default = ["std"]
+std = ["shadec/std", "shade-store/std", "shade-store-db/std"]
+oros = ["shade-store/oros", "shade-store-db/oros"]
+
 [[bin]]
 # Host seed vehicle for `shade build` (shade-pkg 09 §2), alongside the host
 # `shadec` binary. The OROS `shade` binary (pkg/shade) stays a no_std stub
-# until argv + an OROS EvalIo exist.
+# until an OROS EvalIo + the native BuildSandbox exist.
 name = "shade-build"
 path = "src/bin/shade-build.rs"
+required-features = ["std"]

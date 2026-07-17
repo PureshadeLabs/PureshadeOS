@@ -353,6 +353,62 @@ fn file_imports() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Regression (evaluator import fix): a directory import resolves to
+/// `<dir>/default.shade` **before** the import cache and the eval-input set see
+/// it. So `import ./lib` and `import ./lib/default.shade` are the *same* import
+/// — one cache entry, one recorded eval input, both the resolved file, never
+/// the bare directory (06 §1 step 2). A regression that cached/tracked the
+/// unresolved directory path would double-evaluate and record `file:<dir>`.
+#[test]
+fn import_resolves_directory_before_caching_and_tracking() {
+    let dir = std::env::temp_dir().join(format!("shadec-import-{}", std::process::id()));
+    let sub = dir.join("lib");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("default.shade"), "{ v = 7; }").unwrap();
+
+    let base = dir.to_str().unwrap().to_string();
+    let default_path = sub.join("default.shade").to_str().unwrap().to_string();
+    let bare_dir = sub.to_str().unwrap().to_string();
+
+    // Both spellings must coincide on the same value and the same import.
+    let src = "(import ./lib).v + (import ./lib/default.shade).v".to_string();
+    let (result, inputs, cache_keys) = std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || {
+            let io = HostIo;
+            let mut ev = Evaluator::new(&io);
+            let expr = shadec::parser::parse_str(&src, Arc::from("<test>"), &base).unwrap();
+            let env = ev.initial_env();
+            let v = ev.eval(&expr, &env).unwrap();
+            let pos = shadec::error::Pos { file: Arc::from("<test>"), line: 0, col: 0 };
+            let shown = shadec::print::show_value(&mut ev, &v, true, &pos).unwrap();
+            let inputs: Vec<String> = ev.eval_inputs.iter().cloned().collect();
+            let cache_keys: Vec<String> = ev.import_cache.keys().cloned().collect();
+            (shown, inputs, cache_keys)
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+
+    assert_eq!(result, "14"); // 7 + 7 — one underlying value
+    // Tracked as the resolved default.shade, never the bare directory.
+    assert!(inputs.contains(&format!("file:{default_path}")), "inputs: {inputs:?}");
+    assert!(
+        !inputs.iter().any(|i| i == &format!("file:{bare_dir}")),
+        "bare dir was tracked: {inputs:?}"
+    );
+    // Exactly one cache entry, keyed on the resolved file — dir ≡ file.
+    assert!(cache_keys.contains(&default_path), "cache keys: {cache_keys:?}");
+    assert!(!cache_keys.contains(&bare_dir), "cache keyed on bare dir: {cache_keys:?}");
+    assert_eq!(
+        cache_keys.iter().filter(|k| k.ends_with("/lib/default.shade")).count(),
+        1,
+        "directory import should not create a second cache entry: {cache_keys:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn resource_limit() {
     let e = run_err("let f = x: f x; in f 1"); // diverges: depth guard trips

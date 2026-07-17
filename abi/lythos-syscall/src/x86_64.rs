@@ -419,36 +419,47 @@ pub unsafe fn sys_ipc_send_timeout(cap: u64, msg_ptr: u64, msg_len: u64, timeout
     unsafe { syscall4(sys::SYS_IPC_SEND_TIMEOUT, cap, msg_ptr, msg_len, timeout_ms) }
 }
 
-/// Create a UDP socket. Returns fd or ENOSYS.
+// Syscalls 50-54 (UDP socket API) are retired — networking moved to userspace
+// (a `netd` driver over the device-driver framework). Their wrappers are gone.
+
+// ── Userspace device-driver framework ─────────────────────────────────────────
+
+/// Claim a PCI device by name from the kernel registry (Rollback-cap gated).
+/// Returns a Device CapHandle or negative errno.
 #[inline(always)]
-pub unsafe fn sys_socket() -> u64 {
-    unsafe { syscall0(sys::SYS_SOCKET) }
+pub unsafe fn sys_dev_claim(name_ptr: u64, name_len: u64) -> u64 {
+    unsafe { syscall2(sys::SYS_DEV_CLAIM, name_ptr, name_len) }
 }
 
-/// Bind a socket to a local UDP port. Returns 0 or error.
+/// Read one dword from the device's PCI config space. Returns the value or errno.
 #[inline(always)]
-pub unsafe fn sys_bind(fd: u64, port: u64) -> u64 {
-    unsafe { syscall2(sys::SYS_BIND, fd, port) }
+pub unsafe fn sys_dev_cfg_read(dev_cap: u64, offset: u64) -> u64 {
+    unsafe { syscall2(sys::SYS_DEV_CFG_READ, dev_cap, offset) }
 }
 
-/// Send a UDP datagram. Returns 0 or error.
+/// Map device MMIO BAR `bar_index` (uncacheable) at `virt`. Returns BAR length or errno.
 #[inline(always)]
-pub unsafe fn sys_sendto(fd: u64, buf_ptr: u64, len: u64, dst_ip: u64, dst_port: u64) -> u64 {
-    unsafe { syscall5(sys::SYS_SENDTO, fd, buf_ptr, len, dst_ip, dst_port) }
+pub unsafe fn sys_dev_mmio_map(dev_cap: u64, bar_index: u64, virt: u64) -> u64 {
+    unsafe { syscall3(sys::SYS_DEV_MMIO_MAP, dev_cap, bar_index, virt) }
 }
 
-/// Receive a UDP datagram (blocking). Returns bytes received.
+/// Allocate a zeroed contiguous DMA buffer at `virt`; `*out_phys` = phys addr.
+/// Returns 0 or errno.
 #[inline(always)]
-pub unsafe fn sys_recvfrom(
-    fd: u64, buf_ptr: u64, len: u64, src_ip_out: u64, src_port_out: u64,
-) -> u64 {
-    unsafe { syscall5(sys::SYS_RECVFROM, fd, buf_ptr, len, src_ip_out, src_port_out) }
+pub unsafe fn sys_dev_dma_alloc(dev_cap: u64, virt: u64, size: u64, out_phys: u64) -> u64 {
+    unsafe { syscall4(sys::SYS_DEV_DMA_ALLOC, dev_cap, virt, size, out_phys) }
 }
 
-/// Close a socket or fd. Returns 0 or error.
+/// Block until the device raises its IRQ. Returns 0 or errno.
 #[inline(always)]
-pub unsafe fn sys_net_close(fd: u64) -> u64 {
-    unsafe { syscall1(sys::SYS_NET_CLOSE, fd) }
+pub unsafe fn sys_dev_irq_wait(dev_cap: u64) -> u64 {
+    unsafe { syscall1(sys::SYS_DEV_IRQ_WAIT, dev_cap) }
+}
+
+/// Acknowledge/unmask the device IRQ after servicing. Returns 0 or errno.
+#[inline(always)]
+pub unsafe fn sys_dev_irq_ack(dev_cap: u64) -> u64 {
+    unsafe { syscall1(sys::SYS_DEV_IRQ_ACK, dev_cap) }
 }
 
 /// Power off the machine (does not return).

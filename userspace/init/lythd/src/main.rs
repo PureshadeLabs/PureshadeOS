@@ -45,10 +45,10 @@ use lythos_rt::{
     BootInfo,
     ipc::Endpoint,
     println, eprintln,
-    sys_close, sys_create, sys_ipc_create, sys_mkdir, sys_mount, sys_open, sys_read_fd,
-    sys_readdir, sys_rollback, sys_stat, sys_task_exit, sys_task_list, sys_task_status,
-    sys_time, sys_time_epoch, sys_nanosleep, sys_write_fd,
-    MOUNT_SRC_RFS2_RAM, MOUNT_STORE,
+    sys_close, sys_create, sys_dev_claim, sys_ipc_create, sys_mkdir, sys_mount, sys_open,
+    sys_read_fd, sys_readdir, sys_rollback, sys_stat, sys_task_exit, sys_task_list,
+    sys_task_status, sys_time, sys_time_epoch, sys_nanosleep, sys_write_fd,
+    MOUNT_SRC_RFS2_BLK, MOUNT_STORE,
     TaskInfo,
     task::{yield_now, TaskId, TaskStatus},
 };
@@ -129,6 +129,9 @@ fn verify_abis() {
 const MEM_CAP:       u64 = 0;
 const ROLLBACK_CAP:  u64 = 1;
 const BOOT_INFO_CAP: u64 = 2;
+/// Filesystem capability (SYS_MOUNT / SYS_STORE_REMOVE gate). Delegable — lythd
+/// hands it to the shade store manager for gc reclamation.
+const FS_CAP:        u64 = 3;
 
 // ── Manifest types ────────────────────────────────────────────────────────────
 
@@ -435,6 +438,41 @@ fn spawn_from_disk(path: &str, caps: &[u64]) -> Option<TaskId> {
     lythos_rt::task::spawn(elf, caps).ok()
 }
 
+// ── Device-driver bring-up ─────────────────────────────────────────────────────
+
+/// One userspace device driver: the registry name of the device it owns, and
+/// the binary that drives it.
+struct DriverBinding {
+    device: &'static str,
+    binary: &'static str,
+}
+
+/// Claim each device from the kernel registry and spawn its driver with the
+/// resulting Device capability at handle 0. Missing devices (SYS_DEV_CLAIM
+/// returns an error) are skipped — the system runs fine without them.
+fn spawn_device_drivers() {
+    const BINDINGS: &[DriverBinding] = &[
+        DriverBinding { device: "virtio-net", binary: "/lth/bin/netd" },
+    ];
+
+    for b in BINDINGS {
+        match sys_dev_claim(b.device) {
+            Ok(dev_cap) => {
+                match spawn_from_disk(b.binary, &[dev_cap]) {
+                    Some(task_id) => println!(
+                        "[lythd] device '{}' → {} (task {}, dev cap {})",
+                        b.device, b.binary, task_id, dev_cap),
+                    None => eprintln!(
+                        "[lythd] device '{}' claimed but driver {} failed to spawn",
+                        b.device, b.binary),
+                }
+            }
+            Err(e) => println!(
+                "[lythd] device '{}' not claimed ({:?}) — no driver spawned", b.device, e),
+        }
+    }
+}
+
 // ── Cap provisioning ──────────────────────────────────────────────────────────
 
 fn build_exec_caps(
@@ -561,18 +599,70 @@ impl ManagedSvc {
 
 // ── Package store mount ───────────────────────────────────────────────────────
 
-/// Mount a dedicated RFS V2 instance at /shade/store (store semantics:
-/// read-only-after-realize). Failure is loud but non-fatal — the system
-/// boots without a package store; shade operations will fail until the
-/// mount succeeds.
+/// Mount the PERSISTENT RFS V2 store at /shade/store (store semantics:
+/// read-only-after-realize) on the secondary virtio-blk device (`store.img`).
+/// The volume is formatted on first-ever boot and simply mounted thereafter,
+/// so content — and the generation closures pointing into it — survive a full
+/// power cycle. Failure is loud but non-fatal: the system boots without a
+/// package store; shade operations fail until the mount succeeds. The seal set
+/// is reconstructed kernel-side from the persisted store contents at mount.
 fn mount_shade_store() {
     // mkdir -p /shade/store on the root volume; EEXIST is fine.
     let _ = sys_mkdir("/shade");
     let _ = sys_mkdir("/shade/store");
-    match sys_mount("/shade/store", MOUNT_SRC_RFS2_RAM, MOUNT_STORE) {
-        Ok(()) => println!("[lythd] /shade/store mounted (dedicated rfs2, store semantics)"),
-        Err(e) => eprintln!("[lythd] /shade/store mount FAILED (errno {})", e),
+    match sys_mount("/shade/store", MOUNT_SRC_RFS2_BLK, MOUNT_STORE) {
+        Ok(()) => println!("[lythd] /shade/store mounted (persistent rfs2 on store.img, store semantics)"),
+        Err(e) => eprintln!("[lythd] /shade/store mount FAILED (errno {}) — no persistent store this boot", e),
     }
+}
+
+// ── Shade end-to-end bringup probe ────────────────────────────────────────────
+
+/// Run the `shade e2e` bringup probe iff the marker `/cfg/shade/e2e-probe`
+/// is present (shipped in the rootfs; remove it to silence the probe in
+/// production). Proves the full on-device chain — eval → CDF → build →
+/// input-addressed store → generation → activate → rollback → gc — composes on
+/// hardware, printing `[shade-e2e]` stage lines to serial. Non-fatal: a probe
+/// failure never blocks the boot.
+fn run_shade_e2e_probe() {
+    // Marker gate: a cheap open, no cap needed (plain file read).
+    match sys_open("/cfg/shade/e2e-probe") {
+        Ok(fd) => sys_close(fd),
+        Err(()) => return,
+    }
+    let Some(file) = load_file("/lth/bin/shade") else {
+        eprintln!("[lythd] shade e2e probe: /lth/bin/shade not found");
+        return;
+    };
+    let elf = orox::elf_slice(&file);
+    // Caps handed to the shade store manager:
+    //   handle 0 — Memory: the evaluator + store I/O grow the heap past the
+    //     64 KiB static arena via SYS_BRK (gated on Memory+WRITE).
+    //   handle 1 — Filesystem: gc reclamation removes dead store entries via
+    //     SYS_STORE_REMOVE (store-owner authority — whole-tree delete below the
+    //     seal; store writes themselves need no cap, routing through the
+    //     in-kernel RealizeGuard).
+    let task = match lythos_rt::sys_exec_argv(elf, &[MEM_CAP, FS_CAP], &["shade", "e2e"]) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("[lythd] shade e2e probe: exec failed: {:?}", e);
+            return;
+        }
+    };
+    println!("[lythd] shade e2e probe running (task {})", task);
+    // Cooperative wait: yield until the probe task reaps. Bounded so a hung
+    // probe cannot wedge PID 1; the bound is generous (the evaluator + two
+    // builds dominate).
+    let mut guard: u64 = 0;
+    while lythos_rt::task::task_status(task) != TaskStatus::Dead {
+        yield_now();
+        guard += 1;
+        if guard > 50_000_000 {
+            eprintln!("[lythd] shade e2e probe: deadline exceeded, continuing boot");
+            return;
+        }
+    }
+    println!("[lythd] shade e2e probe complete");
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -598,6 +688,10 @@ pub extern "C" fn _start() -> ! {
     // The mount-point directories live on the root volume; EEXIST from a
     // prior boot is fine.
     mount_shade_store();
+
+    // 1c. Optional shade end-to-end bringup probe (marker-gated). Proves the
+    // full on-device chain composes on hardware; non-fatal.
+    run_shade_e2e_probe();
 
     // 2. Create the service registry endpoint.
     let registry = Endpoint::create().expect("lythd: registry endpoint alloc failed");
@@ -640,6 +734,13 @@ pub extern "C" fn _start() -> ! {
             None => eprintln!("[lythd] failed to spawn {}", m.name),
         }
     }
+
+    // 4b. Device drivers: claim each kernel-registered device and hand its
+    // Device capability to the intended userspace driver. lythd holds the
+    // Rollback cap (handle 1), so the kernel lets it claim from the registry;
+    // no other task can. The driver receives the cap at handle 0 and owns the
+    // device — the kernel never drives it.
+    spawn_device_drivers();
 
     // 5. Supervisor loop.
     println!("[lythd] entering supervisor loop ({} managed service(s))", managed.len());

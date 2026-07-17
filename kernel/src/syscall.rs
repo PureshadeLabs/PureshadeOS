@@ -207,32 +207,78 @@ pub const SYS_GETGID:   u64 = 46;
 pub const SYS_SETUID:   u64 = 47;
 /// Set the GID of the calling task (root only, or setting own gid). Returns 0 or ENOPERM.
 pub const SYS_SETGID:   u64 = 48;
-/// Create a UDP socket. No arguments. Returns socket fd (≥ 0) or ENOSYS.
-pub const SYS_SOCKET:   u64 = 50;
-/// Bind a socket to a local UDP port.
-/// a1=socket_fd, a2=port (u16). Returns 0 or EINVAL.
-pub const SYS_BIND:     u64 = 51;
-/// Send a UDP datagram.
-/// a1=socket_fd, a2=buf_ptr, a3=len, a4=dst_ip (u32 BE), a5=dst_port (u16 BE).
-/// Returns 0 on success, EAGAIN if ARP not yet resolved, EINVAL on bad args.
-pub const SYS_SENDTO:   u64 = 52;
-/// Receive a UDP datagram (blocking).
-/// a1=socket_fd, a2=buf_ptr, a3=len, a4=src_ip_out (*mut u32), a5=src_port_out (*mut u16).
-/// Returns bytes received.
-pub const SYS_RECVFROM: u64 = 53;
-/// Close a socket or file descriptor.
-/// a1=fd. Returns 0 or EBADF.
-pub const SYS_NET_CLOSE: u64 = 54;
+// Numbers 50-54 are RETIRED, permanently-unassigned gaps. They were the
+// in-kernel UDP socket API (SYS_SOCKET/BIND/SENDTO/RECVFROM/NET_CLOSE). The
+// in-kernel virtio-net driver and TCP/IP stack were torn down: networking is
+// now a userspace concern (a `netd` driver process owning the virtio-net
+// device via a Device capability, over the userspace device-driver framework).
+// Never reuse 50-54 — an old socket-API caller must fail ENOSYS, not hit an
+// unrelated handler (same rationale as gaps 49 and 59).
 /// Power off the machine (ACPI S5 via QEMU PM1a port 0x604). No arguments. Does not return.
 pub const SYS_POWEROFF:  u64 = 55;
 /// Mount a filesystem backend at a path. Requires CapKind::Filesystem with WRITE.
 /// a1=at_ptr, a2=at_len, a3=source (0 = fresh RAM-backed RFS V2), a4=flags.
 /// Returns 0 or negative errno (ENOPERM, EMOUNTED, ENOENT, ENOTDIR, EINVAL, …).
 pub const SYS_MOUNT:     u64 = 56;
+/// Create a symlink at `link` storing `target` verbatim (dangling legal; the
+/// final component of `link` is not followed). On a store mount, creating a
+/// link inside a sealed entry is EROFS.
+/// a1=target_ptr, a2=target_len, a3=link_ptr, a4=link_len. Returns 0 or errno.
+pub const SYS_SYMLINK:   u64 = 57;
+/// Read a symlink's target (final component not followed — must BE a symlink,
+/// else EINVAL). a1=path_ptr, a2=path_len, a3=buf_ptr, a4=buf_len.
+/// Returns full target length (copied bytes = min(len, buf_len)) or errno.
+pub const SYS_READLINK:  u64 = 58;
+// Number 59 is a RETIRED, permanently-unassigned gap (was SYS_UNSEAL). The
+// unseal primitive is gone by design — the realize-seal is absolute, no
+// syscall makes sealed content writable. Never reuse 59 (an old SYS_UNSEAL
+// caller must fail ENOSYS, not hit an unrelated handler). See
+// abi/lythos-abi/src/syscall.rs.
+/// Remove an entire unreferenced store path (whole-tree delete, freeing blocks)
+/// below the seal layer — the sole store-reclamation primitive. Requires
+/// CapKind::Filesystem with WRITE (store-owner authority). `path` names a
+/// top-level entry on a store mount; the kernel drops that name's in-kernel
+/// seal as part of the lifecycle removal. a1=path_ptr, a2=path_len.
+pub const SYS_STORE_REMOVE: u64 = 60;
+
+// ── Userspace device-driver framework ─────────────────────────────────────────
+//
+// These give a ring-3 driver ownership of a PCI device it holds a Device
+// capability for: read its config space, map its MMIO BARs, allocate DMA
+// buffers, and wait on its IRQ. All are gated on a CapKind::Device capability
+// (gate-before-args → ENOPERM), EXCEPT SYS_DEV_CLAIM which is gated on the
+// Rollback cap (lythd-exclusive) so only init claims devices from the registry.
+
+/// Claim a PCI device from the kernel registry by name, minting a Device
+/// capability into the caller's table. Rollback-cap gated (lythd only). A
+/// device may be claimed once (re-claim → EINVAL). a1=name_ptr, a2=name_len.
+/// Returns cap handle or ENOENT / ENOPERM / EINVAL.
+pub const SYS_DEV_CLAIM:    u64 = 61;
+/// Read one 32-bit dword from the device's PCI config space (lets a userspace
+/// driver walk the modern-virtio capability list without port-I/O access).
+/// a1=dev_cap, a2=offset (dword-aligned). Returns the u32 value or ENOPERM/EINVAL.
+pub const SYS_DEV_CFG_READ: u64 = 62;
+/// Map a device MMIO BAR into the caller's address space, uncacheable.
+/// a1=dev_cap, a2=bar_index (0..6), a3=virt (page-aligned user addr). Maps the
+/// whole BAR region. Returns BAR byte length or ENOPERM/EINVAL.
+pub const SYS_DEV_MMIO_MAP: u64 = 63;
+/// Allocate a contiguous, zeroed DMA buffer, mapped into the caller and handed
+/// to the device. a1=dev_cap, a2=virt (page-aligned), a3=size (bytes, rounded
+/// up to pages), a4=out_phys_ptr (*mut u64). Returns 0 or ENOPERM/EINVAL.
+pub const SYS_DEV_DMA_ALLOC: u64 = 64;
+/// Block until the device raises its IRQ (its IOAPIC line is masked-on-fire by
+/// the kernel; the driver must SYS_DEV_IRQ_ACK after servicing). a1=dev_cap.
+/// Returns 0 or ENOPERM.
+pub const SYS_DEV_IRQ_WAIT: u64 = 65;
+/// Acknowledge/unmask the device IRQ after the driver has serviced it (read the
+/// device ISR to deassert the level line first). a1=dev_cap. Returns 0 or ENOPERM.
+pub const SYS_DEV_IRQ_ACK:  u64 = 66;
 
 /// Highest assigned syscall number. Update this when adding a new syscall.
 /// Used by the fuzz test in main.rs to verify that numbers above this return ENOSYS.
-pub const SYSCALL_MAX: u64 = SYS_MOUNT;
+/// Numbers 49, 50-54 and 59 are unassigned gaps (59 = retired SYS_UNSEAL,
+/// 50-54 = retired UDP socket API).
+pub const SYSCALL_MAX: u64 = SYS_DEV_IRQ_ACK;
 
 // ── Error sentinel ────────────────────────────────────────────────────────────
 
@@ -429,7 +475,7 @@ static SMAP_ENABLED: core::sync::atomic::AtomicBool =
 /// `f` must only touch user memory that has already been validated by
 /// `valid_user_range`; the window must be as narrow as possible.
 #[inline]
-unsafe fn with_user_access<F, R>(f: F) -> R
+pub(crate) unsafe fn with_user_access<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,
 {
@@ -479,7 +525,7 @@ fn parent_of(path: &[u8]) -> alloc::vec::Vec<u8> {
 
 /// accepted for any non-null pointer (no bytes are dereferenced).
 #[inline]
-fn valid_user_range(ptr: u64, len: u64) -> bool {
+pub(crate) fn valid_user_range(ptr: u64, len: u64) -> bool {
     if ptr == 0 { return false; }
     if len == 0 { return true; }
     match ptr.checked_add(len) {
@@ -1582,61 +1628,22 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             0
         }
 
-        // ── UDP socket API ────────────────────────────────────────────────────────
+        // Syscalls 50-54 (UDP socket API) are retired — see the SYS_SOCKET-era
+        // gap comment above. They fall through to the ENOSYS default arm.
 
-        SYS_SOCKET => {
-            if !crate::virtio_net::is_present() { return ENOSYS; }
-            let fd = crate::net::udp::create();
-            fd as u64
-        }
+        // ── Userspace device-driver framework ─────────────────────────────────
+        //
+        // All device authority resolves through a CapKind::Device capability
+        // (SYS_DEV_CLAIM is Rollback-gated so only lythd claims devices). The
+        // handlers gate-before-args in crate::device, returning ENOPERM to a
+        // caller lacking the cap before any argument is examined.
 
-        SYS_BIND => {
-            // a1=socket_fd, a2=port
-            let fd   = frame.a1 as i64;
-            let port = frame.a2 as u16;
-            if port == 0 { return EINVAL; }
-            if crate::net::udp::bind(fd, port) { 0 } else { EINVAL }
-        }
-
-        SYS_SENDTO => {
-            // a1=fd, a2=buf_ptr, a3=len, a4=dst_ip (u32 BE in low 32 bits), a5=dst_port (u16)
-            let fd       = frame.a1 as i64;
-            let len      = frame.a3 as usize;
-            let dst_ip   = frame.a4 as u32;
-            let dst_port = frame.a5 as u16;
-            if len == 0 || !valid_user_range(frame.a2, len as u64) { return EINVAL; }
-            let mut kbuf = alloc::vec![0u8; len];
-            unsafe { with_user_access(|| core::ptr::copy_nonoverlapping(
-                frame.a2 as *const u8, kbuf.as_mut_ptr(), len,
-            )); }
-            let mac = crate::virtio_net::mac_addr();
-            let ok  = crate::net::udp::send(&mac, crate::net::OUR_IP, fd, dst_ip, dst_port, &kbuf);
-            if ok { 0 } else { EAGAIN }
-        }
-
-        SYS_RECVFROM => {
-            // a1=fd, a2=buf_ptr, a3=len, a4=src_ip_out (*mut u32, may be 0), a5=src_port_out (*mut u16, may be 0)
-            let fd  = frame.a1 as i64;
-            let len = frame.a3 as usize;
-            if len == 0 || !valid_user_range(frame.a2, len as u64) { return EINVAL; }
-            let mut kbuf = alloc::vec![0u8; len];
-            match crate::net::udp::recv_blocking(fd, &mut kbuf) {
-                None => EINVAL,
-                Some((src_ip, src_port, n)) => {
-                    unsafe { with_user_access(|| {
-                        core::ptr::copy_nonoverlapping(kbuf.as_ptr(), frame.a2 as *mut u8, n);
-                        if frame.a4 != 0 { (frame.a4 as *mut u32).write_unaligned(src_ip); }
-                        if frame.a5 != 0 { (frame.a5 as *mut u16).write_unaligned(src_port); }
-                    }); }
-                    n as u64
-                }
-            }
-        }
-
-        SYS_NET_CLOSE => {
-            crate::net::udp::close(frame.a1 as i64);
-            0
-        }
+        SYS_DEV_CLAIM => crate::device::sys_dev_claim(frame.a1, frame.a2),
+        SYS_DEV_CFG_READ => crate::device::sys_dev_cfg_read(frame.a1, frame.a2),
+        SYS_DEV_MMIO_MAP => crate::device::sys_dev_mmio_map(frame.a1, frame.a2, frame.a3),
+        SYS_DEV_DMA_ALLOC => crate::device::sys_dev_dma_alloc(frame.a1, frame.a2, frame.a3, frame.a4),
+        SYS_DEV_IRQ_WAIT => crate::device::sys_dev_irq_wait(frame.a1),
+        SYS_DEV_IRQ_ACK  => crate::device::sys_dev_irq_ack(frame.a1),
 
         SYS_POWEROFF => {
             crate::acpi::shutdown();
@@ -1669,6 +1676,82 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             )); }
             let Ok(at) = core::str::from_utf8(&kpath) else { return EINVAL; };
             crate::vfs::mount(at, frame.a3, frame.a4) as u64
+        }
+
+        SYS_SYMLINK => {
+            // a1=target_ptr, a2=target_len, a3=link_ptr, a4=link_len
+            let target_len = frame.a2 as usize;
+            let link_len = frame.a4 as usize;
+            if target_len == 0 || target_len > 4096 { return EINVAL; }
+            if link_len == 0 || link_len > 4096 { return EINVAL; }
+            if !valid_user_range(frame.a1, frame.a2) { return EINVAL; }
+            if !valid_user_range(frame.a3, frame.a4) { return EINVAL; }
+            let mut target = alloc::vec![0u8; target_len];
+            let mut link = alloc::vec![0u8; link_len];
+            unsafe { with_user_access(|| {
+                core::ptr::copy_nonoverlapping(frame.a1 as *const u8, target.as_mut_ptr(), target_len);
+                core::ptr::copy_nonoverlapping(frame.a3 as *const u8, link.as_mut_ptr(), link_len);
+            }); }
+            // Same DAC as SYS_CREATE: write permission on the link's parent.
+            let uid = crate::task::current_task_uid();
+            let gid = crate::task::current_task_gid();
+            let parent = parent_of(&link);
+            let mut pstat = crate::vfs::Stat::default();
+            if !crate::vfs::stat_path(&parent, &mut pstat) { return ENOENT; }
+            if !dac_check(pstat.mode, pstat.uid, pstat.gid, uid, gid, 0x2) { return ENOPERM; }
+            crate::vfs::symlink(&target, &link) as u64
+        }
+
+        SYS_READLINK => {
+            // a1=path_ptr, a2=path_len, a3=buf_ptr, a4=buf_len
+            let path_len = frame.a2 as usize;
+            let buf_len = frame.a4 as usize;
+            if path_len == 0 || path_len > 4096 { return EINVAL; }
+            if buf_len > 4096 { return EINVAL; }
+            if !valid_user_range(frame.a1, frame.a2) { return EINVAL; }
+            if buf_len > 0 && !valid_user_range(frame.a3, frame.a4) { return EINVAL; }
+            let mut kpath = alloc::vec![0u8; path_len];
+            unsafe { with_user_access(|| core::ptr::copy_nonoverlapping(
+                frame.a1 as *const u8, kpath.as_mut_ptr(), path_len,
+            )); }
+            let mut kbuf = alloc::vec![0u8; buf_len];
+            let r = crate::vfs::readlink(&kpath, &mut kbuf);
+            if r > 0 && buf_len > 0 {
+                let n = (r as usize).min(buf_len);
+                unsafe { with_user_access(|| core::ptr::copy_nonoverlapping(
+                    kbuf.as_ptr(), frame.a3 as *mut u8, n,
+                )); }
+            }
+            r as u64
+        }
+
+        SYS_STORE_REMOVE => {
+            // a1=path_ptr, a2=path_len.
+            //
+            // Capability gate FIRST (as SYS_MOUNT): reclaiming an unreferenced
+            // store entry is store-owner authority — CapKind::Filesystem with
+            // WRITE. A builder holding no such cap cannot reclaim. This removes
+            // a whole path BELOW the seal (it never opens a sealed file for
+            // write); the seal itself remains unliftable.
+            let current_id = crate::task::current_task_id();
+            let table_ptr  = crate::task::cap_table_ptr(current_id);
+            if table_ptr.is_null() { return ENOPERM; }
+            let table = unsafe { &*table_ptr };
+            if !table.has_kind_with_rights(
+                crate::cap::CapKind::Filesystem,
+                crate::cap::CapRights::WRITE,
+            ) {
+                return ENOPERM;
+            }
+
+            let path_len = frame.a2 as usize;
+            if path_len == 0 || path_len > 4096 { return EINVAL; }
+            if !valid_user_range(frame.a1, frame.a2) { return EINVAL; }
+            let mut kpath = alloc::vec![0u8; path_len];
+            unsafe { with_user_access(|| core::ptr::copy_nonoverlapping(
+                frame.a1 as *const u8, kpath.as_mut_ptr(), path_len,
+            )); }
+            crate::vfs::store_remove_tree(&kpath) as u64
         }
 
         _ => ENOSYS,

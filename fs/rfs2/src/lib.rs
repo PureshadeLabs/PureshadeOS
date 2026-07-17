@@ -18,6 +18,7 @@
 
 extern crate alloc;
 
+pub mod crypto;
 pub mod device;
 pub mod dirent;
 pub mod fs;
@@ -32,6 +33,9 @@ pub use fs::{mkfs, DirEntryOut, MkfsOptions, Rfs2};
 pub use inode::Inode;
 pub use layout::{BlockPtr, StaticHeader};
 pub use superblock::Superblock;
+pub use crypto::CryptoParams;
+#[cfg(feature = "crypto")]
+pub use crypto::{open_dek, seal_dek, GcmTransform, WrapGeometry};
 pub use transform::{BlockTransform, IdentityTransform};
 
 /// Filesystem error type. Mapping to Lythos errno sentinels happens at the

@@ -390,8 +390,11 @@ fn ensure_drv(
     Ok(())
 }
 
-#[cfg(test)]
-mod memfs;
+// Public (not cfg(test)) so dependents' suites can test their seam routing
+// against the strict in-memory backend — no_std+alloc, no deps, dead code
+// unless a test imports it.
+pub mod memfs;
+pub use memfs::MemFs;
 
 #[cfg(test)]
 mod tests {

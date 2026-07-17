@@ -87,6 +87,18 @@ impl RealizeGuard {
         self.sealed.insert(store_name.to_string());
     }
 
+    /// Forget a store name as the final step of whole-path removal (the kernel
+    /// `store_remove_tree` / SYS_STORE_REMOVE lifecycle). This is **not** an
+    /// unseal: it is never a way to make sealed content writable — the seal is
+    /// absolute and has no in-place exit. It is called only once the entire
+    /// tree has been deleted below the seal, so the now-nonexistent name should
+    /// no longer be reported sealed. Content-addressing keeps removal safe: a
+    /// later realize of the same digest reproduces byte-identical bytes.
+    /// Returns whether `store_name` was sealed.
+    pub fn forget(&mut self, store_name: &str) -> bool {
+        self.sealed.remove(store_name)
+    }
+
     /// Gate a write / create / mkdir / unlink whose target is `rel`. Rejected
     /// with [`FsError::ReadOnly`] iff `rel` lies under a sealed store name;
     /// temp / unsealed paths are writable.

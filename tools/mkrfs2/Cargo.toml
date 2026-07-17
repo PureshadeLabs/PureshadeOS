@@ -1,0 +1,24 @@
+# Standalone host tool. Two build paths coexist:
+#   * bare `rustc` (Makefile default, invoked by kernel/build.rs) → NO crypto:
+#     compiles rfs2 without features, produces plaintext images only.
+#   * `cargo build` (the `disk-enc` Makefile target) → crypto on by default:
+#     the `--encrypt` path (env RFS2_PASSPHRASE) produces AES-256-GCM volumes.
+# Its own `[workspace]` keeps it independent of the kernel workspace's build-std
+# config, matching why the Makefile used rustc directly.
+[package]
+name = "mkrfs2"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "mkrfs2"
+path = "src/main.rs"
+
+[features]
+default = ["crypto"]
+crypto = ["rfs2/crypto"]
+
+[dependencies]
+rfs2 = { path = "../../fs/rfs2", default-features = false }

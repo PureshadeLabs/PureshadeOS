@@ -149,7 +149,7 @@ type Fs = Rfs2<MemDisk, IdentityTransform>;
 /// Recursively mirror `host` under `guest` ("" = root). One commit per
 /// filesystem object keeps the pending generation's dropped-block garbage
 /// bounded, so a small image doesn't run out of staging space.
-fn populate(fs: &mut Fs, host: &Path, guest: &str) {
+fn populate<T: rfs2::BlockTransform>(fs: &mut Rfs2<MemDisk, T>, host: &Path, guest: &str) {
     let mut entries: Vec<_> = std::fs::read_dir(host)
         .unwrap_or_else(|e| die(&format!("readdir {}: {e}", host.display())))
         .map(|e| e.unwrap())
@@ -415,17 +415,41 @@ fn main() {
     uuid[8..].copy_from_slice(&seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).to_le_bytes());
 
     let mut disk = MemDisk { data: vec![0u8; size as usize] };
+    let rootfs = args.get(3);
+
+    // Encrypted image path: `cargo build` (crypto feature) + a non-empty
+    // RFS2_PASSPHRASE env. The bare-rustc build has no `crypto` feature, so this
+    // block is compiled out and mkrfs2 stays plaintext-only there.
+    #[cfg(feature = "crypto")]
+    {
+        if let Ok(pass) = std::env::var("RFS2_PASSPHRASE") {
+            if !pass.is_empty() {
+                make_encrypted(disk, uuid, size, img_path, rootfs, pass.as_bytes());
+                return;
+            }
+        }
+    }
+
     mkfs(
         &mut disk,
         &IdentityTransform,
-        &MkfsOptions { uuid, label: "pureshade-root", now: now_ns() },
+        &MkfsOptions { uuid, label: "pureshade-root", now: now_ns(), crypto: None },
     )
     .unwrap_or_else(|e| die(&format!("mkfs: {e:?}")));
-
-    let mut fs = Rfs2::mount(disk, IdentityTransform, now_ns)
+    let fs = Rfs2::mount(disk, IdentityTransform, now_ns)
         .unwrap_or_else(|e| die(&format!("mount after mkfs: {e:?}")));
+    finish(fs, rootfs, img_path, size);
+}
 
-    if let Some(rootfs) = args.get(3) {
+/// Populate (if a rootfs was given), commit, and write the image out. Generic
+/// over the block transform so the plaintext and encrypted paths share it.
+fn finish<T: rfs2::BlockTransform>(
+    mut fs: Rfs2<MemDisk, T>,
+    rootfs: Option<&String>,
+    img_path: &str,
+    size: u64,
+) {
+    if let Some(rootfs) = rootfs {
         populate(&mut fs, Path::new(rootfs), "");
     }
     fs.commit().unwrap_or_else(|e| die(&format!("final commit: {e:?}")));
@@ -440,4 +464,62 @@ fn main() {
         "mkrfs2: {img_path} ({} MiB): gen={gen} blocks={blocks} inodes={inodes}",
         size >> 20,
     );
+}
+
+/// Fill an encrypted volume (doc 08): random DEK + salt + wrap nonce, seal the
+/// DEK under the passphrase (Argon2id → KEK → GCM wrap), format with a
+/// `GcmTransform`, then populate/commit/write as usual.
+#[cfg(feature = "crypto")]
+fn make_encrypted(
+    mut disk: MemDisk,
+    uuid: [u8; 16],
+    size: u64,
+    img_path: &str,
+    rootfs: Option<&String>,
+    passphrase: &[u8],
+) {
+    use rfs2::crypto::{argon2_block_count, Argon2Block};
+    use rfs2::layout::{INCOMPAT_ENCRYPTION, RO_COMPAT_HARDLINKS};
+    use rfs2::{seal_dek, GcmTransform, WrapGeometry};
+
+    let total_blocks = size / BLOCK_SIZE as u64;
+    let dek = rand_bytes::<32>();
+    let salt = rand_bytes::<16>();
+    let nonce = rand_bytes::<12>();
+    // Production KDF baseline (doc 08 §5): 64 MiB Argon2id. The kernel reads
+    // these params back from the header and sizes its PMM scratch to match.
+    let (m, t, p) = (65536u32, 3u32, 1u32);
+
+    let geom = WrapGeometry {
+        total_blocks,
+        uuid,
+        feature_compat: 0,
+        feature_incompat: INCOMPAT_ENCRYPTION,
+        feature_ro_compat: RO_COMPAT_HARDLINKS,
+    };
+    let mut mem = vec![Argon2Block::new(); argon2_block_count(m, t, p).unwrap()];
+    let params = seal_dek(passphrase, &dek, &geom, &salt, m, t, p, &nonce, &mut mem)
+        .unwrap_or_else(|e| die(&format!("seal_dek: {e:?}")));
+
+    mkfs(
+        &mut disk,
+        &GcmTransform::new(&dek),
+        &MkfsOptions { uuid, label: "pureshade-root", now: now_ns(), crypto: Some(params) },
+    )
+    .unwrap_or_else(|e| die(&format!("mkfs(enc): {e:?}")));
+    let fs = Rfs2::mount(disk, GcmTransform::new(&dek), now_ns)
+        .unwrap_or_else(|e| die(&format!("mount(enc): {e:?}")));
+    eprintln!("mkrfs2: ENCRYPTED volume — AES-256-GCM, Argon2id m={m} t={t} p={p}");
+    finish(fs, rootfs, img_path, size);
+}
+
+/// `N` random bytes from the OS. Only the encrypted path needs entropy.
+#[cfg(feature = "crypto")]
+fn rand_bytes<const N: usize>() -> [u8; N] {
+    use std::io::Read;
+    let mut b = [0u8; N];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .unwrap_or_else(|e| die(&format!("read /dev/urandom: {e}")));
+    b
 }

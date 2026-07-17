@@ -6,6 +6,15 @@
 //! (`/shade/db/`), tracks the **live set** (`/shade/roots/` + in-flight build
 //! locks), and reclaims everything unreachable (`shade gc`).
 //!
+//! ## The filesystem seam
+//!
+//! All I/O goes through the injected [`StoreFs`] backend (the B1 seam from
+//! [`shade_store`]) — the crate core is `no_std + alloc` and touches no
+//! filesystem directly. [`HostFs`](shade_store::HostFs) (feature `std`,
+//! default) backs the host suite and the `shade-gc` seed CLI;
+//! [`OrosFs`](shade_store::OrosFs) (feature `oros`) backs the same logic on
+//! the Lythos ABI. Paths are plain `/`-separated strings on both sides.
+//!
 //! ## The database (02 §7.2)
 //!
 //! A plain directory-of-files DB — no binary format, no TOML. Per store
@@ -18,12 +27,13 @@
 //!   (LF-separated). Union of the derivation's declared `dep.*` and the
 //!   digests found by [reference scanning](StoreDb::register) the output.
 //!
-//! Mutations serialize on `db/lock` (exclusive-create — the flock-equivalent
-//! 02 §7.2 calls for). On target the backing primitive is `SYS_CREATE`:
-//! atomic create-if-absent, exactly one winner, losers get `EEXIST`
-//! (docs/spec/syscalls.md, SYS_CREATE exclusive-create guarantee; verified
-//! by the `make kernel-tests` exclusive-create boot probe). The host seed
-//! uses `OpenOptions::create_new` — same semantics.
+//! Mutations serialize on `db/lock`, taken by the seam's
+//! [`create_exclusive`](StoreFs::create_exclusive) — atomic create-if-absent,
+//! exactly one winner, losers get `Exists` (the flock-equivalent 02 §7.2
+//! calls for). On target the backing primitive is `SYS_CREATE`'s
+//! exclusive-create guarantee (docs/spec/syscalls.md; verified by the `make
+//! kernel-tests` exclusive-create boot probe); on the host it is
+//! `OpenOptions::create_new` — same semantics.
 //!
 //! ## The live set (02 §7.1)
 //!
@@ -45,16 +55,27 @@
 //! Deletion frees host blocks directly; on the OROS RFS the unlink reclaims
 //! blocks at the next mount-time mark-and-sweep (RFS SPACE-1: a block is free
 //! iff reachable from no valid superblock) — GC never touches a free structure
-//! because RFS has none.
+//! because RFS has none. The OROS backend has no rmdir syscall yet, so a
+//! swept directory's empty skeleton survives until the ABI grows one; its
+//! files (the bytes) are reclaimed.
 
-use std::collections::{BTreeSet, VecDeque};
-use std::fs;
-use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
+
+extern crate alloc;
+
+use alloc::collections::{BTreeSet, VecDeque};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use shade_cdf::BASE32_ALPHABET;
+use shade_store::backend::{self, join, split_parent};
+use shade_store::{FsError, NodeKind, StoreFs};
+
+#[cfg(feature = "std")]
+pub use shade_store::HostFs;
+#[cfg(feature = "oros")]
+pub use shade_store::OrosFs;
 
 /// The canonical `/shade` prefix (02 §1). [`StoreDb`] takes its roots as
 /// arguments so host tests and tooling can target elsewhere; this is the
@@ -65,67 +86,133 @@ pub const CANONICAL_SHADE_ROOT: &str = "/shade";
 /// change to the `db/valid` record shape.
 const DB_RECORD_VERSION: &str = "shade-db=1";
 
-/// The store metadata database rooted at a `/shade` prefix. Cheap to
-/// construct; holds no open handles.
-#[derive(Debug, Clone)]
-pub struct StoreDb {
-    store_root: PathBuf,
-    db_root: PathBuf,
-    roots_root: PathBuf,
-    gen_root: PathBuf,
-    log_root: PathBuf,
+/// How long [`acquire_lock`] spins on a held `db/lock` before giving up
+/// (the lock is held only for short mutations).
+const LOCK_DEADLINE_MS: u64 = 10_000;
+
+/// Database error: a seam failure tagged with the operation and path, or a
+/// busy condition (lock held / builds in flight).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DbError {
+    /// A backend filesystem operation failed.
+    Fs {
+        op: &'static str,
+        path: String,
+        err: FsError,
+    },
+    /// The db is busy: the mutation lock stayed held past the deadline, or
+    /// GC was refused because builds are in flight (re-run with force).
+    Busy(String),
 }
 
-impl StoreDb {
-    /// A `StoreDb` over a `/shade` prefix: `store/`, `db/`, `roots/`, `gen/`,
-    /// `log/` are the canonical 02 §1 subdirectories under `shade_root`.
-    pub fn new(shade_root: impl AsRef<Path>) -> Self {
-        let r = shade_root.as_ref();
-        StoreDb {
-            store_root: r.join("store"),
-            db_root: r.join("db"),
-            roots_root: r.join("roots"),
-            gen_root: r.join("gen"),
-            log_root: r.join("log"),
+impl core::fmt::Display for DbError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DbError::Fs { op, path, err } => write!(f, "fs: {op} {path}: {err}"),
+            DbError::Busy(msg) => write!(f, "busy: {msg}"),
         }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for DbError {}
+
+/// Fold to `io::Error` so std consumers (`DbRegistrar`, shade-gen) keep their
+/// `io::Result` plumbing: `Busy` → `WouldBlock` (the pre-seam kind).
+#[cfg(feature = "std")]
+impl From<DbError> for std::io::Error {
+    fn from(e: DbError) -> Self {
+        let kind = match &e {
+            DbError::Busy(_) => std::io::ErrorKind::WouldBlock,
+            DbError::Fs { err: FsError::NotFound, .. } => std::io::ErrorKind::NotFound,
+            DbError::Fs { err: FsError::Exists, .. } => std::io::ErrorKind::AlreadyExists,
+            DbError::Fs { .. } => std::io::ErrorKind::Other,
+        };
+        std::io::Error::new(kind, e.to_string())
+    }
+}
+
+pub type DbResult<T> = core::result::Result<T, DbError>;
+
+/// Shorthand: tag a backend failure with the operation and target path.
+fn fs_op(op: &'static str, path: &str) -> impl FnOnce(FsError) -> DbError {
+    let path = String::from(path);
+    move |err| DbError::Fs { op, path, err }
+}
+
+/// The store metadata database rooted at a `/shade` prefix, over an injected
+/// [`StoreFs`] backend. Cheap to construct; holds no open handles. The
+/// backend lives in a `RefCell` so the query/mutation API stays `&self`
+/// (backends are stateless — `HostFs`/`OrosFs` are `Copy`).
+#[derive(Debug, Clone)]
+pub struct StoreDb<F: StoreFs> {
+    fs: core::cell::RefCell<F>,
+    store_root: String,
+    db_root: String,
+    roots_root: String,
+    gen_root: String,
+    log_root: String,
+}
+
+#[cfg(feature = "std")]
+impl StoreDb<HostFs> {
+    /// A host-backed `StoreDb` over a `/shade` prefix: `store/`, `db/`,
+    /// `roots/`, `gen/`, `log/` are the canonical 02 §1 subdirectories under
+    /// `shade_root`.
+    pub fn new(shade_root: impl AsRef<std::path::Path>) -> Self {
+        StoreDb::with_backend(HostFs, &shade_root.as_ref().to_string_lossy())
     }
 
     /// Derive the sibling `db/`, `roots/`, `gen/`, `log/` roots from an
     /// explicit store root (its parent is the `/shade` prefix). The build
     /// executor's registrar uses this — it already threads `store_root`.
-    pub fn for_store_root(store_root: impl AsRef<Path>) -> Self {
-        let store_root = store_root.as_ref().to_path_buf();
-        let shade = store_root
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from(CANONICAL_SHADE_ROOT));
+    pub fn for_store_root(store_root: impl AsRef<std::path::Path>) -> Self {
+        StoreDb::for_store_root_on(HostFs, &store_root.as_ref().to_string_lossy())
+    }
+}
+
+impl<F: StoreFs> StoreDb<F> {
+    /// A `StoreDb` over a `/shade` prefix on the injected backend `fs`.
+    pub fn with_backend(fs: F, shade_root: &str) -> Self {
+        let r = shade_root.trim_end_matches('/');
         StoreDb {
-            store_root,
-            db_root: shade.join("db"),
-            roots_root: shade.join("roots"),
-            gen_root: shade.join("gen"),
-            log_root: shade.join("log"),
+            fs: core::cell::RefCell::new(fs),
+            store_root: format!("{r}/store"),
+            db_root: format!("{r}/db"),
+            roots_root: format!("{r}/roots"),
+            gen_root: format!("{r}/gen"),
+            log_root: format!("{r}/log"),
         }
     }
 
-    pub fn store_root(&self) -> &Path {
+    /// [`with_backend`](StoreDb::with_backend), but keyed on an explicit
+    /// store root whose parent is the `/shade` prefix.
+    pub fn for_store_root_on(fs: F, store_root: &str) -> Self {
+        let store_root = store_root.trim_end_matches('/');
+        let (shade, _) = split_parent(store_root);
+        let mut db = StoreDb::with_backend(fs, shade);
+        db.store_root = String::from(store_root);
+        db
+    }
+
+    pub fn store_root(&self) -> &str {
         &self.store_root
     }
-    pub fn roots_dir(&self) -> &Path {
+    pub fn roots_dir(&self) -> &str {
         &self.roots_root
     }
 
-    fn refs_dir(&self) -> PathBuf {
-        self.db_root.join("refs")
+    fn refs_dir(&self) -> String {
+        join(&self.db_root, "refs")
     }
-    fn valid_dir(&self) -> PathBuf {
-        self.db_root.join("valid")
+    fn valid_dir(&self) -> String {
+        join(&self.db_root, "valid")
     }
-    fn locks_dir(&self) -> PathBuf {
-        self.db_root.join("locks")
+    fn locks_dir(&self) -> String {
+        join(&self.db_root, "locks")
     }
-    fn lock_file(&self) -> PathBuf {
-        self.db_root.join("lock")
+    fn lock_file(&self) -> String {
+        join(&self.db_root, "lock")
     }
 
     // ---- Registration (02 §7.2, 06 §5) ------------------------------------
@@ -143,18 +230,23 @@ impl StoreDb {
     ///   `/shade/store/...`), the seed of the reference record.
     pub fn register(
         &self,
-        out_path: &Path,
+        out_path: &str,
         digest: &str,
         store_name: &str,
         cdf_hash: &str,
         declared_refs: &[String],
-    ) -> io::Result<ValidRecord> {
-        let _lock = self.acquire_lock()?;
+    ) -> DbResult<ValidRecord>
+    where
+        F: Clone,
+    {
+        let fs = &mut *self.fs.borrow_mut();
+        let _lock = acquire_lock(fs, &self.db_root, &self.lock_file(), LOCK_DEADLINE_MS)?;
 
         // Reference scan (Nix-style): find every store-path digest the output
         // bytes embed — catches paths the compiler baked into binaries,
         // panic strings, or `env!`-captured values that no declaration names.
-        let mut refs = self.scan_tree_for_digests(out_path)?;
+        let mut refs = BTreeSet::new();
+        scan_tree(fs, out_path, &self.scan_prefix(), &mut refs)?;
         // Union the declared deps: the `.drv` references all its `dep.*`.
         for d in declared_refs {
             if let Some(dg) = digest_from_store_path(d) {
@@ -180,33 +272,36 @@ impl StoreDb {
             refs_buf.push_str(r);
             refs_buf.push('\n');
         }
-        write_atomic(&self.refs_dir().join(digest), refs_buf.as_bytes())?;
+        write_atomic(fs, &join(&self.refs_dir(), digest), refs_buf.as_bytes())?;
         // valid/<digest>: the registration record (existence = valid).
-        write_atomic(&self.valid_dir().join(digest), record.serialize().as_bytes())?;
+        write_atomic(fs, &join(&self.valid_dir(), digest), record.serialize().as_bytes())?;
 
         Ok(record)
     }
 
     /// The `db/refs/<digest>` set (empty if unregistered or record-less).
-    pub fn read_refs(&self, digest: &str) -> io::Result<Vec<String>> {
-        match fs::read_to_string(self.refs_dir().join(digest)) {
-            Ok(s) => Ok(s.lines().map(str::to_string).filter(|l| !l.is_empty()).collect()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(e),
-        }
+    pub fn read_refs(&self, digest: &str) -> DbResult<Vec<String>> {
+        let fs = &mut *self.fs.borrow_mut();
+        read_refs_on(fs, &self.refs_dir(), digest)
     }
 
     /// The `db/valid/<digest>` record, if the path is registered valid.
-    pub fn read_valid(&self, digest: &str) -> io::Result<Option<ValidRecord>> {
-        match fs::read_to_string(self.valid_dir().join(digest)) {
-            Ok(s) => Ok(ValidRecord::parse(digest, &s)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
+    pub fn read_valid(&self, digest: &str) -> DbResult<Option<ValidRecord>> {
+        let fs = &mut *self.fs.borrow_mut();
+        let path = join(&self.valid_dir(), digest);
+        match fs.read_file(&path) {
+            Ok(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                Ok(ValidRecord::parse(digest, &s))
+            }
+            Err(FsError::NotFound) => Ok(None),
+            Err(e) => Err(fs_op("read", &path)(e)),
         }
     }
 
     pub fn is_valid(&self, digest: &str) -> bool {
-        self.valid_dir().join(digest).exists()
+        let fs = &mut *self.fs.borrow_mut();
+        fs.exists(&join(&self.valid_dir(), digest))
     }
 
     // ---- Roots (02 §7.1) --------------------------------------------------
@@ -214,35 +309,37 @@ impl StoreDb {
     /// Add a **direct** GC root: a symlink `roots/<name> -> store_path`.
     /// Anyone may root a path (02 §7.1 rule 2); the name convention is
     /// `<owner>-<label>`. Replaces an existing root of the same name.
-    pub fn add_root(&self, name: &str, store_path: &Path) -> io::Result<()> {
-        fs::create_dir_all(&self.roots_root)?;
-        let link = self.roots_root.join(name);
-        let _ = fs::remove_file(&link);
-        symlink(store_path, &link)
+    pub fn add_root(&self, name: &str, store_path: &str) -> DbResult<()> {
+        let fs = &mut *self.fs.borrow_mut();
+        backend::create_dir_all(fs, &self.roots_root)
+            .map_err(fs_op("create_dir_all", &self.roots_root))?;
+        let link = join(&self.roots_root, name);
+        let _ = fs.unlink(&link);
+        fs.symlink(store_path, &link).map_err(fs_op("symlink", &link))
     }
 
     /// Remove a direct root. Absent is not an error.
-    pub fn remove_root(&self, name: &str) -> io::Result<()> {
-        match fs::remove_file(self.roots_root.join(name)) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
+    pub fn remove_root(&self, name: &str) -> DbResult<()> {
+        let fs = &mut *self.fs.borrow_mut();
+        let link = join(&self.roots_root, name);
+        match fs.unlink(&link) {
+            Ok(()) | Err(FsError::NotFound) => Ok(()),
+            Err(e) => Err(fs_op("unlink", &link)(e)),
         }
     }
 
     /// Direct roots as `(name, target)` — dangling symlinks excluded (they are
     /// pruned by [`gc`](StoreDb::gc), not here).
-    pub fn list_roots(&self) -> io::Result<Vec<(String, PathBuf)>> {
+    pub fn list_roots(&self) -> DbResult<Vec<(String, String)>> {
+        let fs = &mut *self.fs.borrow_mut();
         let mut out = Vec::new();
-        let rd = match fs::read_dir(&self.roots_root) {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
-            Err(e) => return Err(e),
+        let entries = match fs.read_dir(&self.roots_root) {
+            Ok(entries) => entries,
+            Err(FsError::NotFound) => return Ok(out),
+            Err(e) => return Err(fs_op("read_dir", &self.roots_root)(e)),
         };
-        for e in rd {
-            let e = e?;
-            if let Ok(target) = fs::read_link(e.path()) {
-                let name = e.file_name().to_string_lossy().into_owned();
+        for (name, _) in entries {
+            if let Ok(target) = fs.read_link(&join(&self.roots_root, &name)) {
                 out.push((name, target));
             }
         }
@@ -256,8 +353,13 @@ impl StoreDb {
     /// so a live build's inputs are never collected (02 §7.1 rule 3), and a
     /// crash leaves a stale lock that a later run overwrites or GC ignores
     /// once the id is reused.
-    pub fn lock_build(&self, id: &str, keep: &[impl AsRef<str>]) -> io::Result<BuildLock> {
-        fs::create_dir_all(self.locks_dir())?;
+    pub fn lock_build(&self, id: &str, keep: &[impl AsRef<str>]) -> DbResult<BuildLock<F>>
+    where
+        F: Clone,
+    {
+        let fs = &mut *self.fs.borrow_mut();
+        let locks = self.locks_dir();
+        backend::create_dir_all(fs, &locks).map_err(fs_op("create_dir_all", &locks))?;
         let mut buf = String::new();
         for k in keep {
             if let Some(d) = digest_from_store_path(k.as_ref()) {
@@ -265,14 +367,15 @@ impl StoreDb {
                 buf.push('\n');
             }
         }
-        let path = self.locks_dir().join(id);
-        write_atomic(&path, buf.as_bytes())?;
-        Ok(BuildLock { path })
+        let path = join(&locks, id);
+        write_atomic(fs, &path, buf.as_bytes())?;
+        Ok(BuildLock { fs: fs.clone(), path })
     }
 
     /// Number of build locks currently held (builds in flight).
     pub fn builds_in_flight(&self) -> usize {
-        count_entries(&self.locks_dir())
+        let fs = &mut *self.fs.borrow_mut();
+        fs.read_dir(&self.locks_dir()).map(|v| v.len()).unwrap_or(0)
     }
 
     // ---- GC (02 §7.3) -----------------------------------------------------
@@ -289,23 +392,24 @@ impl StoreDb {
     /// under `build/`, not `store/`. References are a *superset* (declared ∪
     /// scanned), so reachability is never under-approximated — GC cannot
     /// collect a rooted or reference-reachable path.
-    pub fn gc(&self, opts: &GcOptions) -> io::Result<GcReport> {
-        let _lock = self.acquire_lock()?;
+    pub fn gc(&self, opts: &GcOptions) -> DbResult<GcReport>
+    where
+        F: Clone,
+    {
+        let fs = &mut *self.fs.borrow_mut();
+        let _lock = acquire_lock(fs, &self.db_root, &self.lock_file(), LOCK_DEADLINE_MS)?;
 
-        let inflight = self.builds_in_flight();
+        let inflight = fs.read_dir(&self.locks_dir()).map(|v| v.len()).unwrap_or(0);
         if inflight > 0 && !opts.force {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                format!(
-                    "{inflight} build(s) in flight (/shade/db/locks non-empty); \
-                     re-run with force to override"
-                ),
-            ));
+            return Err(DbError::Busy(format!(
+                "{inflight} build(s) in flight (/shade/db/locks non-empty); \
+                 re-run with force to override"
+            )));
         }
 
         // MARK: closure of the roots over db/refs.
-        let (roots, pruned_roots) = self.collect_roots()?;
-        let marked = self.mark_closure(roots)?;
+        let (roots, pruned_roots) = self.collect_roots(fs)?;
+        let marked = self.mark_closure(fs, roots)?;
 
         // SWEEP: every store entry whose digest is not marked, or whose name
         // is not a valid store name, is dead.
@@ -316,15 +420,13 @@ impl StoreDb {
             pruned_roots,
             dry_run: opts.dry_run,
         };
-        let rd = match fs::read_dir(&self.store_root) {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(report),
-            Err(e) => return Err(e),
+        let entries = match fs.read_dir(&self.store_root) {
+            Ok(entries) => entries,
+            Err(FsError::NotFound) => return Ok(report),
+            Err(e) => return Err(fs_op("read_dir", &self.store_root)(e)),
         };
-        for e in rd {
-            let e = e?;
-            let name = e.file_name().to_string_lossy().into_owned();
-            let path = e.path();
+        for (name, _) in entries {
+            let path = join(&self.store_root, &name);
             let live = match store_entry_digest(&name) {
                 Some(d) => marked.contains(d),
                 None => false, // grammar violation ⇒ dead (02 §7.3 step 3)
@@ -333,18 +435,24 @@ impl StoreDb {
                 report.kept += 1;
                 continue;
             }
-            report.freed_bytes += entry_size(&path);
+            report.freed_bytes += entry_size(fs, &path);
             report.collected.push(name.clone());
             if !opts.dry_run {
-                remove_path(&path)?;
+                // Remove the whole dead store path via the sole reclamation
+                // primitive. On a realize-guarded store mount (OROS) this is
+                // SYS_STORE_REMOVE — the kernel deletes the sealed tree BELOW
+                // the seal (no in-place unseal exists); on host/mem it is a
+                // plain recursive delete. Idempotent and correct on the `.drv`
+                // (never sealed) too.
+                let _ = fs.remove_store_path(&path);
                 // Drop the db records + log of the reclaimed digest. Both the
                 // output dir and its `.drv` map to one digest; either entry
                 // reaching here removes the (idempotent) shared records.
                 if let Some(d) = store_entry_digest(&name) {
-                    let _ = fs::remove_file(self.refs_dir().join(d));
-                    let _ = fs::remove_file(self.valid_dir().join(d));
+                    let _ = fs.unlink(&join(&self.refs_dir(), d));
+                    let _ = fs.unlink(&join(&self.valid_dir(), d));
                 }
-                let _ = fs::remove_file(self.log_root.join(format!("{name}.log")));
+                let _ = fs.unlink(&join(&self.log_root, &format!("{name}.log")));
             }
         }
         report.collected.sort();
@@ -353,42 +461,40 @@ impl StoreDb {
 
     /// The digests of every root (02 §7.1), plus the count of dangling direct
     /// roots pruned as a side effect (rule 2).
-    fn collect_roots(&self) -> io::Result<(BTreeSet<String>, usize)> {
+    fn collect_roots(&self, fs: &mut F) -> DbResult<(BTreeSet<String>, usize)> {
         let mut roots = BTreeSet::new();
         let mut pruned = 0usize;
 
         // 1. Direct roots: roots/* symlinks. A target that no longer exists is
         //    a dangling root — pruned.
-        if let Ok(rd) = fs::read_dir(&self.roots_root) {
-            for e in rd {
-                let e = e?;
-                let link = e.path();
-                let target = match fs::read_link(&link) {
+        if let Ok(entries) = fs.read_dir(&self.roots_root) {
+            for (name, _) in entries {
+                let link = join(&self.roots_root, &name);
+                let target = match fs.read_link(&link) {
                     Ok(t) => t,
                     Err(_) => continue, // not a symlink; leave it be
                 };
-                let abs = if target.is_absolute() {
+                let abs = if target.starts_with('/') {
                     target.clone()
                 } else {
-                    self.roots_root.join(&target)
+                    join(&self.roots_root, &target)
                 };
-                if abs.exists() {
-                    if let Some(d) = digest_from_store_path(&target.to_string_lossy()) {
+                if fs.exists(&abs) {
+                    if let Some(d) = digest_from_store_path(&target) {
                         roots.insert(d.to_string());
                     }
                 } else {
-                    let _ = fs::remove_file(&link);
+                    let _ = fs.unlink(&link);
                     pruned += 1;
                 }
             }
         }
 
         // 2. Indirect roots: build locks. Each lock file lists digests.
-        if let Ok(rd) = fs::read_dir(self.locks_dir()) {
-            for e in rd {
-                let e = e?;
-                if let Ok(content) = fs::read_to_string(e.path()) {
-                    for line in content.lines() {
+        if let Ok(entries) = fs.read_dir(&self.locks_dir()) {
+            for (name, _) in entries {
+                if let Ok(bytes) = fs.read_file(&join(&self.locks_dir(), &name)) {
+                    for line in String::from_utf8_lossy(&bytes).lines() {
                         let l = line.trim();
                         if !l.is_empty() {
                             roots.insert(l.to_string());
@@ -401,21 +507,21 @@ impl StoreDb {
         // 3. Generations: every store digest embedded under /shade/gen —
         //    manifests' store-path lines and profile symlink forests. Keeps
         //    all installed generations live (02 §7.1 rule 1).
-        let gen_digests = self.scan_tree_for_digests(&self.gen_root)?;
-        roots.extend(gen_digests);
+        scan_tree(fs, &self.gen_root, &self.scan_prefix(), &mut roots)?;
 
         Ok((roots, pruned))
     }
 
     /// BFS the reference closure of `roots` over `db/refs`.
-    fn mark_closure(&self, roots: BTreeSet<String>) -> io::Result<BTreeSet<String>> {
+    fn mark_closure(&self, fs: &mut F, roots: BTreeSet<String>) -> DbResult<BTreeSet<String>> {
+        let refs_dir = self.refs_dir();
         let mut marked = BTreeSet::new();
         let mut queue: VecDeque<String> = roots.into_iter().collect();
         while let Some(d) = queue.pop_front() {
             if !marked.insert(d.clone()) {
                 continue;
             }
-            for r in self.read_refs(&d)? {
+            for r in read_refs_on(fs, &refs_dir, &d)? {
                 if !marked.contains(&r) {
                     queue.push_back(r);
                 }
@@ -424,50 +530,24 @@ impl StoreDb {
         Ok(marked)
     }
 
-    /// Recursively scan a tree for embedded store-path digests: read regular
-    /// files and scan their bytes, and scan symlink targets, for the byte
-    /// pattern `<store_root>/` followed by a 32-char base32 digest. Missing
-    /// root ⇒ empty set.
-    fn scan_tree_for_digests(&self, root: &Path) -> io::Result<BTreeSet<String>> {
-        let mut set = BTreeSet::new();
-        let prefix = {
-            let mut s = self.store_root.as_os_str().to_os_string();
-            s.push("/");
-            s.into_string()
-                .unwrap_or_else(|_| format!("{}/", self.store_root.display()))
-                .into_bytes()
-        };
-        scan_tree(root, &prefix, &mut set)?;
-        Ok(set)
+    /// The reference-scan byte pattern: `<store_root>/` (followed by a
+    /// 32-char base32 digest).
+    fn scan_prefix(&self) -> Vec<u8> {
+        format!("{}/", self.store_root).into_bytes()
     }
+}
 
-    // ---- Locking ----------------------------------------------------------
-
-    /// Acquire the db mutation lock (`db/lock`) by exclusive-create. Spins
-    /// briefly on contention (the lock is held only for short mutations),
-    /// then fails rather than blocking forever on a stale lock.
-    fn acquire_lock(&self) -> io::Result<DbLock> {
-        fs::create_dir_all(&self.db_root)?;
-        let path = self.lock_file();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut f) => {
-                    let _ = writeln!(f, "{}", std::process::id());
-                    return Ok(DbLock { path });
-                }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    if Instant::now() >= deadline {
-                        return Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "db lock held (another store mutation in progress)",
-                        ));
-                    }
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(e) => return Err(e),
-            }
-        }
+/// The `db/refs/<digest>` set on an explicit backend (empty if unregistered).
+fn read_refs_on(fs: &mut dyn StoreFs, refs_dir: &str, digest: &str) -> DbResult<Vec<String>> {
+    let path = join(refs_dir, digest);
+    match fs.read_file(&path) {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect()),
+        Err(FsError::NotFound) => Ok(Vec::new()),
+        Err(e) => Err(fs_op("read", &path)(e)),
     }
 }
 
@@ -556,30 +636,67 @@ pub struct GcReport {
 }
 
 /// A held build lock (indirect GC root). Dropping it removes the lock file, so
-/// the build's kept-alive set is released when the build finishes.
+/// the build's kept-alive set is released when the build finishes. Carries its
+/// own backend copy so the drop needs no `StoreDb` borrow.
 #[derive(Debug)]
-pub struct BuildLock {
-    path: PathBuf,
+pub struct BuildLock<F: StoreFs> {
+    fs: F,
+    path: String,
 }
 
-impl BuildLock {
+impl<F: StoreFs> BuildLock<F> {
     /// Release the lock now (equivalent to dropping it).
     pub fn release(self) {}
 }
 
-impl Drop for BuildLock {
+impl<F: StoreFs> Drop for BuildLock<F> {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = self.fs.unlink(&self.path);
     }
 }
 
-/// The db mutation lock guard; removes `db/lock` on drop.
-struct DbLock {
-    path: PathBuf,
+// ---- Locking ------------------------------------------------------------------
+
+/// The db mutation lock guard; removes `db/lock` on drop. Owns a backend copy
+/// so releasing needs no outer borrow.
+#[derive(Debug)]
+struct DbLock<F: StoreFs> {
+    fs: F,
+    path: String,
 }
-impl Drop for DbLock {
+impl<F: StoreFs> Drop for DbLock<F> {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = self.fs.unlink(&self.path);
+    }
+}
+
+/// Acquire the db mutation lock (`db/lock`) by the seam's atomic
+/// [`create_exclusive`](StoreFs::create_exclusive) — exactly one winner,
+/// losers see `Exists` and spin briefly (the lock is held only for short
+/// mutations), then fail [`DbError::Busy`] rather than blocking forever on a
+/// stale lock.
+fn acquire_lock<F: StoreFs + Clone>(
+    fs: &mut F,
+    db_root: &str,
+    lock_path: &str,
+    deadline_ms: u64,
+) -> DbResult<DbLock<F>> {
+    backend::create_dir_all(fs, db_root).map_err(fs_op("create_dir_all", db_root))?;
+    let deadline = monotonic_ms().saturating_add(deadline_ms);
+    loop {
+        let body = format!("{}\n", fs.unique_token());
+        match fs.create_exclusive(lock_path, body.as_bytes()) {
+            Ok(()) => return Ok(DbLock { fs: fs.clone(), path: String::from(lock_path) }),
+            Err(FsError::Exists) => {
+                if monotonic_ms() >= deadline {
+                    return Err(DbError::Busy(String::from(
+                        "db lock held (another store mutation in progress)",
+                    )));
+                }
+                backoff();
+            }
+            Err(e) => return Err(fs_op("create_exclusive", lock_path)(e)),
+        }
     }
 }
 
@@ -630,107 +747,153 @@ fn scan_bytes(prefix: &[u8], buf: &[u8], set: &mut BTreeSet<String>) {
     }
 }
 
-/// Recursively scan a tree: byte-scan regular files, scan symlink targets.
-fn scan_tree(path: &Path, prefix: &[u8], set: &mut BTreeSet<String>) -> io::Result<()> {
-    let meta = match fs::symlink_metadata(path) {
+/// Recursively scan a tree through the seam: byte-scan regular files, scan
+/// symlink targets. Missing root ⇒ empty. A backend without readlink (OROS
+/// today) contributes no symlink targets — and can hold none either.
+fn scan_tree(
+    fs: &mut dyn StoreFs,
+    path: &str,
+    prefix: &[u8],
+    set: &mut BTreeSet<String>,
+) -> DbResult<()> {
+    let meta = match fs.metadata(path) {
         Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
+        Err(FsError::NotFound) => return Ok(()),
+        Err(e) => return Err(fs_op("stat", path)(e)),
     };
-    let ft = meta.file_type();
-    if ft.is_symlink() {
-        if let Ok(target) = fs::read_link(path) {
-            scan_bytes(prefix, target.to_string_lossy().as_bytes(), set);
+    match meta.kind {
+        NodeKind::Symlink => {
+            if let Ok(target) = fs.read_link(path) {
+                scan_bytes(prefix, target.as_bytes(), set);
+            }
         }
-    } else if ft.is_dir() {
-        for entry in fs::read_dir(path)? {
-            scan_tree(&entry?.path(), prefix, set)?;
+        NodeKind::Dir => {
+            let entries = fs.read_dir(path).map_err(fs_op("read_dir", path))?;
+            for (name, _) in entries {
+                scan_tree(fs, &join(path, &name), prefix, set)?;
+            }
         }
-    } else {
-        // Regular file: stream it so a large binary does not balloon memory.
-        let mut f = fs::File::open(path)?;
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
-        scan_bytes(prefix, &buf, set);
+        NodeKind::File | NodeKind::Other => {
+            let buf = fs.read_file(path).map_err(fs_op("read", path))?;
+            scan_bytes(prefix, &buf, set);
+        }
     }
     Ok(())
 }
 
 /// Best-effort on-media size of a store entry (file or tree); symlinks and
 /// unreadable entries count as 0.
-fn entry_size(path: &Path) -> u64 {
-    let meta = match fs::symlink_metadata(path) {
+fn entry_size(fs: &mut dyn StoreFs, path: &str) -> u64 {
+    let meta = match fs.metadata(path) {
         Ok(m) => m,
         Err(_) => return 0,
     };
-    let ft = meta.file_type();
-    if ft.is_symlink() {
-        0
-    } else if ft.is_dir() {
-        let mut total = 0;
-        if let Ok(rd) = fs::read_dir(path) {
-            for e in rd.flatten() {
-                total += entry_size(&e.path());
+    match meta.kind {
+        NodeKind::Symlink => 0,
+        NodeKind::Dir => {
+            let mut total = 0;
+            if let Ok(entries) = fs.read_dir(path) {
+                for (name, _) in entries {
+                    total += entry_size(fs, &join(path, &name));
+                }
+            }
+            total
+        }
+        NodeKind::File | NodeKind::Other => meta.len,
+    }
+}
+
+/// Atomic write through the seam: temp file in the same directory, then
+/// rename (durability is the backend's `write_file` contract + best-effort
+/// `sync_dir` — crash never leaves a partial). A pre-existing destination is
+/// replaced: where the backend's rename is no-replace (OROS RFS), the stale
+/// record is unlinked first — safe under the db lock, and records are
+/// idempotent re-registrations anyway.
+fn write_atomic(fs: &mut dyn StoreFs, path: &str, bytes: &[u8]) -> DbResult<()> {
+    let (parent, name) = split_parent(path);
+    backend::create_dir_all(fs, parent).map_err(fs_op("create_dir_all", parent))?;
+    let tmp = backend::temp_sibling(fs, parent, name, "db");
+    fs.write_file(&tmp, bytes, false).map_err(fs_op("write", &tmp))?;
+    match fs.rename(&tmp, path) {
+        Ok(()) => {}
+        Err(FsError::Exists) => {
+            fs.unlink(path).map_err(fs_op("unlink", path))?;
+            if let Err(e) = fs.rename(&tmp, path) {
+                let _ = fs.unlink(&tmp);
+                return Err(fs_op("rename", path)(e));
             }
         }
-        total
-    } else {
-        meta.len()
+        Err(e) => {
+            let _ = fs.unlink(&tmp);
+            return Err(fs_op("rename", path)(e));
+        }
     }
+    let _ = fs.sync_dir(parent);
+    Ok(())
 }
 
-/// Remove a store entry, dir or file.
-fn remove_path(path: &Path) -> io::Result<()> {
-    let meta = fs::symlink_metadata(path)?;
-    if meta.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    }
-}
+// ---- Environment (clock + backoff) ------------------------------------------
+//
+// The only two ambient facts the db needs that the fs seam does not carry:
+// wall-clock time (the `registered=` stamp) and a brief wait between lock
+// retries. cfg'd per platform: std host, raw Lythos syscalls on target.
 
-fn count_entries(dir: &Path) -> usize {
-    fs::read_dir(dir).map(|rd| rd.flatten().count()).unwrap_or(0)
-}
-
+#[cfg(feature = "std")]
 fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
 
-/// Atomic write: temp file on the same directory, then rename; fsync the file
-/// and best-effort the directory (durable, crash never leaves a partial).
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = parent.join(format!(".tmp-db-{}-{n}", std::process::id()));
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, path)?;
-    if let Ok(f) = fs::File::open(parent) {
-        let _ = f.sync_all();
-    }
-    Ok(())
+#[cfg(feature = "std")]
+fn monotonic_ms() -> u64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
-#[cfg(unix)]
-fn symlink(target: &Path, link: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
+#[cfg(feature = "std")]
+fn backoff() {
+    std::thread::sleep(std::time::Duration::from_millis(5));
 }
-#[cfg(not(unix))]
-fn symlink(_target: &Path, _link: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "GC root symlinks require a unix host",
-    ))
+
+#[cfg(all(feature = "oros", not(feature = "std")))]
+fn now_unix() -> u64 {
+    // SYS_TIME_EPOCH: unix epoch milliseconds (CMOS-anchored).
+    (unsafe { lythos_syscall::syscall0(lythos_abi::syscall::SYS_TIME_EPOCH) }) / 1000
 }
+
+#[cfg(all(feature = "oros", not(feature = "std")))]
+fn monotonic_ms() -> u64 {
+    // SYS_TIME: milliseconds since boot (APIC tick counter).
+    unsafe { lythos_syscall::syscall0(lythos_abi::syscall::SYS_TIME) }
+}
+
+#[cfg(all(feature = "oros", not(feature = "std")))]
+fn backoff() {
+    unsafe {
+        lythos_syscall::syscall0(lythos_abi::syscall::SYS_YIELD);
+    }
+}
+
+// Featureless no_std fallback (keeps `--no-default-features` checkable):
+// epoch 0, a counting pseudo-clock so lock deadlines still expire, no wait.
+#[cfg(not(any(feature = "std", feature = "oros")))]
+fn now_unix() -> u64 {
+    0
+}
+
+#[cfg(not(any(feature = "std", feature = "oros")))]
+fn monotonic_ms() -> u64 {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static TICKS: AtomicU64 = AtomicU64::new(0);
+    TICKS.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(not(any(feature = "std", feature = "oros")))]
+fn backoff() {}
 
 #[cfg(test)]
 mod tests;

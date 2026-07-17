@@ -4,4 +4,21 @@ version = "0.1.0"
 edition = "2021"
 description = "RFS V2 — COW filesystem per docs/rfs-v2 (crypto stubbed behind the BlockTransform seam)"
 
+[features]
+# `crypto` pulls the RustCrypto crates and enables the AES-256-GCM/Argon2id
+# implementation (doc 08). Default-on for cargo consumers (kernel, host tests).
+# `tools/mkrfs2` builds this crate with bare `rustc` and no features, so it
+# compiles the crypto impl out and needs neither dependency — the pure-data
+# `CryptoParams` stays available for the plaintext format path.
+default = ["crypto"]
+crypto = ["dep:aes-gcm", "dep:argon2"]
+
 [dependencies]
+# AES-256-GCM block encryption + DEK wrap (doc 08). no_std, no alloc for the
+# in-place block path; the 128-bit `block‖gen` nonce uses GCM's non-96-bit
+# (GHASH-derived J₀) path — KAT-gated in crypto::tests against SP 800-38D.
+aes-gcm = { version = "0.10", default-features = false, features = ["aes"], optional = true }
+# Argon2id KEK derivation. Custom-memory API (hash_password_into_with_memory)
+# so the kernel can hand it a dedicated PMM-backed 64 MiB buffer instead of the
+# heap. no_std.
+argon2 = { version = "0.5", default-features = false, optional = true }

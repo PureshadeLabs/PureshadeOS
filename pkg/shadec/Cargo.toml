@@ -15,11 +15,16 @@ required-features = ["cli"]
 
 [dependencies]
 shade-cdf = { path = "../shade-cdf" }
+# oros EvalIo: raw syscall stubs + errno table (x86_64 target only).
+lythos-abi = { path = "../../abi/lythos-abi", optional = true }
+lythos-syscall = { path = "../../abi/lythos-syscall", optional = true }
 
 [features]
 # Core is no_std+alloc so the OROS `shade` binary can link it once argv is
 # plumbed through the ABI; `std` adds the host EvalIo; `cli` the host binary
-# (the seed-shadec vehicle, docs/shade-pkg/09-bootstrap.md §2).
+# (the seed-shadec vehicle, docs/shade-pkg/09-bootstrap.md §2); `oros` the
+# on-target EvalIo over the Lythos VFS syscalls.
 default = ["std", "cli"]
 std = []
 cli = ["std"]
+oros = ["dep:lythos-abi", "dep:lythos-syscall"]

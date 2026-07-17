@@ -90,8 +90,11 @@ pub enum KernelObject {
     Memory { base_pa: u64, frame_count: u64 },
     /// IPC endpoint — index into `ipc::EP_TABLE`.
     Ipc { endpoint_idx: usize },
-    /// Hardware device identified by an optional IRQ line.
-    Device { irq: Option<u8> },
+    /// Hardware device owned by a userspace driver — an index into the PCI
+    /// device registry (`pci::registry_get`). The registry entry carries the
+    /// device's BARs and IRQ line; the Device cap authorizes MMIO map, config
+    /// read, DMA alloc, and IRQ wait for exactly that one device.
+    Device { registry_idx: usize },
     /// Privileged rollback trigger.
     Rollback,
     /// Filesystem mount authority.

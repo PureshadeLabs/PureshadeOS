@@ -81,11 +81,14 @@ pub enum NodeKind {
 
 /// lstat result: the node kind plus the one permission bit realization must
 /// preserve — executability (a store-realized binary that loses its exec bit
-/// is broken). Same shape as shadec's `EvalIo::FileMeta`.
+/// is broken). Same shape as shadec's `EvalIo::FileMeta`. `len` is the file
+/// size in bytes (0 for dirs/symlinks) — the store GC sizes swept entries
+/// through the seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeMeta {
     pub kind: NodeKind,
     pub exec: bool,
+    pub len: u64,
 }
 
 /// Path-addressed filesystem operations for store realization. Paths are
@@ -114,6 +117,13 @@ pub trait StoreFs {
     /// whose ABI has no mode surface (OROS today — no chmod syscall) ignore
     /// `exec`.
     fn write_file(&mut self, path: &str, data: &[u8], exec: bool) -> FsResult<()>;
+    /// **Atomic** create-if-absent: create `path` with `data` iff nothing is
+    /// there, else fail [`Exists`](FsError::Exists) — exactly one concurrent
+    /// caller wins. This is the lock primitive (the store db serializes
+    /// mutations on it); backends must provide real atomicity, never a
+    /// check-then-create. On Lythos this is `SYS_CREATE`'s exclusive-create
+    /// guarantee; on the host, `OpenOptions::create_new`.
+    fn create_exclusive(&mut self, path: &str, data: &[u8]) -> FsResult<()>;
     fn mkdir(&mut self, path: &str) -> FsResult<()>;
     fn rename(&mut self, old: &str, new: &str) -> FsResult<()>;
     fn unlink(&mut self, path: &str) -> FsResult<()>;
@@ -125,6 +135,40 @@ pub trait StoreFs {
     /// Best-effort directory fsync (forces a rename durable, 02 §6.3).
     fn sync_dir(&mut self, _path: &str) -> FsResult<()> {
         Ok(())
+    }
+    /// Remove an entire dead store path — the sole store-reclamation primitive
+    /// (docs/shade/store-db-gc §4). The GC calls it on a DB-confirmed
+    /// unreferenced top-level store entry; it deletes the whole tree and frees
+    /// its blocks. It must operate **below** any realize-seal — it never opens a
+    /// sealed file for write, and there is no way to make sealed content
+    /// writable. Content-addressing keeps removal safe (a later realize of the
+    /// same digest reproduces byte-identical content).
+    ///
+    /// Backends with no seal — the host `HostFs`, the in-memory `MemFs` — use
+    /// this default: plain recursive delete (unlink files/symlinks, rmdir
+    /// dirs). The on-target `OrosFs` overrides it to issue `SYS_STORE_REMOVE`
+    /// (store-owner authority; the kernel removes the tree below the seal).
+    /// Idempotent: an already-gone path is `Ok(())`.
+    fn remove_store_path(&mut self, path: &str) -> FsResult<()> {
+        match self.metadata(path).map(|m| m.kind) {
+            Ok(NodeKind::Dir) => {
+                if let Ok(entries) = self.read_dir(path) {
+                    for (name, _) in entries {
+                        self.remove_store_path(&join(path, &name))?;
+                    }
+                }
+                match self.rmdir(path) {
+                    Ok(()) | Err(FsError::NotFound) => Ok(()),
+                    Err(e) => Err(e),
+                }
+            }
+            Ok(_) => match self.unlink(path) {
+                Ok(()) | Err(FsError::NotFound) => Ok(()),
+                Err(e) => Err(e),
+            },
+            Err(FsError::NotFound) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
     /// A per-caller uniqueness source for temp names (host: pid; OROS:
     /// boot-relative nanoseconds). Transient — never enters any hash

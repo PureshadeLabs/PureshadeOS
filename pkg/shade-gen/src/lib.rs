@@ -10,6 +10,19 @@
 //! own `current` activation symlink ([`GenLine`]). The lines are independent:
 //! flipping one never touches another.
 //!
+//! ## The filesystem seam
+//!
+//! All generation/profile/symlink/pointer I/O goes through the injected
+//! [`StoreFs`] backend (the B1 seam from [`shade_store`]) — the crate core is
+//! `no_std + alloc` and touches no filesystem directly. [`HostFs`] (feature
+//! `std`, default) backs the host suite and the `shade-gen` seed CLI;
+//! [`OrosFs`] (feature `oros`) backs the same logic on the Lythos ABI. The
+//! seam already carries `symlink`/`read_link`/`rename` — everything the
+//! profile forest and the activation flip need. On OROS today
+//! `symlink`/`read_link` return [`FsError::Unsupported`] (no ABI surface yet
+//! — see `shade_store::oros`), so on-target activation is gated on those
+//! syscalls landing; the code path is target-ready and identical to the host.
+//!
 //! ## The three invariants
 //!
 //! - **Switch and rollback are atomic.** Activation is the 02 §6.1 flip:
@@ -33,18 +46,42 @@
 //! Host seed (shade-pkg 09 §2): the `shade-gen` binary alongside `shade-build`
 //! and `shade-gc`. On OROS the same engine runs behind the unified `shade`
 //! binary (`shade os rebuild`, `shade home rebuild`, `shade generations`,
-//! `shade rollback`) once argv + a VFS `EvalIo` exist.
+//! `shade rollback`) once an OROS `EvalIo` + the symlink syscalls exist.
 
-use std::fs;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
+
+extern crate alloc;
+
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use shade_build::BuildError;
-use shade_store_db::StoreDb;
+use shade_store::backend::{self, join, split_parent};
+use shade_store::{FsError, NodeKind, StoreFs};
+use shade_store_db::{DbError, StoreDb};
 
+#[cfg(feature = "std")]
+pub use shade_store::HostFs;
+#[cfg(feature = "oros")]
+pub use shade_store::OrosFs;
+
+#[cfg(feature = "std")]
+use std::path::Path;
+
+#[cfg(feature = "std")]
 mod prism;
+#[cfg(feature = "std")]
 pub use prism::{build_prism_packages, home_rebuild, os_rebuild, BuildRoots, OsRebuildOutcome};
+
+/// The seam API is `&str`-pathed (`no_std` — no `std::path`); the host-facing
+/// convenience API stays `Path`-based and converts at the boundary.
+#[cfg(feature = "std")]
+pub(crate) fn path_str(p: &Path) -> &str {
+    p.to_str().expect("generation paths must be UTF-8")
+}
 
 /// The canonical prism-authoring area (10 §3): default system prism,
 /// `prism.shade.bak` after retirement, and the pointer file.
@@ -63,7 +100,17 @@ pub const CANONICAL_LTH_BIN: &str = "/lth/bin";
 
 #[derive(Debug)]
 pub enum GenError {
-    Io(io::Error),
+    /// A backend filesystem operation failed (seam error, tagged with the
+    /// operation and path — same shape as [`shade_store_db::DbError::Fs`]).
+    Fs {
+        op: &'static str,
+        path: String,
+        err: FsError,
+    },
+    /// The roots API (store db) failed.
+    Db(DbError),
+    /// `current.pointer` exists but does not parse (10 §2: three lines).
+    MalformedPointer,
     /// Two packages provide the same profile-relative file (02 §5 — collision
     /// is an error at generation-build time; no priority system in v1).
     Collision {
@@ -88,13 +135,19 @@ pub enum GenError {
     /// The pointer names a source that cannot be resolved — fail loud, never
     /// fall back to `.bak` while a pointer exists (10 §4).
     UnresolvablePointer(String),
+    /// A host-side (std) I/O failure — rebuild drivers only; the seam paths
+    /// report [`GenError::Fs`].
+    #[cfg(feature = "std")]
+    Io(std::io::Error),
     Build(BuildError),
 }
 
-impl std::fmt::Display for GenError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for GenError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            GenError::Io(e) => write!(f, "io: {e}"),
+            GenError::Fs { op, path, err } => write!(f, "fs: {op} {path}: {err}"),
+            GenError::Db(e) => write!(f, "db: {e}"),
+            GenError::MalformedPointer => write!(f, "malformed current.pointer (10 §2)"),
             GenError::Collision { rel, package, existing_target } => write!(
                 f,
                 "profile collision on `{rel}`: package {package} conflicts with existing entry -> {existing_target} (02 §5 — no priority system in v1)"
@@ -116,15 +169,24 @@ impl std::fmt::Display for GenError {
                 f,
                 "pointer target unresolvable: {d} (failing loud — never falling back to .bak while a pointer exists, 10 §4)"
             ),
+            #[cfg(feature = "std")]
+            GenError::Io(e) => write!(f, "io: {e}"),
             GenError::Build(e) => write!(f, "build: {e}"),
         }
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for GenError {}
 
-impl From<io::Error> for GenError {
-    fn from(e: io::Error) -> Self {
+impl From<DbError> for GenError {
+    fn from(e: DbError) -> Self {
+        GenError::Db(e)
+    }
+}
+#[cfg(feature = "std")]
+impl From<std::io::Error> for GenError {
+    fn from(e: std::io::Error) -> Self {
         GenError::Io(e)
     }
 }
@@ -139,18 +201,25 @@ impl From<shadec::error::EvalError> for GenError {
     }
 }
 
+/// Shorthand: tag a backend failure with the operation and target path.
+fn fs_op(op: &'static str, path: &str) -> impl FnOnce(FsError) -> GenError {
+    let path = String::from(path);
+    move |err| GenError::Fs { op, path, err }
+}
+
 // ---- Manifest -----------------------------------------------------------------
 
 /// Record-format header line (mirrors the db's `shade-db=1` and CDF's
 /// `shade-drv=1`): bumped on any change to the manifest record shape.
 const MANIFEST_VERSION: &str = "shade-gen=1";
 
-/// One `package.<i>.*` entry of the generation manifest.
+/// One `package.<i>.*` entry of the generation manifest. `store_path` is a
+/// seam path (absolute, `/`-separated).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageEntry {
     pub name: String,
     pub version: String,
-    pub store_path: PathBuf,
+    pub store_path: String,
     /// Explicitly asked for vs pulled in as a dep (GC/remove semantics).
     pub requested: bool,
 }
@@ -192,14 +261,14 @@ impl Manifest {
     /// bytewise-sorted, one LF per line, trailing LF (the CDF line
     /// discipline). Values are forced single-line — the format is line-based.
     fn serialize(&self) -> String {
-        let mut kv: Vec<(String, String)> = vec![
+        let mut kv: Vec<(String, String)> = alloc::vec![
             ("created".to_string(), self.created.to_string()),
             ("parent".to_string(), self.parent.to_string()),
             ("reason".to_string(), one_line(&self.reason)),
         ];
         for (i, p) in self.packages.iter().enumerate() {
             kv.push((format!("package.{i}.name"), one_line(&p.name)));
-            kv.push((format!("package.{i}.path"), one_line(&p.store_path.to_string_lossy())));
+            kv.push((format!("package.{i}.path"), one_line(&p.store_path)));
             kv.push((format!("package.{i}.requested"), String::from(if p.requested { "1" } else { "0" })));
             kv.push((format!("package.{i}.version"), one_line(&p.version)));
         }
@@ -224,8 +293,7 @@ impl Manifest {
             return None;
         }
         let mut m = Manifest { created: 0, parent: 0, reason: String::new(), packages: Vec::new() };
-        let mut pkgs: std::collections::BTreeMap<usize, PackageEntry> =
-            std::collections::BTreeMap::new();
+        let mut pkgs: BTreeMap<usize, PackageEntry> = BTreeMap::new();
         for line in lines {
             let (k, v) = line.split_once('=')?;
             match k {
@@ -239,12 +307,12 @@ impl Manifest {
                         let p = pkgs.entry(idx).or_insert_with(|| PackageEntry {
                             name: String::new(),
                             version: String::new(),
-                            store_path: PathBuf::new(),
+                            store_path: String::new(),
                             requested: false,
                         });
                         match field {
                             "name" => p.name = v.to_string(),
-                            "path" => p.store_path = PathBuf::from(v),
+                            "path" => p.store_path = v.to_string(),
                             "requested" => p.requested = v == "1",
                             "version" => p.version = v.to_string(),
                             _ => {} // unknown package field: tolerate
@@ -290,30 +358,35 @@ pub struct Pointer {
     pub generation: u64,
 }
 
-/// Read the pointer under `cfg_root`. `Ok(None)` if absent (never-rebuilt or
-/// deliberately removed — the `.bak` fallback case, 10 §4).
-pub fn read_pointer(cfg_root: &Path) -> io::Result<Option<Pointer>> {
-    let s = match fs::read_to_string(cfg_root.join(POINTER_FILE)) {
-        Ok(s) => s,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
+/// Read the pointer under `cfg_root` through the seam. `Ok(None)` if absent
+/// (never-rebuilt or deliberately removed — the `.bak` fallback case, 10 §4).
+pub fn read_pointer_on(
+    fs: &mut dyn StoreFs,
+    cfg_root: &str,
+) -> Result<Option<Pointer>, GenError> {
+    let path = join(cfg_root, POINTER_FILE);
+    let bytes = match fs.read_file(&path) {
+        Ok(b) => b,
+        Err(FsError::NotFound) => return Ok(None),
+        Err(e) => return Err(fs_op("read", &path)(e)),
     };
+    let s = String::from_utf8_lossy(&bytes);
     let mut lines = s.lines();
-    let bad = || io::Error::new(io::ErrorKind::InvalidData, "malformed current.pointer (10 §2)");
-    let prism = lines.next().ok_or_else(bad)?.to_string();
-    let selector = lines.next().ok_or_else(bad)?.to_string();
+    let prism = lines.next().ok_or(GenError::MalformedPointer)?.to_string();
+    let selector = lines.next().ok_or(GenError::MalformedPointer)?.to_string();
     let generation = lines
         .next()
         .and_then(|l| l.trim().parse().ok())
-        .ok_or_else(bad)?;
+        .ok_or(GenError::MalformedPointer)?;
     Ok(Some(Pointer { prism, selector, generation }))
 }
 
-/// Write the pointer atomically (temp + rename, trailing newline — 10 §2:
-/// `shade os rebuild` rewrites all three lines atomically on success).
-pub fn write_pointer(cfg_root: &Path, p: &Pointer) -> io::Result<()> {
+/// Write the pointer atomically through the seam (temp + rename, trailing
+/// newline — 10 §2: `shade os rebuild` rewrites all three lines atomically on
+/// success).
+pub fn write_pointer_on(fs: &mut dyn StoreFs, cfg_root: &str, p: &Pointer) -> Result<(), GenError> {
     let bytes = format!("{}\n{}\n{}\n", p.prism, p.selector, p.generation);
-    write_atomic(&cfg_root.join(POINTER_FILE), bytes.as_bytes())
+    write_atomic(fs, &join(cfg_root, POINTER_FILE), bytes.as_bytes())
 }
 
 /// Re-pin the pointer's generation (line 3 only; source lines untouched), if
@@ -322,110 +395,158 @@ pub fn write_pointer(cfg_root: &Path, p: &Pointer) -> io::Result<()> {
 /// would return to the pre-rollback pin. A rollback produces a built
 /// generation like any rebuild, so re-pinning preserves the 10 §6 invariant
 /// (boot still activates a pre-built generation, never a source prism).
-pub fn repin_generation(cfg_root: &Path, generation: u64) -> io::Result<()> {
-    if let Some(mut p) = read_pointer(cfg_root)? {
+pub fn repin_generation_on(
+    fs: &mut dyn StoreFs,
+    cfg_root: &str,
+    generation: u64,
+) -> Result<(), GenError> {
+    if let Some(mut p) = read_pointer_on(fs, cfg_root)? {
         p.generation = generation;
-        write_pointer(cfg_root, &p)?;
+        write_pointer_on(fs, cfg_root, &p)?;
     }
     Ok(())
+}
+
+/// [`read_pointer_on`] on the host backend.
+#[cfg(feature = "std")]
+pub fn read_pointer(cfg_root: &Path) -> Result<Option<Pointer>, GenError> {
+    read_pointer_on(&mut HostFs, path_str(cfg_root))
+}
+
+/// [`write_pointer_on`] on the host backend.
+#[cfg(feature = "std")]
+pub fn write_pointer(cfg_root: &Path, p: &Pointer) -> Result<(), GenError> {
+    write_pointer_on(&mut HostFs, path_str(cfg_root), p)
+}
+
+/// [`repin_generation_on`] on the host backend.
+#[cfg(feature = "std")]
+pub fn repin_generation(cfg_root: &Path, generation: u64) -> Result<(), GenError> {
+    repin_generation_on(&mut HostFs, path_str(cfg_root), generation)
 }
 
 // ---- The generation line --------------------------------------------------------
 
 /// One generation line — `/shade/gen/system/` or `/shade/gen/users/<user>/`
 /// (02 §5): its own monotonic counter, its own `current` symlink, its own
-/// append-only history. Cheap to construct; holds no open handles.
-#[derive(Debug, Clone)]
-pub struct GenLine {
-    line_root: PathBuf,
+/// append-only history. Cheap to construct; holds no open handles. The
+/// backend lives in a `RefCell` so the API stays `&self` (production backends
+/// are stateless — `HostFs`/`OrosFs` are `Copy`); the roots db carries its
+/// own clone of the backend, same as the executor's registrar.
+#[derive(Debug)]
+pub struct GenLine<F: StoreFs> {
+    fs: RefCell<F>,
+    line_root: String,
     /// Root-name tag: `system` or `user-<user>` — generation roots register
     /// as `/shade/roots/gen-<tag>-<N>-<i>` (store-db-gc §3.1 `<owner>-<label>`).
     tag: String,
-    db: StoreDb,
+    db: StoreDb<F>,
 }
 
-impl GenLine {
-    /// The system line `<shade_root>/gen/system` (built by `shade os rebuild`,
-    /// privileged; 07 §2.1).
+#[cfg(feature = "std")]
+impl GenLine<HostFs> {
+    /// The system line `<shade_root>/gen/system` on the host backend (built
+    /// by `shade os rebuild`, privileged; 07 §2.1).
     pub fn system(shade_root: impl AsRef<Path>) -> Self {
-        let r = shade_root.as_ref();
-        GenLine {
-            line_root: r.join("gen").join("system"),
-            tag: "system".to_string(),
-            db: StoreDb::new(r),
-        }
+        GenLine::system_on(HostFs, path_str(shade_root.as_ref()))
     }
 
-    /// A per-user line `<shade_root>/gen/users/<user>` (built by
-    /// `shade home rebuild`, unprivileged; 07 §2.2, 10 §5).
+    /// A per-user line `<shade_root>/gen/users/<user>` on the host backend
+    /// (built by `shade home rebuild`, unprivileged; 07 §2.2, 10 §5).
     pub fn user(shade_root: impl AsRef<Path>, user: &str) -> Self {
-        let r = shade_root.as_ref();
+        GenLine::user_on(HostFs, path_str(shade_root.as_ref()), user)
+    }
+}
+
+impl<F: StoreFs + Clone> GenLine<F> {
+    /// The system line over an injected backend. `shade_root` is a seam path.
+    pub fn system_on(fs: F, shade_root: &str) -> Self {
+        let r = shade_root.trim_end_matches('/');
         GenLine {
-            line_root: r.join("gen").join("users").join(user),
-            tag: format!("user-{user}"),
-            db: StoreDb::new(r),
+            fs: RefCell::new(fs.clone()),
+            line_root: format!("{r}/gen/system"),
+            tag: "system".to_string(),
+            db: StoreDb::with_backend(fs, r),
         }
     }
 
-    pub fn line_root(&self) -> &Path {
+    /// A per-user line over an injected backend. `shade_root` is a seam path.
+    pub fn user_on(fs: F, shade_root: &str, user: &str) -> Self {
+        let r = shade_root.trim_end_matches('/');
+        GenLine {
+            fs: RefCell::new(fs.clone()),
+            line_root: format!("{r}/gen/users/{user}"),
+            tag: format!("user-{user}"),
+            db: StoreDb::with_backend(fs, r),
+        }
+    }
+}
+
+impl<F: StoreFs> GenLine<F> {
+    pub fn line_root(&self) -> &str {
         &self.line_root
     }
 
-    fn gen_dir(&self, n: u64) -> PathBuf {
-        self.line_root.join(n.to_string())
+    fn gen_dir(&self, n: u64) -> String {
+        join(&self.line_root, &n.to_string())
     }
 
     /// A generation is complete iff its manifest and profile exist. `create`
     /// renames a fully-built, fsynced tree into place, so an incomplete
     /// numbered directory can only be corruption — never activated.
     pub fn is_complete(&self, n: u64) -> bool {
-        let d = self.gen_dir(n);
-        d.join("manifest").exists() && d.join("profile").exists()
+        let fs = &mut *self.fs.borrow_mut();
+        is_complete_on(fs, &self.gen_dir(n))
     }
 
     /// The generation `current` points at, if the symlink exists and parses.
-    pub fn current(&self) -> io::Result<Option<u64>> {
-        match fs::read_link(self.line_root.join("current")) {
-            Ok(t) => Ok(t.to_string_lossy().parse().ok()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
-        }
+    pub fn current(&self) -> Result<Option<u64>, GenError> {
+        let fs = &mut *self.fs.borrow_mut();
+        current_on(fs, &self.line_root)
     }
 
     /// The numbered generations present in this line, ascending.
-    pub fn numbers(&self) -> io::Result<Vec<u64>> {
-        let mut out = Vec::new();
-        let rd = match fs::read_dir(&self.line_root) {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
-            Err(e) => return Err(e),
-        };
-        for e in rd {
-            if let Ok(n) = e?.file_name().to_string_lossy().parse() {
-                out.push(n);
-            }
-        }
-        out.sort_unstable();
-        Ok(out)
+    pub fn numbers(&self) -> Result<Vec<u64>, GenError> {
+        let fs = &mut *self.fs.borrow_mut();
+        numbers_on(fs, &self.line_root)
     }
 
     /// The newest complete generation, if any — boot's last-good fallback
     /// (10 §6, 02 §6.2).
-    pub fn latest_complete(&self) -> io::Result<Option<u64>> {
-        Ok(self
-            .numbers()?
+    pub fn latest_complete(&self) -> Result<Option<u64>, GenError> {
+        let fs = &mut *self.fs.borrow_mut();
+        Ok(numbers_on(fs, &self.line_root)?
             .into_iter()
             .rev()
-            .find(|&n| self.is_complete(n)))
+            .find(|&n| is_complete_on(fs, &join(&self.line_root, &n.to_string()))))
+    }
+
+    /// Whether generation `n` is closure-complete (structurally complete AND
+    /// its full store closure exists on disk) — the boot-time bar (10 §6).
+    pub fn closure_complete(&self, n: u64) -> bool {
+        let fs = &mut *self.fs.borrow_mut();
+        closure_complete_on(fs, &self.gen_dir(n))
+    }
+
+    /// The newest **closure-complete** generation, if any — boot's cold-start
+    /// last-good fallback when the pinned generation's closure is incomplete
+    /// (a referenced store path is missing). Never builds.
+    pub fn latest_closure_complete(&self) -> Result<Option<u64>, GenError> {
+        let fs = &mut *self.fs.borrow_mut();
+        Ok(numbers_on(fs, &self.line_root)?
+            .into_iter()
+            .rev()
+            .find(|&n| closure_complete_on(fs, &join(&self.line_root, &n.to_string()))))
     }
 
     /// List generations with their manifests, ascending, `current` marked —
     /// `shade generations list` (07 §2).
-    pub fn list(&self) -> io::Result<Vec<GenInfo>> {
-        let current = self.current()?;
+    pub fn list(&self) -> Result<Vec<GenInfo>, GenError> {
+        let fs = &mut *self.fs.borrow_mut();
+        let current = current_on(fs, &self.line_root)?;
         let mut out = Vec::new();
-        for n in self.numbers()? {
-            if let Some(manifest) = self.read_manifest(n)? {
+        for n in numbers_on(fs, &self.line_root)? {
+            if let Some(manifest) = read_manifest_on(fs, &self.gen_dir(n))? {
                 out.push(GenInfo { number: n, manifest, current: current == Some(n) });
             }
         }
@@ -433,12 +554,9 @@ impl GenLine {
     }
 
     /// The manifest of generation `n`, if present and well-formed.
-    pub fn read_manifest(&self, n: u64) -> io::Result<Option<Manifest>> {
-        match fs::read_to_string(self.gen_dir(n).join("manifest")) {
-            Ok(s) => Ok(Manifest::parse(&s)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
-        }
+    pub fn read_manifest(&self, n: u64) -> Result<Option<Manifest>, GenError> {
+        let fs = &mut *self.fs.borrow_mut();
+        read_manifest_on(fs, &self.gen_dir(n))
     }
 
     /// Create a new generation from `packages`: allocate the next number,
@@ -450,6 +568,8 @@ impl GenLine {
     /// so history append and activation stay separate steps (02 §6.1 step 1
     /// vs steps 2–4). Collisions in the profile forest abort with
     /// [`GenError::Collision`] and leave the line untouched.
+    ///
+    /// [`activate`]: GenLine::activate
     pub fn create(
         &self,
         packages: &[PackageEntry],
@@ -457,69 +577,51 @@ impl GenLine {
         reason: &str,
         parent: u64,
     ) -> Result<u64, GenError> {
-        fs::create_dir_all(&self.line_root)?;
-        // Allocate-and-rename loop: two concurrent creators may pick the same
-        // number; rename onto an existing directory fails, and the loser
-        // retries with the next one. Numbers stay monotonic, never reused.
-        loop {
-            let n = self.numbers()?.last().copied().unwrap_or(0) + 1;
-            let tmp = self
-                .line_root
-                .join(format!(".tmp-gen-{n}-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&tmp);
+        let n = {
+            let fs = &mut *self.fs.borrow_mut();
+            backend::create_dir_all(fs, &self.line_root)
+                .map_err(fs_op("create_dir_all", &self.line_root))?;
+            // Allocate-and-rename loop: two concurrent creators may pick the
+            // same number; rename onto an existing directory fails, and the
+            // loser retries with the next one. Numbers stay monotonic, never
+            // reused.
+            loop {
+                let n = numbers_on(fs, &self.line_root)?.last().copied().unwrap_or(0) + 1;
+                let tmp = backend::temp_sibling(fs, &self.line_root, &n.to_string(), "gen");
 
-            let built = (|| -> Result<(), GenError> {
-                fs::create_dir_all(&tmp)?;
-                let manifest = Manifest {
-                    created: now_unix(),
-                    parent,
-                    reason: reason.to_string(),
-                    packages: packages.to_vec(),
-                };
-                write_file_synced(&tmp.join("manifest"), manifest.serialize().as_bytes())?;
-                // The lockfile snapshot that produced this generation; the
-                // unified schema is deferred (shade 08 §5), so absent is legal.
-                write_file_synced(
-                    &tmp.join("prism.lock"),
-                    lock.unwrap_or(b"# no prism.lock (unified lock schema deferred, shade 08 \xc2\xa75)\n"),
-                )?;
-                let profile = tmp.join("profile");
-                fs::create_dir_all(&profile)?;
-                for p in packages {
-                    merge_into_profile(&profile, &p.store_path, &p.store_path, &p.name)?;
+                if let Err(e) = build_gen_tree(fs, &tmp, packages, lock, reason, parent) {
+                    backend::remove_tree(fs, &tmp);
+                    return Err(e);
                 }
-                fsync_dir(&tmp)?;
-                Ok(())
-            })();
-            if let Err(e) = built {
-                let _ = fs::remove_dir_all(&tmp);
-                return Err(e);
-            }
 
-            match fs::rename(&tmp, self.gen_dir(n)) {
-                Ok(()) => {
-                    fsync_dir(&self.line_root)?;
-                    // Root registration (roots API seam): one direct root per
-                    // package store path. The GC additionally byte-scans
-                    // /shade/gen/ (store-db-gc §3.3) — belt and braces; the
-                    // over-approximation direction is the safe one.
-                    for (i, p) in packages.iter().enumerate() {
-                        self.db
-                            .add_root(&format!("gen-{}-{n}-{i}", self.tag), &p.store_path)?;
+                let dst = self.gen_dir(n);
+                match fs.rename(&tmp, &dst) {
+                    Ok(()) => {
+                        let _ = fs.sync_dir(&self.line_root);
+                        break n;
                     }
-                    return Ok(n);
-                }
-                Err(_) if self.gen_dir(n).exists() => {
-                    // Lost the allocation race; retry with a fresh number.
-                    let _ = fs::remove_dir_all(&tmp);
-                    continue;
-                }
-                Err(e) => {
-                    let _ = fs::remove_dir_all(&tmp);
-                    return Err(GenError::Io(e));
+                    Err(_) if fs.exists(&dst) => {
+                        // Lost the allocation race; retry with a fresh number.
+                        backend::remove_tree(fs, &tmp);
+                        continue;
+                    }
+                    Err(e) => {
+                        backend::remove_tree(fs, &tmp);
+                        return Err(fs_op("rename", &dst)(e));
+                    }
                 }
             }
+        };
+        // Root registration (roots API seam): one direct root per package
+        // store path. The GC additionally byte-scans /shade/gen/
+        // (store-db-gc §3.3) — belt and braces; the over-approximation
+        // direction is the safe one. Outside the fs borrow: the db holds its
+        // own backend handle.
+        for (i, p) in packages.iter().enumerate() {
+            self.db
+                .add_root(&format!("gen-{}-{n}-{i}", self.tag), &p.store_path)?;
         }
+        Ok(n)
     }
 
     /// Activate generation `n` — the 02 §6.1 flip, and the **only** thing
@@ -535,18 +637,22 @@ impl GenLine {
     /// to the same target. The live system view (`/lth/bin`) is a separate,
     /// also-idempotent step — [`wire_view`](GenLine::wire_view) — because it
     /// lives outside the line and only the system line has one.
+    ///
+    /// [`create`]: GenLine::create
     pub fn activate(&self, n: u64) -> Result<(), GenError> {
-        if !self.gen_dir(n).exists() {
+        let fs = &mut *self.fs.borrow_mut();
+        let d = self.gen_dir(n);
+        if !fs.exists(&d) {
             return Err(GenError::NoSuchGeneration(n));
         }
-        if !self.is_complete(n) {
+        if !is_complete_on(fs, &d) {
             return Err(GenError::Incomplete(n));
         }
-        let tmp = self.line_root.join(".current.new");
-        let _ = fs::remove_file(&tmp);
-        symlink(Path::new(&n.to_string()), &tmp)?;
-        fs::rename(&tmp, self.line_root.join("current"))?;
-        fsync_dir(&self.line_root)?;
+        let tmp = join(&self.line_root, ".current.new");
+        let _ = fs.unlink(&tmp);
+        fs.symlink(&n.to_string(), &tmp).map_err(fs_op("symlink", &tmp))?;
+        rename_replace(fs, &tmp, &join(&self.line_root, "current"))?;
+        let _ = fs.sync_dir(&self.line_root);
         Ok(())
     }
 
@@ -555,15 +661,17 @@ impl GenLine {
     /// system line, 02 §6.1). Idempotent and atomic (temp + rename); the
     /// target string goes through `current`, so subsequent [`activate`] flips
     /// retarget the view with no further writes here.
-    pub fn wire_view(&self, link: &Path) -> io::Result<()> {
-        if let Some(parent) = link.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let target = self.line_root.join("current").join("profile").join("bin");
-        let tmp = link.with_file_name(".view.new");
-        let _ = fs::remove_file(&tmp);
-        symlink(&target, &tmp)?;
-        fs::rename(&tmp, link)?;
+    ///
+    /// [`activate`]: GenLine::activate
+    pub fn wire_view(&self, link: &str) -> Result<(), GenError> {
+        let fs = &mut *self.fs.borrow_mut();
+        let (parent, _) = split_parent(link);
+        backend::create_dir_all(fs, parent).map_err(fs_op("create_dir_all", parent))?;
+        let target = join(&join(&self.line_root, "current"), "profile/bin");
+        let tmp = join(parent, ".view.new");
+        let _ = fs.unlink(&tmp);
+        fs.symlink(&target, &tmp).map_err(fs_op("symlink", &tmp))?;
+        rename_replace(fs, &tmp, link)?;
         Ok(())
     }
 
@@ -572,20 +680,22 @@ impl GenLine {
     /// activate it. History stays linear and append-only — rollback twice
     /// returns to where you started (02 §5, 07 §`shade rollback`).
     pub fn rollback(&self, target: Option<u64>) -> Result<u64, GenError> {
-        let current = self.current()?.ok_or(GenError::NothingToRollBack)?;
-        let target = match target {
-            Some(t) => t,
-            None => self
-                .numbers()?
-                .into_iter()
-                .rev()
-                .find(|&n| n < current)
-                .ok_or(GenError::NothingToRollBack)?,
+        let (target, manifest, lock) = {
+            let fs = &mut *self.fs.borrow_mut();
+            let current = current_on(fs, &self.line_root)?.ok_or(GenError::NothingToRollBack)?;
+            let target = match target {
+                Some(t) => t,
+                None => numbers_on(fs, &self.line_root)?
+                    .into_iter()
+                    .rev()
+                    .find(|&n| n < current)
+                    .ok_or(GenError::NothingToRollBack)?,
+            };
+            let manifest = read_manifest_on(fs, &self.gen_dir(target))?
+                .ok_or(GenError::NoSuchGeneration(target))?;
+            let lock = fs.read_file(&join(&self.gen_dir(target), "prism.lock")).ok();
+            (target, manifest, lock)
         };
-        let manifest = self
-            .read_manifest(target)?
-            .ok_or(GenError::NoSuchGeneration(target))?;
-        let lock = fs::read(self.gen_dir(target).join("prism.lock")).ok();
         let n = self.create(
             &manifest.packages,
             lock.as_deref(),
@@ -595,6 +705,143 @@ impl GenLine {
         self.activate(n)?;
         Ok(n)
     }
+}
+
+// ---- Line internals over an explicit backend --------------------------------------
+//
+// Free functions so the `GenLine` methods can compose them under a single
+// `RefCell` borrow (`create`/`rollback` would double-borrow through `&self`
+// methods otherwise).
+
+fn is_complete_on(fs: &mut dyn StoreFs, gen_dir: &str) -> bool {
+    fs.exists(&join(gen_dir, "manifest")) && fs.exists(&join(gen_dir, "profile"))
+}
+
+/// A generation is **closure-complete** iff it is structurally complete
+/// (manifest + profile) AND every store path in its closure still exists on
+/// disk. This is the boot-time bar (10 §6): a cold boot against a persistent
+/// store can find a generation whose tree is intact but whose referenced store
+/// outputs were, e.g., lost with a volatile store or never persisted — its
+/// profile forest then points at `/shade/store/<hash>` paths that do not
+/// exist, and no-build-at-boot means it cannot be repaired. Such a generation
+/// must never be activated; boot falls back to the newest closure-complete one.
+///
+/// The closure is the manifest's package store paths — exactly what the profile
+/// forest symlinks resolve into and what the live system runs.
+fn closure_complete_on(fs: &mut dyn StoreFs, gen_dir: &str) -> bool {
+    if !is_complete_on(fs, gen_dir) {
+        return false;
+    }
+    match read_manifest_on(fs, gen_dir) {
+        Ok(Some(m)) => m.packages.iter().all(|p| fs.exists(&p.store_path)),
+        // Missing/garbled manifest ⇒ not bootable (already excluded by
+        // is_complete_on for the missing case; belt-and-braces for a parse
+        // failure).
+        _ => false,
+    }
+}
+
+fn current_on(fs: &mut dyn StoreFs, line_root: &str) -> Result<Option<u64>, GenError> {
+    let link = join(line_root, "current");
+    match fs.read_link(&link) {
+        Ok(t) => Ok(t.parse().ok()),
+        Err(FsError::NotFound) => Ok(None),
+        Err(e) => Err(fs_op("read_link", &link)(e)),
+    }
+}
+
+fn numbers_on(fs: &mut dyn StoreFs, line_root: &str) -> Result<Vec<u64>, GenError> {
+    let mut out = Vec::new();
+    let entries = match fs.read_dir(line_root) {
+        Ok(entries) => entries,
+        Err(FsError::NotFound) => return Ok(out),
+        Err(e) => return Err(fs_op("read_dir", line_root)(e)),
+    };
+    for (name, _) in entries {
+        if let Ok(n) = name.parse() {
+            out.push(n);
+        }
+    }
+    out.sort_unstable();
+    Ok(out)
+}
+
+fn read_manifest_on(fs: &mut dyn StoreFs, gen_dir: &str) -> Result<Option<Manifest>, GenError> {
+    let path = join(gen_dir, "manifest");
+    match fs.read_file(&path) {
+        Ok(bytes) => Ok(Manifest::parse(&String::from_utf8_lossy(&bytes))),
+        Err(FsError::NotFound) => Ok(None),
+        Err(e) => Err(fs_op("read", &path)(e)),
+    }
+}
+
+/// Build a complete generation tree at `tmp`: manifest, lock snapshot, and
+/// the profile symlink forest, fsynced — ready for the rename into place.
+fn build_gen_tree(
+    fs: &mut dyn StoreFs,
+    tmp: &str,
+    packages: &[PackageEntry],
+    lock: Option<&[u8]>,
+    reason: &str,
+    parent: u64,
+) -> Result<(), GenError> {
+    fs.mkdir(tmp).map_err(fs_op("mkdir", tmp))?;
+    let manifest = Manifest {
+        created: now_unix(),
+        parent,
+        reason: reason.to_string(),
+        packages: packages.to_vec(),
+    };
+    let mpath = join(tmp, "manifest");
+    fs.write_file(&mpath, manifest.serialize().as_bytes(), false)
+        .map_err(fs_op("write", &mpath))?;
+    // The lockfile snapshot that produced this generation; the unified schema
+    // is deferred (shade 08 §5), so absent is legal.
+    let lpath = join(tmp, "prism.lock");
+    fs.write_file(
+        &lpath,
+        lock.unwrap_or(b"# no prism.lock (unified lock schema deferred, shade 08 \xc2\xa75)\n"),
+        false,
+    )
+    .map_err(fs_op("write", &lpath))?;
+    let profile = join(tmp, "profile");
+    fs.mkdir(&profile).map_err(fs_op("mkdir", &profile))?;
+    for p in packages {
+        merge_into_profile(fs, &profile, &p.store_path, &p.store_path, &p.name)?;
+    }
+    let _ = fs.sync_dir(tmp);
+    Ok(())
+}
+
+/// Rename with replace semantics through the seam. Where the backend's rename
+/// is no-replace (OROS RFS, MemFs), the destination is unlinked first — the
+/// same fallback the store db uses for its records. On such a backend the
+/// flip degrades to unlink+rename (a reader can race into `NotFound`); the
+/// host backend renames over the destination atomically.
+fn rename_replace(fs: &mut dyn StoreFs, tmp: &str, dst: &str) -> Result<(), GenError> {
+    match fs.rename(tmp, dst) {
+        Ok(()) => Ok(()),
+        Err(FsError::Exists) => {
+            fs.unlink(dst).map_err(fs_op("unlink", dst))?;
+            fs.rename(tmp, dst).map_err(fs_op("rename", dst))
+        }
+        Err(e) => {
+            let _ = fs.unlink(tmp);
+            Err(fs_op("rename", dst)(e))
+        }
+    }
+}
+
+/// Atomic write through the seam: temp sibling + rename (+ best-effort dir
+/// fsync) — the pointer's 10 §2 atomic rewrite.
+fn write_atomic(fs: &mut dyn StoreFs, path: &str, bytes: &[u8]) -> Result<(), GenError> {
+    let (parent, name) = split_parent(path);
+    backend::create_dir_all(fs, parent).map_err(fs_op("create_dir_all", parent))?;
+    let tmp = backend::temp_sibling(fs, parent, name, "ptr");
+    fs.write_file(&tmp, bytes, false).map_err(fs_op("write", &tmp))?;
+    rename_replace(fs, &tmp, path)?;
+    let _ = fs.sync_dir(parent);
+    Ok(())
 }
 
 // ---- Boot activation (10 §6) ----------------------------------------------------
@@ -612,35 +859,44 @@ pub struct BootOutcome {
     pub fell_back: bool,
 }
 
-/// Boot-time activation of the **pre-built** system generation. Boot consumes
-/// built generations, never source prisms (10 §6): this function takes no
-/// evaluator, no builder, and no recipe — a boot-time build is
-/// unrepresentable, which is how the no-build-at-boot invariant is enforced.
+/// Boot-time activation of the **pre-built** system generation, over an
+/// injected backend. Boot consumes built generations, never source prisms
+/// (10 §6): this function takes no evaluator, no builder, and no recipe — a
+/// boot-time build is unrepresentable, which is how the no-build-at-boot
+/// invariant is enforced.
 ///
 /// Order: the pointer's pinned generation (line 3, 10 §2) if complete; else
 /// — pointer absent — whatever `current` already points at; else the newest
 /// complete generation (last-good recovery); else [`GenError::NoGeneration`].
 /// The activation itself is the same idempotent flip as any switch, plus
 /// wiring the live view at `lth_bin` when given.
-pub fn boot_activate(
-    shade_root: &Path,
-    cfg_root: &Path,
-    lth_bin: Option<&Path>,
+pub fn boot_activate_on<F: StoreFs + Clone>(
+    fs: F,
+    shade_root: &str,
+    cfg_root: &str,
+    lth_bin: Option<&str>,
 ) -> Result<BootOutcome, GenError> {
-    let line = GenLine::system(shade_root);
-    let pinned = read_pointer(cfg_root)?.map(|p| p.generation);
+    let line = GenLine::system_on(fs, shade_root);
+    let pinned =
+        read_pointer_on(&mut *line.fs.borrow_mut(), cfg_root)?.map(|p| p.generation);
 
+    // Boot bar is CLOSURE-completeness, not just structural: a persistent store
+    // may hold a generation tree whose referenced store paths no longer exist
+    // (e.g. after a store loss, or a partial persist). no-build-at-boot means
+    // such a generation cannot be repaired, so it must never be activated —
+    // fall back to the newest generation with a complete closure (10 §6). If
+    // none has a complete closure, fail loud (NoGeneration): boot never builds.
     let (generation, fell_back) = match pinned {
-        Some(n) if line.is_complete(n) => (n, false),
+        Some(n) if line.closure_complete(n) => (n, false),
         Some(_) => (
-            // Pinned generation missing/corrupt: last-good, never a rebuild
-            // and never `.bak` (10 §4, 10 §6).
-            line.latest_complete()?.ok_or(GenError::NoGeneration)?,
+            // Pinned generation's closure missing/corrupt: last-good with a
+            // complete closure, never a rebuild and never `.bak` (10 §4, 10 §6).
+            line.latest_closure_complete()?.ok_or(GenError::NoGeneration)?,
             true,
         ),
         None => match line.current()? {
-            Some(c) if line.is_complete(c) => (c, false),
-            _ => (line.latest_complete()?.ok_or(GenError::NoGeneration)?, true),
+            Some(c) if line.closure_complete(c) => (c, false),
+            _ => (line.latest_closure_complete()?.ok_or(GenError::NoGeneration)?, true),
         },
     };
 
@@ -651,6 +907,21 @@ pub fn boot_activate(
     Ok(BootOutcome { generation, pinned, fell_back })
 }
 
+/// [`boot_activate_on`] on the host backend.
+#[cfg(feature = "std")]
+pub fn boot_activate(
+    shade_root: &Path,
+    cfg_root: &Path,
+    lth_bin: Option<&Path>,
+) -> Result<BootOutcome, GenError> {
+    boot_activate_on(
+        HostFs,
+        path_str(shade_root),
+        path_str(cfg_root),
+        lth_bin.map(path_str),
+    )
+}
+
 // ---- Profile symlink forest -------------------------------------------------------
 
 /// Merge one package's output tree into the profile: directories merge,
@@ -658,44 +929,62 @@ pub fn boot_activate(
 /// A leaf that already exists is a collision — an error at generation-build
 /// time (02 §5), naming the file and the losing package.
 fn merge_into_profile(
-    dst: &Path,
-    pkg_root: &Path,
-    src: &Path,
+    fs: &mut dyn StoreFs,
+    dst: &str,
+    pkg_root: &str,
+    src: &str,
     pkg_name: &str,
 ) -> Result<(), GenError> {
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        let ft = fs::symlink_metadata(&src_path)?.file_type();
-        if ft.is_dir() {
-            fs::create_dir_all(&dst_path)?;
-            merge_into_profile(&dst_path, pkg_root, &src_path, pkg_name)?;
+    let entries = fs.read_dir(src).map_err(fs_op("read_dir", src))?;
+    for (name, kind) in entries {
+        let src_path = join(src, &name);
+        let dst_path = join(dst, &name);
+        if kind == NodeKind::Dir {
+            match fs.mkdir(&dst_path) {
+                Ok(()) | Err(FsError::Exists) => {}
+                Err(e) => return Err(fs_op("mkdir", &dst_path)(e)),
+            }
+            merge_into_profile(fs, &dst_path, pkg_root, &src_path, pkg_name)?;
         } else {
-            if fs::symlink_metadata(&dst_path).is_ok() {
+            if fs.exists(&dst_path) {
                 let rel = src_path
-                    .strip_prefix(pkg_root)
+                    .strip_prefix(&format!("{pkg_root}/"))
                     .unwrap_or(&src_path)
-                    .to_string_lossy()
-                    .into_owned();
-                let existing_target = fs::read_link(&dst_path)
-                    .map(|t| t.to_string_lossy().into_owned())
+                    .to_string();
+                let existing_target = fs
+                    .read_link(&dst_path)
                     .unwrap_or_else(|_| "<non-symlink>".to_string());
                 return Err(GenError::Collision { rel, package: pkg_name.to_string(), existing_target });
             }
-            symlink(&src_path, &dst_path)?;
+            fs.symlink(&src_path, &dst_path).map_err(fs_op("symlink", &dst_path))?;
         }
     }
     Ok(())
 }
 
 // ---- Small helpers ----------------------------------------------------------------
+//
+// Wall-clock time (the manifest `created=` stamp) is the one ambient fact the
+// fs seam does not carry — cfg'd per platform, same as the store db's stamp.
 
+#[cfg(feature = "std")]
 fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(all(feature = "oros", not(feature = "std")))]
+fn now_unix() -> u64 {
+    // SYS_TIME_EPOCH: unix epoch milliseconds (CMOS-anchored).
+    (unsafe { lythos_syscall::syscall0(lythos_abi::syscall::SYS_TIME_EPOCH) }) / 1000
+}
+
+// Featureless no_std fallback (keeps `--no-default-features` checkable).
+#[cfg(not(any(feature = "std", feature = "oros")))]
+fn now_unix() -> u64 {
+    0
 }
 
 /// RFC 3339 UTC from unix seconds (civil-from-days, Hinnant's algorithm).
@@ -720,44 +1009,6 @@ pub fn rfc3339_utc(secs: u64) -> String {
         (rem % 3_600) / 60,
         rem % 60
     )
-}
-
-/// Write + fsync a file (no rename — callers build inside a temp tree that is
-/// renamed as a whole).
-fn write_file_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut f = fs::File::create(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()
-}
-
-/// Atomic write: temp sibling + rename + best-effort dir fsync.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(".tmp-ptr-{}", std::process::id()));
-    write_file_synced(&tmp, bytes)?;
-    fs::rename(&tmp, path)?;
-    fsync_dir(parent)
-}
-
-/// Best-effort directory fsync (forces the rename/commit durable, 02 §6.3).
-fn fsync_dir(dir: &Path) -> io::Result<()> {
-    if let Ok(f) = fs::File::open(dir) {
-        let _ = f.sync_all();
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn symlink(target: &Path, link: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
-}
-#[cfg(not(unix))]
-fn symlink(_target: &Path, _link: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "generation symlinks require a unix host",
-    ))
 }
 
 #[cfg(test)]

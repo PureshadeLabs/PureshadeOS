@@ -30,6 +30,9 @@ target/
 limine.img
 pureshadeos.iso
 disk.img
+# Persistent /shade/store backing — user data, created by the QEMU run wiring,
+# never checked in (see Makefile $(STORE_IMG) / build.rs scope note).
+store.img
 
 **/mutants.out*/
 

@@ -52,7 +52,8 @@ impl StoreFs for HostFs {
         };
         #[cfg(not(unix))]
         let exec = false;
-        Ok(NodeMeta { kind, exec })
+        let len = if kind == NodeKind::File { m.len() } else { 0 };
+        Ok(NodeMeta { kind, exec, len })
     }
 
     fn read_file(&mut self, path: &str) -> FsResult<Vec<u8>> {
@@ -69,6 +70,16 @@ impl StoreFs for HostFs {
         }
         #[cfg(not(unix))]
         let _ = exec;
+        f.sync_all().map_err(fs_err)
+    }
+
+    fn create_exclusive(&mut self, path: &str, data: &[u8]) -> FsResult<()> {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(fs_err)?;
+        f.write_all(data).map_err(fs_err)?;
         f.sync_all().map_err(fs_err)
     }
 

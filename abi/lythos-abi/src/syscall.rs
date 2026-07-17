@@ -164,19 +164,17 @@ pub const SYS_RENAME:            u64 = 35;
 /// Returns new offset or error.
 pub const SYS_SEEK:              u64 = 36;
 
-// ── UDP networking ────────────────────────────────────────────────────────────
-
-/// Create a UDP socket. Returns socket fd or ENOSYS if stack absent.
-pub const SYS_SOCKET:            u64 = 50;
-/// Bind a socket to a local UDP port. a1=socket_fd, a2=port (u16).
-pub const SYS_BIND:              u64 = 51;
-/// Send a UDP datagram. a1=fd, a2=buf_ptr, a3=len, a4=dst_ip (u32 BE), a5=dst_port (u16).
-pub const SYS_SENDTO:            u64 = 52;
-/// Receive a UDP datagram (blocking). a1=fd, a2=buf_ptr, a3=len,
-/// a4=src_ip_out (*mut u32), a5=src_port_out (*mut u16). Returns bytes.
-pub const SYS_RECVFROM:          u64 = 53;
-/// Close a socket or file descriptor. a1=fd.
-pub const SYS_NET_CLOSE:         u64 = 54;
+// ── Networking (RETIRED) ──────────────────────────────────────────────────────
+//
+// Numbers 50-54 are RETIRED, permanently-unassigned gaps. They were the
+// in-kernel UDP socket API: 50 SYS_SOCKET, 51 SYS_BIND, 52 SYS_SENDTO,
+// 53 SYS_RECVFROM, 54 SYS_NET_CLOSE. The in-kernel virtio-net driver + TCP/IP
+// stack were torn down; networking is now a userspace concern — a `netd`
+// driver owns the virtio-net device via a CapKind::Device capability over the
+// userspace device-driver framework (SYS_DEV_* below), and higher-level
+// protocol access goes through IPC to that daemon, not these syscalls. Do NOT
+// reuse 50-54: an old socket-API caller must fail ENOSYS, not hit an unrelated
+// handler (same rationale as gaps 49 and 59).
 
 // ── Power management ──────────────────────────────────────────────────────────
 
@@ -193,14 +191,112 @@ pub const SYS_POWEROFF:          u64 = 55;
 pub const SYS_MOUNT:             u64 = 56;
 
 /// SYS_MOUNT a3: fresh RAM-backed RFS V2 instance, formatted at mount time.
+/// Volatile — content is lost on power cycle. Warm-only; use for scratch.
 pub const MOUNT_SRC_RFS2_RAM:    u64 = 0;
+
+/// SYS_MOUNT a3: persistent RFS V2 instance on the secondary virtio-blk
+/// device (a fixed backing disk image, e.g. `store.img`). Mounted if already
+/// formatted, formatted-then-mounted on first ever boot — content survives a
+/// full power cycle. This is what backs `/shade/store` so a cold boot brings
+/// up a generation whose closure still exists on disk.
+pub const MOUNT_SRC_RFS2_BLK:    u64 = 1;
 
 /// SYS_MOUNT a4 flag: attach the realize-guard (read-only-after-realize
 /// store semantics) to this mount.
 pub const MOUNT_STORE:           u64 = 1 << 0;
 
+// ── Symlinks ──────────────────────────────────────────────────────────────────
+
+/// Create a symbolic link at `link` pointing at `target` (target is stored
+/// verbatim, not resolved or validated — dangling links are legal). The final
+/// component of `link` is not followed; parent components are. On a store
+/// (realize-guarded) mount, creating a link inside a sealed entry is EROFS.
+/// a1=target_ptr, a2=target_len, a3=link_ptr, a4=link_len. Returns 0 or
+/// negative errno (EEXIST, ENOENT, ENOTDIR, EROFS, EINVAL, …).
+pub const SYS_SYMLINK:           u64 = 57;
+/// Read a symlink's target. The final component is not followed (it must BE
+/// the symlink); parent components are. a1=path_ptr, a2=path_len,
+/// a3=buf_ptr, a4=buf_len. Returns target length in bytes (truncated to
+/// buf_len if shorter) or negative errno (ENOENT, EINVAL if not a symlink).
+pub const SYS_READLINK:          u64 = 58;
+
+// ── Store reclamation ─────────────────────────────────────────────────────────
+//
+// Number 59 is a RETIRED, PERMANENTLY UNASSIGNED gap. It was `SYS_UNSEAL`,
+// which lifted a realize-seal to make sealed store content writable again for
+// GC. That primitive is GONE by design: the seal must be ABSOLUTE — no syscall
+// may ever make sealed content mutable. GC reclaims space by removing whole
+// unreferenced paths (SYS_STORE_REMOVE below), never by reopening sealed files
+// for write. Do NOT reuse 59: leaving it a hole is deliberate so an old caller
+// that still emits SYS_UNSEAL fails ENOSYS instead of silently invoking an
+// unrelated, possibly destructive, handler. (Same rationale as gap 49.)
+
+/// Remove an entire unreferenced store path (whole-tree delete: unlink every
+/// file, rmdir every directory, free the blocks via RFS2 free-space) —
+/// operating BELOW the seal layer, so it never opens a sealed file for write.
+/// This is the sole store-reclamation primitive after SYS_UNSEAL's removal.
+/// Requires a Filesystem capability with WRITE right (store-owner authority —
+/// a builder cannot reclaim). Content-addressing keeps it safe: a later
+/// realize of the same digest reproduces byte-identical content. `path` must
+/// name a top-level entry on a store (realize-guarded) mount; the kernel drops
+/// that name's in-kernel seal as part of the lifecycle removal.
+/// a1=path_ptr, a2=path_len. Returns 0 or negative errno
+/// (ENOPERM, EINVAL, ENOMNT, ENOENT, …).
+pub const SYS_STORE_REMOVE:      u64 = 60;
+
+// ── Userspace device-driver framework ─────────────────────────────────────────
+//
+// Give a ring-3 driver ownership of one PCI device it holds a CapKind::Device
+// capability for. All authority flows through that unforgeable cap: the driver
+// can touch only the device the cap names — its config space, its BARs, its
+// IRQ, and DMA buffers minted for it. No ambient authority: a process with no
+// Device cap cannot map MMIO, wait on an IRQ, or allocate DMA (gate-before-args
+// → ENOPERM, like the SYS_MOUNT gate).
+//
+// DMA trust model: without an IOMMU a DMA-programming driver can address any
+// physical memory, so a Device-cap holder is trusted-for-DMA for now. DMA
+// buffers are nonetheless allocated THROUGH the framework (SYS_DEV_DMA_ALLOC)
+// so an IOMMU domain can later be programmed at that single chokepoint.
+
+/// Claim a PCI device from the kernel registry by name, minting a Device
+/// capability into the caller's table. Gated on the Rollback capability
+/// (lythd-exclusive) so only init claims devices; init then delegates each
+/// device cap to its driver. A device may be claimed at most once.
+/// a1=name_ptr, a2=name_len (UTF-8). Returns a CapHandle or negative errno
+/// (ENOPERM if no Rollback cap, ENOENT if no such device, EINVAL on bad args or
+/// a device already claimed).
+pub const SYS_DEV_CLAIM:         u64 = 61;
+/// Read one 32-bit dword from the named device's PCI config space. Lets a
+/// userspace driver walk the modern virtio-pci capability list (and any other
+/// config-space structure) without needing port-I/O access. Device-cap gated.
+/// a1=dev_cap, a2=offset (dword-aligned, < 256). Returns the u32 value or
+/// ENOPERM / EINVAL.
+pub const SYS_DEV_CFG_READ:      u64 = 62;
+/// Map a device MMIO BAR into the caller's address space, uncacheable, gated on
+/// the Device cap. The whole BAR region is mapped starting at `virt`.
+/// a1=dev_cap, a2=bar_index (0..6), a3=virt (page-aligned user addr). Returns
+/// the BAR length in bytes or ENOPERM / EINVAL.
+pub const SYS_DEV_MMIO_MAP:      u64 = 63;
+/// Allocate a physically-contiguous, zeroed DMA buffer, map it into the caller
+/// at `virt`, and return its physical address (to program into the device).
+/// Wiped on free. Device-cap gated. a1=dev_cap, a2=virt (page-aligned),
+/// a3=size (bytes, rounded up to whole pages), a4=out_phys_ptr (*mut u64).
+/// Returns 0 or ENOPERM / EINVAL.
+pub const SYS_DEV_DMA_ALLOC:     u64 = 64;
+/// Block the calling driver until its device raises an IRQ. The kernel masks
+/// the device's IOAPIC line on fire (so a level-triggered PCI line does not
+/// storm before the driver clears the device's ISR); the driver must call
+/// SYS_DEV_IRQ_ACK after servicing to resume delivery. Device-cap gated.
+/// a1=dev_cap. Returns 0 or ENOPERM.
+pub const SYS_DEV_IRQ_WAIT:      u64 = 65;
+/// Acknowledge and unmask the device IRQ after servicing (the driver reads the
+/// device ISR register to deassert the level line first). Device-cap gated.
+/// a1=dev_cap. Returns 0 or ENOPERM.
+pub const SYS_DEV_IRQ_ACK:       u64 = 66;
+
 // ── Bookkeeping ───────────────────────────────────────────────────────────────
 
 /// Highest assigned syscall number. Calls above this return ENOSYS.
-/// Number 49 is an unassigned gap and also returns ENOSYS.
-pub const SYSCALL_MAX:           u64 = SYS_MOUNT;
+/// Numbers 49, 50-54 and 59 are unassigned gaps and also return ENOSYS
+/// (59 = retired SYS_UNSEAL, 50-54 = retired UDP socket API — never reuse them).
+pub const SYSCALL_MAX:           u64 = SYS_DEV_IRQ_ACK;

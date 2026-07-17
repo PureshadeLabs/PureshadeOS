@@ -2,11 +2,17 @@
 //! generations switch and roll back via the symlink flip, a system generation
 //! built from `prism.shade` activates, `list` shows the history, every
 //! generation is a GC root, and boot activates pre-built generations only.
+//!
+//! The engine is backend-injected (the B1 [`StoreFs`] seam): the suite runs
+//! the gate on the host backend (`GenLine::system`, real symlinks) and again
+//! through a shared [`MemFs`] (`seam_*` tests) to prove no test leans on
+//! `std::fs` behavior the seam does not promise.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use shade_store::{MemFs, StoreFs};
 use shade_store_db::{GcOptions, StoreDb};
 use shadec::io::HostIo;
 
@@ -59,13 +65,19 @@ fn fake_store_pkg(shade_root: &Path, digest_char: char, name: &str, content: &st
     PackageEntry {
         name: name.to_string(),
         version: "1.0".to_string(),
-        store_path: out,
+        store_path: path_str(&out).to_string(),
         requested: true,
     }
 }
 
-fn read_current(line: &GenLine) -> u64 {
+fn read_current<F: StoreFs>(line: &GenLine<F>) -> u64 {
     line.current().unwrap().expect("current symlink present")
+}
+
+/// The line root as a host `Path` (host-backend tests dereference the real
+/// symlinks with `std::fs`).
+fn root(line: &GenLine<HostFs>) -> &Path {
+    Path::new(line.line_root())
 }
 
 // ---- GATE: two generations, switch, rollback, history --------------------------
@@ -90,7 +102,7 @@ fn gate_switch_and_rollback_via_symlink_flip() {
     assert_eq!(read_current(&line), 1);
     // The live path goes through `current`: reading through the flip point
     // sees generation 1's package.
-    let through_current = line.line_root().join("current/profile/bin/tool");
+    let through_current = root(&line).join("current/profile/bin/tool");
     assert_eq!(fs::read_to_string(&through_current).unwrap(), "v1");
 
     // Switch = one symlink flip; same path now resolves to v2.
@@ -98,7 +110,7 @@ fn gate_switch_and_rollback_via_symlink_flip() {
     assert_eq!(read_current(&line), 2);
     assert_eq!(fs::read_to_string(&through_current).unwrap(), "v2");
     // The flip staging link never survives.
-    assert!(!line.line_root().join(".current.new").exists());
+    assert!(!root(&line).join(".current.new").exists());
 
     // Rollback appends generation 3 copying 1's manifest, then flips.
     let g3 = line.rollback(None).unwrap();
@@ -134,7 +146,7 @@ fn activation_refuses_missing_or_incomplete_generations() {
 
     // A numbered dir without manifest/profile must never be activated
     // (02 §6.1 step 1: built completely first).
-    fs::create_dir_all(line.line_root().join("9")).unwrap();
+    fs::create_dir_all(root(&line).join("9")).unwrap();
     assert!(matches!(line.activate(9), Err(GenError::Incomplete(9))));
 }
 
@@ -146,7 +158,7 @@ fn profile_collision_is_an_error_and_leaves_the_line_untouched() {
     let a = fake_store_pkg(shade, 'c', "clash", "from-a");
     let mut b = fake_store_pkg(shade, 'd', "other", "from-b");
     // Make b also provide bin/clash.
-    fs::write(b.store_path.join("bin/clash"), "b-clash").unwrap();
+    fs::write(Path::new(&b.store_path).join("bin/clash"), "b-clash").unwrap();
     b.requested = true;
 
     let err = line.create(&[a, b], None, "collide", 0).unwrap_err();
@@ -159,7 +171,7 @@ fn profile_collision_is_an_error_and_leaves_the_line_untouched() {
     }
     // No generation appeared; no temp tree left behind.
     assert_eq!(line.numbers().unwrap(), Vec::<u64>::new());
-    let leftovers: Vec<_> = fs::read_dir(line.line_root())
+    let leftovers: Vec<_> = fs::read_dir(root(&line))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
@@ -216,10 +228,172 @@ fn generations_register_as_gc_roots_and_survive_gc() {
 
     // GC keeps the generation's store path, collects the unrooted one.
     let report = db.gc(&GcOptions::default()).unwrap();
-    assert!(live.store_path.exists(), "rooted generation package collected");
-    assert!(!dead.store_path.exists(), "unrooted path survived");
+    assert!(Path::new(&live.store_path).exists(), "rooted generation package collected");
+    assert!(!Path::new(&dead.store_path).exists(), "unrooted path survived");
     assert_eq!(report.kept, 1);
     let _ = g;
+}
+
+// ---- The seam gate: same engine, injected MemFs backend ---------------------------
+
+/// A shared handle to one [`MemFs`] so the line, the roots db, and the test's
+/// own assertions see the same in-memory tree (the shade-build B3 pattern).
+#[derive(Clone)]
+struct SharedMem(std::rc::Rc<std::cell::RefCell<MemFs>>);
+
+impl SharedMem {
+    fn new() -> Self {
+        SharedMem(std::rc::Rc::new(std::cell::RefCell::new(MemFs::new())))
+    }
+}
+
+impl StoreFs for SharedMem {
+    fn metadata(&mut self, path: &str) -> shade_store::FsResult<shade_store::NodeMeta> {
+        self.0.borrow_mut().metadata(path)
+    }
+    fn read_file(&mut self, path: &str) -> shade_store::FsResult<Vec<u8>> {
+        self.0.borrow_mut().read_file(path)
+    }
+    fn write_file(&mut self, path: &str, data: &[u8], exec: bool) -> shade_store::FsResult<()> {
+        self.0.borrow_mut().write_file(path, data, exec)
+    }
+    fn create_exclusive(&mut self, path: &str, data: &[u8]) -> shade_store::FsResult<()> {
+        self.0.borrow_mut().create_exclusive(path, data)
+    }
+    fn mkdir(&mut self, path: &str) -> shade_store::FsResult<()> {
+        self.0.borrow_mut().mkdir(path)
+    }
+    fn rename(&mut self, old: &str, new: &str) -> shade_store::FsResult<()> {
+        self.0.borrow_mut().rename(old, new)
+    }
+    fn unlink(&mut self, path: &str) -> shade_store::FsResult<()> {
+        self.0.borrow_mut().unlink(path)
+    }
+    fn rmdir(&mut self, path: &str) -> shade_store::FsResult<()> {
+        self.0.borrow_mut().rmdir(path)
+    }
+    fn read_dir(&mut self, path: &str) -> shade_store::FsResult<Vec<(String, shade_store::NodeKind)>> {
+        self.0.borrow_mut().read_dir(path)
+    }
+    fn read_link(&mut self, path: &str) -> shade_store::FsResult<String> {
+        self.0.borrow_mut().read_link(path)
+    }
+    fn symlink(&mut self, target: &str, link: &str) -> shade_store::FsResult<()> {
+        self.0.borrow_mut().symlink(target, link)
+    }
+    fn unique_token(&mut self) -> u64 {
+        self.0.borrow_mut().unique_token()
+    }
+}
+
+/// [`fake_store_pkg`] staged through the seam instead of `std::fs`.
+fn seam_store_pkg(fs: &SharedMem, digest_char: char, name: &str, content: &str) -> PackageEntry {
+    let digest: String = std::iter::repeat(digest_char).take(32).collect();
+    let store_path = format!("/shade/store/{digest}-{name}-1.0");
+    let mut f = fs.clone();
+    backend::create_dir_all(&mut f, &format!("{store_path}/bin")).unwrap();
+    f.write_file(&format!("{store_path}/bin/{name}"), content.as_bytes(), false).unwrap();
+    PackageEntry {
+        name: name.to_string(),
+        version: "1.0".to_string(),
+        store_path,
+        requested: true,
+    }
+}
+
+#[test]
+fn seam_switch_rollback_list_and_roots_on_memfs() {
+    let mem = SharedMem::new();
+    let line = GenLine::system_on(mem.clone(), "/shade");
+
+    let v1 = seam_store_pkg(&mem, 'a', "tool", "v1");
+    let v2 = seam_store_pkg(&mem, 'b', "tool", "v2");
+
+    // Two generations switch via the symlink flip — pure seam operations.
+    let g1 = line.create(&[v1.clone()], None, "install tool v1", 0).unwrap();
+    let g2 = line.create(&[v2.clone()], None, "upgrade tool", g1).unwrap();
+    assert_eq!((g1, g2), (1, 2));
+    assert_eq!(line.current().unwrap(), None);
+
+    line.activate(g1).unwrap();
+    assert_eq!(read_current(&line), 1);
+    // The profile forest is symlinks into the store, written via the seam.
+    assert_eq!(
+        mem.clone().read_link("/shade/gen/system/1/profile/bin/tool").unwrap(),
+        v1.store_path.clone() + "/bin/tool"
+    );
+
+    line.activate(g2).unwrap();
+    assert_eq!(read_current(&line), 2);
+    assert!(!mem.clone().exists("/shade/gen/system/.current.new"));
+
+    // Rollback appends generation 3 copying 1's manifest, then flips.
+    let g3 = line.rollback(None).unwrap();
+    assert_eq!(g3, 3);
+    assert_eq!(read_current(&line), 3);
+    let m3 = line.read_manifest(3).unwrap().unwrap();
+    assert_eq!(m3.packages, vec![v1.clone()]);
+    assert_eq!(m3.parent, 1);
+
+    // History with `current` marked.
+    let infos = line.list().unwrap();
+    assert_eq!(infos.iter().map(|g| g.number).collect::<Vec<_>>(), vec![1, 2, 3]);
+    assert_eq!(
+        infos.iter().filter(|g| g.current).map(|g| g.number).collect::<Vec<_>>(),
+        vec![3]
+    );
+
+    // Generations registered as roots through the same backend.
+    let db = StoreDb::with_backend(mem.clone(), "/shade");
+    let roots = db.list_roots().unwrap();
+    assert!(
+        roots.iter().any(|(name, target)| name == "gen-system-1-0" && *target == v1.store_path),
+        "generation root missing on the seam backend: {roots:?}"
+    );
+
+    // Live view wiring is a seam symlink too.
+    line.wire_view("/lth/bin").unwrap();
+    assert_eq!(
+        mem.clone().read_link("/lth/bin").unwrap(),
+        "/shade/gen/system/current/profile/bin"
+    );
+}
+
+#[test]
+fn seam_boot_and_pointer_on_memfs() {
+    let mem = SharedMem::new();
+    let line = GenLine::system_on(mem.clone(), "/shade");
+    let p1 = seam_store_pkg(&mem, 'k', "one", "1");
+    let p2 = seam_store_pkg(&mem, 'l', "two", "2");
+    line.create(&[p1], None, "g1", 0).unwrap();
+    line.create(&[p2], None, "g2", 1).unwrap();
+
+    // Pointer round-trip through the seam (atomic temp+rename write).
+    let mut f = mem.clone();
+    write_pointer_on(
+        &mut f,
+        "/cfg/shade",
+        &Pointer { prism: "/user/lyon/.prism".into(), selector: "ws".into(), generation: 1 },
+    )
+    .unwrap();
+    assert_eq!(
+        read_pointer_on(&mut f, "/cfg/shade").unwrap().unwrap().generation,
+        1
+    );
+
+    // Boot activates the pinned pre-built generation; idempotent re-run.
+    let out = boot_activate_on(mem.clone(), "/shade", "/cfg/shade", Some("/lth/bin")).unwrap();
+    assert_eq!(out, BootOutcome { generation: 1, pinned: Some(1), fell_back: false });
+    assert_eq!(read_current(&line), 1);
+    let again = boot_activate_on(mem.clone(), "/shade", "/cfg/shade", Some("/lth/bin")).unwrap();
+    assert_eq!(again.generation, 1);
+
+    // Re-pin line 3 only; boot follows.
+    repin_generation_on(&mut f, "/cfg/shade", 2).unwrap();
+    let ptr = read_pointer_on(&mut f, "/cfg/shade").unwrap().unwrap();
+    assert_eq!((ptr.prism.as_str(), ptr.selector.as_str(), ptr.generation), ("/user/lyon/.prism", "ws", 2));
+    let out = boot_activate_on(mem.clone(), "/shade", "/cfg/shade", None).unwrap();
+    assert_eq!(out, BootOutcome { generation: 2, pinned: Some(2), fell_back: false });
 }
 
 // ---- Prism build → system generation → activation --------------------------------
@@ -289,7 +463,7 @@ fn system_generation_from_prism_shade_builds_and_activates() {
 
         // Profile entries are symlinks into the store (a symlink forest, not
         // copies) — the byte-scan root path for GC.
-        let alpha_link = line.line_root().join("1/profile/bin/alpha");
+        let alpha_link = root(&line).join("1/profile/bin/alpha");
         let target = fs::read_link(&alpha_link).unwrap();
         assert!(target.starts_with(&store), "forest must point into the store: {target:?}");
 
@@ -343,7 +517,7 @@ fn explicit_rebuild_retires_bootstrap_default_and_selector_selects() {
 
         // Only alpha is in the profile.
         let line = GenLine::system(&s.shade);
-        let profile_bin = line.line_root().join("1/profile/bin");
+        let profile_bin = root(&line).join("1/profile/bin");
         assert!(profile_bin.join("alpha").exists());
         assert!(!profile_bin.join("beta").exists());
     });
@@ -390,10 +564,10 @@ fn home_rebuild_flips_only_the_user_line() {
 
         let usr = GenLine::user(&s.shade, "lyon");
         assert_eq!(read_current(&usr), 1);
-        assert!(usr.line_root().join("current/profile/bin/beta").exists());
+        assert!(root(&usr).join("current/profile/bin/beta").exists());
         // The system line is untouched — no pointer, no system generation (10 §5).
         assert_eq!(GenLine::system(&s.shade).current().unwrap(), None);
-        assert_eq!(read_pointer(&s.cfg).unwrap(), None);
+        assert!(read_pointer(&s.cfg).unwrap().is_none());
     });
 }
 
@@ -451,7 +625,7 @@ fn repin_moves_only_the_generation_line_and_boot_follows() {
     // Without a pointer, re-pin is a no-op (a user line has none).
     fs::remove_file(s.cfg.join(POINTER_FILE)).unwrap();
     repin_generation(&s.cfg, 1).unwrap();
-    assert_eq!(read_pointer(&s.cfg).unwrap(), None);
+    assert!(read_pointer(&s.cfg).unwrap().is_none());
 }
 
 #[test]
@@ -473,6 +647,54 @@ fn boot_falls_back_to_last_good_when_pinned_is_missing() {
     let out = boot_activate(&s.shade, &s.cfg, None).unwrap();
     assert_eq!(out, BootOutcome { generation: g2, pinned: Some(99), fell_back: true });
     assert_eq!(read_current(&line), g2);
+}
+
+#[test]
+fn boot_falls_back_when_pinned_closure_is_incomplete() {
+    // Cold-boot integrity (10 §6): the pinned generation's tree is structurally
+    // intact (manifest + profile present) but a referenced store path no longer
+    // exists — exactly the state a persistent store can land in (store loss /
+    // partial persist). Boot must NOT activate it (no-build-at-boot cannot
+    // repair it) and must fall back to the newest generation with a COMPLETE
+    // closure.
+    let tmp = TmpDir::new("boot-closure");
+    let s = sys_dirs(&tmp);
+    let line = GenLine::system(&s.shade);
+    let p1 = fake_store_pkg(&s.shade, 'm', "one", "1");
+    let p2 = fake_store_pkg(&s.shade, 'n', "two", "2");
+    let g1 = line.create(&[p1], None, "g1", 0).unwrap();
+    let g2 = line.create(&[p2.clone()], None, "g2", 1).unwrap();
+    // Pin the newest generation, then destroy its store closure on disk.
+    write_pointer(
+        &s.cfg,
+        &Pointer { prism: "x".into(), selector: String::new(), generation: g2 },
+    )
+    .unwrap();
+    fs::remove_dir_all(&p2.store_path).unwrap();
+    assert!(!line.closure_complete(g2), "g2 closure must read as incomplete");
+    assert!(line.closure_complete(g1), "g1 closure is intact");
+
+    let out = boot_activate(&s.shade, &s.cfg, None).unwrap();
+    assert_eq!(out, BootOutcome { generation: g1, pinned: Some(g2), fell_back: true });
+    assert_eq!(read_current(&line), g1);
+}
+
+#[test]
+fn boot_errors_when_no_generation_has_a_complete_closure() {
+    // Every generation's closure is gone: boot fails loud (never builds).
+    let tmp = TmpDir::new("boot-noclosure");
+    let s = sys_dirs(&tmp);
+    let line = GenLine::system(&s.shade);
+    let p1 = fake_store_pkg(&s.shade, 'm', "one", "1");
+    let g1 = line.create(&[p1.clone()], None, "g1", 0).unwrap();
+    write_pointer(
+        &s.cfg,
+        &Pointer { prism: "x".into(), selector: String::new(), generation: g1 },
+    )
+    .unwrap();
+    fs::remove_dir_all(&p1.store_path).unwrap();
+    let err = boot_activate(&s.shade, &s.cfg, None).unwrap_err();
+    assert!(matches!(err, GenError::NoGeneration), "got {err:?}");
 }
 
 #[test]
@@ -498,9 +720,9 @@ fn manifest_round_trips_byte_stably() {
         .map(|i| PackageEntry {
             name: format!("pkg{i}"),
             version: format!("{i}.0"),
-            store_path: PathBuf::from(format!(
+            store_path: format!(
                 "/shade/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-pkg{i}-{i}.0"
-            )),
+            ),
             requested: i % 2 == 0,
         })
         .collect();
@@ -542,7 +764,7 @@ fn generation_writes_canonical_manifest_and_no_toml() {
 
     // The manifest is the extensionless canonical record; nothing under the
     // freshly created line is TOML.
-    let gen_dir = line.line_root().join(n.to_string());
+    let gen_dir = root(&line).join(n.to_string());
     assert!(gen_dir.join("manifest").exists());
     fn assert_no_toml(dir: &Path) {
         for e in fs::read_dir(dir).unwrap() {
@@ -554,7 +776,7 @@ fn generation_writes_canonical_manifest_and_no_toml() {
             }
         }
     }
-    assert_no_toml(line.line_root());
+    assert_no_toml(root(&line));
 
     // On-disk bytes are the canonical record and round-trip byte-stably.
     let bytes = fs::read_to_string(gen_dir.join("manifest")).unwrap();

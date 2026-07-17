@@ -51,6 +51,14 @@ impl PageFlags {
     pub const PRESENT:  Self = Self(1 << 0);
     pub const WRITABLE: Self = Self(1 << 1);
     pub const USER:     Self = Self(1 << 2);
+    /// Page-level cache disable (PCD, bit 4). Set for MMIO mappings — device
+    /// registers must be strongly-ordered / uncacheable, never cached.
+    pub const NO_CACHE: Self = Self(1 << 4);
+    /// OS-available bit 9, used to mark leaf pages that back device MMIO BARs
+    /// (physical addresses NOT owned by the PMM). `free_user_page_table` must
+    /// NOT return these frames to the PMM on task teardown — doing so would
+    /// poison the frame allocator with device physical addresses.
+    pub const MMIO_NOFREE: Self = Self(1 << 9);
     pub const NX:       Self = Self(1 << 63);
 
     /// Kernel read-write, no-execute (heap, data, stack pages).
@@ -350,15 +358,18 @@ pub fn free_user_page_table(pml4: PhysAddr) {
                 let p2e = p2.0[k];
                 if !p2e.is_present() { continue; }
                 if p2e.is_huge() {
-                    // 2 MiB page — free the backing frame directly.
-                    pmm::free_frame(p2e.address());
+                    // 2 MiB page — free the backing frame directly (unless it
+                    // is a device MMIO mapping, which the PMM does not own).
+                    if p2e.0 & PageFlags::MMIO_NOFREE.0 == 0 {
+                        pmm::free_frame(p2e.address());
+                    }
                     continue;
                 }
                 let p1_phys = p2e.address();
                 let p1      = unsafe { &*table_ptr(p1_phys) };
                 for l in 0..512 {
                     let p1e = p1.0[l];
-                    if p1e.is_present() {
+                    if p1e.is_present() && p1e.0 & PageFlags::MMIO_NOFREE.0 == 0 {
                         pmm::free_frame(p1e.address()); // leaf page frame
                     }
                 }

@@ -42,6 +42,49 @@ fn crash_before_flip_recovers_prior_committed_gen() {
 }
 
 #[test]
+fn store_realize_survives_torn_superblock_atomically() {
+    // Persistent /shade/store guarantee (Task 5): the store is backed by a
+    // block device (VirtioDisk on store.img) implementing the SAME `BlockDevice`
+    // contract as this `MemDev`, so RFS2's dual-superblock atomic commit gives
+    // the store crash consistency for free. Model a realize: commit a whole
+    // "sealed" store entry tree (durable), then stage a SECOND realize and tear
+    // the superblock write (crash before the pointer flip). A remount must show
+    // the store in a PRE- or POST-commit state, never a corrupt/partial one:
+    // the first entry wholly present, the second wholly absent.
+    let mut fs = fresh_fs(256);
+    // First realize: /<digest-a>/bin/x — committed & durable (the sealed entry).
+    fs.mkdir("/digest-a").unwrap();
+    fs.mkdir("/digest-a/bin").unwrap();
+    let x = fs.create("/digest-a/bin/x").unwrap();
+    fs.write_at(x, 0, b"realized-a").unwrap();
+    fs.commit().unwrap();
+    assert_eq!(fs.generation(), 2);
+
+    // Second realize staged (blocks written and even flushed) but the commit's
+    // superblock flip never lands — the torn write.
+    fs.mkdir("/digest-b").unwrap();
+    fs.mkdir("/digest-b/bin").unwrap();
+    let y = fs.create("/digest-b/bin/y").unwrap();
+    fs.write_at(y, 0, b"realized-b").unwrap();
+    fs.device_mut().flush().unwrap();
+    assert!(fs.has_staged_changes());
+
+    // Crash and remount: pre-commit state only.
+    let dev = fs.into_device().crash();
+    let mut fs = Rfs2::mount(dev, IdentityTransform, tnow).unwrap();
+    assert_eq!(fs.generation(), 2, "remount pins the last committed gen");
+    let a = fs.lookup("/digest-a/bin/x").unwrap();
+    let mut buf = [0u8; 16];
+    assert_eq!(fs.read_at(a, 0, &mut buf).unwrap(), 10);
+    assert_eq!(&buf[..10], b"realized-a", "sealed entry survives intact");
+    // The torn second realize left nothing behind — not a partial tree.
+    assert_eq!(fs.lookup("/digest-b").unwrap_err(), Error::NotFound);
+    assert_eq!(fs.lookup("/digest-b/bin/y").unwrap_err(), Error::NotFound);
+    // No block leak: staged garbage is free again after remount.
+    assert_eq!(fs.superblock().block_count as usize, fs.live_current().len());
+}
+
+#[test]
 fn crash_after_flip_keeps_the_transaction() {
     let mut fs = fresh_fs(256);
     let a = fs.create("/a").unwrap();

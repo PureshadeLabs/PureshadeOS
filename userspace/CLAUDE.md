@@ -43,7 +43,7 @@ Returns 0 on success. Caller must hold a `CapKind::Memory` cap with `WRITE` righ
 
 ## Syscall and errno contract
 
-The full syscall table (numbers 0–55), error sentinel values, register conventions, and struct byte layouts are in `docs/spec/syscalls.md`. The machine-readable version is `abi/lythos-abi`. Do not hardcode syscall numbers or errno values — use the constants from `lythos-abi`.
+The full syscall table (numbers 0–66; 49, 50–54 and 59 are retired gaps), error sentinel values, register conventions, and struct byte layouts are in `docs/spec/syscalls.md`. The machine-readable version is `abi/lythos-abi`. Do not hardcode syscall numbers or errno values — use the constants from `lythos-abi`.
 
 ## lythd boot protocol
 

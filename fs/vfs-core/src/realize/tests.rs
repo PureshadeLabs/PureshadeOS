@@ -77,6 +77,20 @@ fn nested_into_sealed_rejected() {
     );
 }
 
+#[test]
+fn forget_after_whole_path_removal() {
+    let mut g = RealizeGuard::new();
+    g.seal(NAME);
+    assert_eq!(g.check_mutate(&alloc::format!("/{NAME}/bin/x")), Err(FsError::ReadOnly));
+    // While sealed there is NO in-place exit — the seal is absolute. `forget`
+    // is only called by the kernel once the whole tree is deleted below the
+    // seal (store_remove_tree); it drops the now-nonexistent name from the set.
+    // Idempotent: a second forget reports it was already gone.
+    assert!(g.forget(NAME), "forget must report the name was sealed");
+    assert!(!g.forget(NAME), "second forget is a no-op");
+    assert_eq!(g.sealed_count(), 0);
+}
+
 /// Drive one realize against a `MemBackend` store + guard, exactly as the
 /// kernel glue will: stage a temp file with `content`, then consult the guard
 /// on the rename. Returns the outcome.

@@ -73,6 +73,13 @@ pub struct MkfsOptions<'a> {
     pub label: &'a str,
     /// Wall-clock ns for `btime`/`commit_time` (informational).
     pub now: u64,
+    /// Encrypted-volume header material (doc 08). `Some` ⇒ the static header
+    /// records the KDF params + wrapped DEK and the volume is sealed with the
+    /// (encrypting) `xform`; `None` ⇒ a plaintext volume. Must agree with the
+    /// transform: `xform.incompat_features()` is written as `feature_incompat`,
+    /// so an encrypting transform + `None` (or vice-versa) is a caller bug the
+    /// mount-time feature gate will later reject.
+    pub crypto: Option<crate::crypto::CryptoParams>,
 }
 
 /// Format a device: static header, root directory (inode 1) with `.`/`..`,
@@ -154,14 +161,18 @@ pub fn mkfs<D: BlockDevice, T: BlockTransform>(
         // Hard links are baseline in V2.0 (doc 10 §2): a reader without
         // hardlink-aware freeing may read but must not write.
         feature_ro_compat: RO_COMPAT_HARDLINKS,
-        kdf_algo: 1, // Argon2id — parameters recorded now, used when crypto lands
-        kdf_salt: [0; 16], // TODO(crypto): random per volume at mkfs (doc 08 §5)
-        argon_m_cost: 65536,
-        argon_t_cost: 3,
-        argon_p: 1,
-        dek_wrap_nonce: [0; 12], // TODO(crypto): DEK wrap (doc 08 §6)
-        dek_wrapped: [0; 32],
-        dek_wrap_tag: [0; 16],
+        // Crypto header fields: from `opts.crypto` for an encrypted volume,
+        // else the plaintext defaults (Argon2id id + baseline params recorded
+        // but unused; salt + wrap all-zero). The identity path's on-disk bytes
+        // are unchanged from before this field existed.
+        kdf_algo: opts.crypto.as_ref().map_or(1, |c| c.kdf_algo),
+        kdf_salt: opts.crypto.as_ref().map_or([0; 16], |c| c.kdf_salt),
+        argon_m_cost: opts.crypto.as_ref().map_or(65536, |c| c.argon_m_cost),
+        argon_t_cost: opts.crypto.as_ref().map_or(3, |c| c.argon_t_cost),
+        argon_p: opts.crypto.as_ref().map_or(1, |c| c.argon_p),
+        dek_wrap_nonce: opts.crypto.as_ref().map_or([0; 12], |c| c.dek_wrap_nonce),
+        dek_wrapped: opts.crypto.as_ref().map_or([0; 32], |c| c.dek_wrapped),
+        dek_wrap_tag: opts.crypto.as_ref().map_or([0; 16], |c| c.dek_wrap_tag),
         label,
     };
     let mut hbuf = vec![0u8; BLOCK_SIZE];

@@ -1,8 +1,8 @@
 # shade — Build Executor
 
 How `shade build` turns an evaluated derivation closure into realized store
-paths: the CDF → run → realize pipeline, the two replaceable seams (sandbox,
-registrar), build ordering, and failure semantics. This documents the
+paths: the CDF → run → realize pipeline, the three replaceable seams (sandbox,
+registrar, filesystem), build ordering, and failure semantics. This documents the
 implementation in `pkg/shade-build` (module `executor`); the *policy* it
 implements is [`shade-pkg 06`](../shade-pkg/06-build.md) (isolated build
 model) and [`shade-pkg 02 §2–3`](../shade-pkg/02-store.md) (store paths,
@@ -63,7 +63,7 @@ CDF bytes are read back through `shade_cdf::parse` — the strict inverse of
 the emitter, in the same crate, so the byte format still lives in exactly
 one place ([shade 08 §1](08-interop.md#1-single-frontend)).
 
-## 2. The two seams
+## 2. The three seams
 
 ### 2.1 Seam A — `BuildSandbox`
 
@@ -108,6 +108,26 @@ db records, because the store's atomic realize already gives
 `/shade/db/refs/<digest>` + `/shade/db/valid/<digest>` under the db lock)
 replaces this impl; the executor's call site is already in place — it fires
 once per realization, never on a lookup hit.
+
+### 2.3 Seam C — `StoreFs` (the B1 filesystem seam)
+
+Owns every filesystem operation the executor performs *itself*: scratch
+setup/teardown (`/shade/build/<store-name>/` + `tmp/` + `out/`), the build
+log (`/shade/log/<store-name>.log`), the dep-existence check during
+ordering, and the realization write (`shade_store::realize_cdf`). The
+backend is injected (`Executor::set_fs`; default
+[`HostFs`](store-realization.md)) — `OrosFs` is the on-target impl, and the
+scaffolding functions (`prepare_scratch`, `write_build_log`,
+`clean_scratch`) are `no_std` and build for the OROS target
+(`--no-default-features --features oros`).
+
+One host **vehicle** remains outside the seam by design: `spawn` hands the
+builder child a real fd for stdout/stderr, which no in-memory backend can
+provide, so each phase's stream detours through a transient host temp file
+and is folded into the seam-written log at the phase boundary (the log's
+durable home is always behind the seam; it appears at phase granularity,
+not live). The native OROS sandbox replaces this with the supervisor log
+endpoint from the sandbox plan's Ipc grant, not with a file.
 
 ## 3. Build ordering
 
@@ -182,7 +202,11 @@ resumes at the failure point.
 
 All three are executor parameters so host tests and bringup tooling target
 throwaway roots; the canonical values are constants in `shade-store` /
-`shade-build::executor`.
+`shade-build::executor`. All executor-owned I/O against them goes through
+the injected `StoreFs` backend (§2.3);
+`tests.rs::executor_scratch_log_store_route_through_seam` proves a full
+build against a pure in-memory backend under the canonical `/shade` roots
+leaves the host filesystem untouched.
 
 ## 6. Verified gate
 
@@ -210,7 +234,20 @@ shade-build: 9wg74a0m…-smoke-0.1 — hit (local)
   host-assisted (Seatbelt); the capability-restricted builder *task* on OROS
   per [`06 §3.2`](../shade-pkg/06-build.md#3-sandbox) remains blocked on a
   kernel per-task fs namespace — the sandbox plan (mounts + cap set) is the
-  prepared input for it.
+  prepared input for it. Until it exists the executor **run loop** stays
+  behind the `std` feature (its `BuildSandbox` vehicles spawn host
+  processes); the plan/address half and the seam scaffolding already build
+  for the OROS target.
+  - **On-device bringup path (verified)**: the on-target `shade` binary does
+    not use the `std` run loop. It drives the seam pieces directly — eval →
+    address → LOOKUP-THEN-BUILD → `realize_cdf` → db register — and runs
+    phases through a tiny built-in interpreter (`true`, `mkdir -p`,
+    `printf … > …` with `$out` substitution), not `sh -c`. The B-series
+    end-to-end gate (`shade e2e`) verifies a real build into `/shade/store`
+    and a second run as a pure lookup, on hardware. The interpreter is a
+    bringup vehicle only; it does not replace the native `BuildSandbox`, and
+    dep-closure scheduling stays deferred with it (only derivations whose
+    `dep.*` inputs are already realized build).
 - **Registration db** (seam B replacement): [`06 §5`](../shade-pkg/06-build.md#5-registration)
   reference scan + `/shade/db` records under the db lock.
 - **Fetching**: source-derivation realization

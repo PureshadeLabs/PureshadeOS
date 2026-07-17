@@ -14,10 +14,13 @@ prism, pointer, boot dependency).
 Current vehicle: the **host** `shade-gen` binary
 (`pkg/shade-gen/src/bin/shade-gen.rs`), alongside `shade-build` and `shade-gc`
 — the seed model of [`shade-pkg 09 §2`](../shade-pkg/09-bootstrap.md). The
-OROS `shade` binary stays a stub until argv is plumbed through the ABI
-(`pkg/shade/src/main.rs`); on OROS these verbs become `shade os rebuild`,
-`shade home rebuild`, `shade generations`, `shade rollback`
-([`07 §2`](../shade-pkg/07-cli.md#2-commands)).
+engine itself is `no_std + alloc` over the injected `StoreFs` seam (B1):
+every generation/profile/symlink/pointer operation goes through the backend
+(`HostFs` on the host, `OrosFs` over the raw Lythos syscalls), and the crate
+builds for the OROS target (`--features oros`). The OROS `shade` binary stays
+a stub until an OROS `EvalIo` exists (`pkg/shade/src/main.rs`); on OROS these
+verbs become `shade os rebuild`, `shade home rebuild`, `shade generations`,
+`shade rollback` ([`07 §2`](../shade-pkg/07-cli.md#2-commands)).
 
 ---
 
@@ -149,9 +152,11 @@ generation registers its roots like any other (§5).
 **Re-pin on system rollback.** The pointer's line 3 pins what boot activates
 (§4). A system-line rollback re-pins it to the rollback generation
 (`repin_generation`, lines 1–2 untouched) — otherwise the next boot would
-silently return to the pre-rollback configuration. `TODO(open):` fold this
-into 10 §2's pointer spec (today it says only `shade os rebuild` rewrites the
-pointer; re-pinning line 3 on rollback is an extension, flagged).
+silently return to the pre-rollback configuration. This is spec'd in
+[`10 §2`](../shade-pkg/10-system-prism.md#2-the-pointer-file): `shade rollback`
+rewrites pointer line 3, the single documented exception to "only `shade os
+rebuild` rewrites the pointer." Because the rollback generation is pre-built,
+boot's no-build invariant (§4, 10 §6) is preserved.
 
 ## 4. Boot activation — pre-built only
 
@@ -218,3 +223,22 @@ Deferred:
 - **lythd boot integration** — PID-1 calling the boot activation path and the
   stability-window flag (02 §6.2); on OROS, `boot_activate` is the function it
   calls.
+- **On-device activation** — **verified** on the B-series end-to-end gate
+  (the `shade e2e` bringup probe): generation create, `activate`, live-view
+  resolution through `current`, rollback flip, and `boot_activate`'s no-build
+  path all run under QEMU. Symlink create/read landed
+  (`SYS_SYMLINK`/`SYS_READLINK`), so the profile forest, `current`, and
+  `/lth/bin` wiring work on target; `OrosFs::symlink`/`read_link` are live.
+  The rebuild drivers (`os_rebuild`/`home_rebuild`) still stay behind the
+  `std` feature — they drive the executor's host-only run loop; the on-target
+  `shade` binary drives the seam pieces directly (eval → address → realize →
+  generation) with a bringup phase interpreter instead. One seam nuance: on a
+  backend whose `rename` is no-replace (OROS RFS), the `current` flip degrades
+  to unlink+rename — same fallback the store db uses for its records; the host
+  backend renames over the destination atomically.
+- **Cross-power-cycle persistence** — the `/shade/store` mount is RAM-backed
+  and volatile by design (content-addressed), so a real reboot loses the store
+  bits while `/shade/gen` (root volume) persists. `boot_activate`'s no-build
+  property is structural (it takes no evaluator/builder — a boot-time build is
+  unrepresentable) and is verified in-session; a persistent on-disk store is a
+  separate future step.

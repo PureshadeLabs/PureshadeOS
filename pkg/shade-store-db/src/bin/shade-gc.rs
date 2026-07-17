@@ -54,7 +54,7 @@ fn main() -> ExitCode {
             if positional.len() != 3 {
                 usage();
             }
-            match db.add_root(&positional[1], &PathBuf::from(&positional[2])) {
+            match db.add_root(&positional[1], &positional[2]) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("shade-gc: add-root: {e}");
@@ -77,7 +77,7 @@ fn main() -> ExitCode {
         "list-roots" => match db.list_roots() {
             Ok(roots) => {
                 for (name, target) in roots {
-                    println!("{name}\t{}", target.display());
+                    println!("{name}\t{target}");
                 }
                 ExitCode::SUCCESS
             }
@@ -93,7 +93,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_gc(db: &StoreDb, opts: GcOptions) -> ExitCode {
+fn run_gc(db: &StoreDb<shade_store::HostFs>, opts: GcOptions) -> ExitCode {
     match db.gc(&opts) {
         Ok(report) => {
             let verb = if report.dry_run { "would collect" } else { "collected" };

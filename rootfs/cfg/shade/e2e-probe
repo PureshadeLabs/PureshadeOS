@@ -1,0 +1,2 @@
+shade e2e bringup probe marker — lythd runs `shade e2e` at boot when this file exists.
+Remove to silence in production.

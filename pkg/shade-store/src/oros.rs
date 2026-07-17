@@ -9,9 +9,10 @@
 //!
 //! ABI gaps surface as [`FsError::Unsupported`]: there is no rmdir syscall
 //! (`SYS_UNLINK` deletes regular files only; errno table notes "future
-//! rmdir") and no symlink create/read syscalls. `remove_tree` therefore
-//! leaves empty temp dir skeletons for the store GC, and staged trees with
-//! symlinks cannot be realized on target until the ABI grows those calls.
+//! rmdir"), so `remove_tree` leaves empty temp dir skeletons for the store
+//! GC. Symlink create/read landed with `SYS_SYMLINK`/`SYS_READLINK` (the
+//! B-series end-to-end glue) — profile forests, `current` flips, and direct
+//! GC roots now work on target.
 //!
 //! Durability: `sync_dir` is a no-op — RFS2 commits transactionally inside
 //! the kernel (virtio-blk flush on commit); there is no userspace fsync
@@ -81,7 +82,13 @@ impl StoreFs for OrosFs {
         // mode is the u16 at offset 40; exec = any of 0o111. The kernel does
         // not yet enforce exec bits, but preserve what stat reports.
         let mode = u16::from_le_bytes(buf[40..42].try_into().unwrap());
-        Ok(NodeMeta { kind, exec: kind == NodeKind::File && mode & 0o111 != 0 })
+        // size is the u64 at offset 0.
+        let size = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        Ok(NodeMeta {
+            kind,
+            exec: kind == NodeKind::File && mode & 0o111 != 0,
+            len: if kind == NodeKind::File { size } else { 0 },
+        })
     }
 
     fn read_file(&mut self, path: &str) -> FsResult<Vec<u8>> {
@@ -133,6 +140,13 @@ impl StoreFs for OrosFs {
         Ok(())
     }
 
+    /// `SYS_CREATE` *is* atomic exclusive-create — same code path as
+    /// [`write_file`](StoreFs::write_file), stated separately because callers
+    /// of this method rely on the exactly-one-winner guarantee.
+    fn create_exclusive(&mut self, path: &str, data: &[u8]) -> FsResult<()> {
+        self.write_file(path, data, false)
+    }
+
     fn mkdir(&mut self, path: &str) -> FsResult<()> {
         check(unsafe { syscall2(nr::SYS_MKDIR, path.as_ptr() as u64, path.len() as u64) })?;
         Ok(())
@@ -160,6 +174,21 @@ impl StoreFs for OrosFs {
         Err(FsError::Unsupported)
     }
 
+    fn remove_store_path(&mut self, path: &str) -> FsResult<()> {
+        // SYS_STORE_REMOVE removes the whole store tree below the seal in one
+        // call (the kernel unlinks files, rmdirs dirs, frees blocks, and drops
+        // the in-kernel seal as the last lifecycle step). It is gated on the
+        // Filesystem capability (store-owner authority); ENOPERM here means the
+        // caller holds no such cap — the entry is not reclaimed and the sealed
+        // tree stays intact. There is no userspace rmdir/unlink path that could
+        // touch a sealed tree, so this is the only way GC frees a store path on
+        // target.
+        check(unsafe {
+            syscall2(nr::SYS_STORE_REMOVE, path.as_ptr() as u64, path.len() as u64)
+        })?;
+        Ok(())
+    }
+
     fn read_dir(&mut self, path: &str) -> FsResult<Vec<(String, NodeKind)>> {
         let mut buf = vec![0u8; MAX_DIR_ENTRIES * DIR_ENTRY_SIZE];
         let count = check(unsafe {
@@ -177,6 +206,14 @@ impl StoreFs for OrosFs {
             let name_len = s[5] as usize;
             let name = core::str::from_utf8(&s[8..8 + name_len])
                 .map_err(|_| FsError::Invalid)?;
+            // The kernel's SYS_READDIR yields "." and ".."; the StoreFs seam
+            // contract excludes them (HostFs/MemFs never do). Filtering here
+            // keeps callers — copy_tree, gc's store scan, generation-number
+            // parsing — backend-agnostic. Without it copy_tree would recurse
+            // into ".." and mkdir("..") → EINVAL.
+            if name == "." || name == ".." {
+                continue;
+            }
             let kind = match s[4] {
                 1 => NodeKind::File,
                 2 => NodeKind::Dir,
@@ -188,12 +225,37 @@ impl StoreFs for OrosFs {
         Ok(out)
     }
 
-    fn read_link(&mut self, _path: &str) -> FsResult<String> {
-        Err(FsError::Unsupported)
+    fn read_link(&mut self, path: &str) -> FsResult<String> {
+        // Targets ≤ 4096 (SYS_READLINK buf cap); a longer return than the
+        // buffer means truncation — treat as invalid rather than corrupt it.
+        let mut buf = vec![0u8; 4096];
+        let n = check(unsafe {
+            syscall4(
+                nr::SYS_READLINK,
+                path.as_ptr() as u64,
+                path.len() as u64,
+                buf.as_mut_ptr() as u64,
+                buf.len() as u64,
+            )
+        })? as usize;
+        if n > buf.len() {
+            return Err(FsError::Invalid);
+        }
+        buf.truncate(n);
+        String::from_utf8(buf).map_err(|_| FsError::Invalid)
     }
 
-    fn symlink(&mut self, _target: &str, _link: &str) -> FsResult<()> {
-        Err(FsError::Unsupported)
+    fn symlink(&mut self, target: &str, link: &str) -> FsResult<()> {
+        check(unsafe {
+            syscall4(
+                nr::SYS_SYMLINK,
+                target.as_ptr() as u64,
+                target.len() as u64,
+                link.as_ptr() as u64,
+                link.len() as u64,
+            )
+        })?;
+        Ok(())
     }
 
     fn unique_token(&mut self) -> u64 {

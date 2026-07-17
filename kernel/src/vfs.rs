@@ -34,7 +34,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rfs2::{BlockDevice, Error, IdentityTransform, Rfs2};
+use rfs2::{BlockDevice, Error, GcmTransform, IdentityTransform, Rfs2};
 use vfs_core::{
     FsBackend, FsError, InodeMeta, MountError, MountId, MountTable, RealizeGuard, RenameOutcome,
 };
@@ -179,9 +179,12 @@ pub struct DirEntry {
 const BLOCK_SIZE: usize = 4096;
 const SECTORS_PER_BLOCK: u64 = (BLOCK_SIZE / virtio_blk::SECTOR_SIZE) as u64; // 8
 
-/// virtio-blk behind `rfs2::BlockDevice` (the root volume's device).
+/// virtio-blk behind `rfs2::BlockDevice`. `dev_index` selects the physical
+/// device: [`virtio_blk::DEV_ROOT`] for the root volume, [`virtio_blk::DEV_STORE`]
+/// for the persistent `/shade/store` backing.
 pub struct VirtioDisk {
-    blocks: u64,
+    dev_index: usize,
+    blocks:    u64,
 }
 
 impl BlockDevice for VirtioDisk {
@@ -191,7 +194,7 @@ impl BlockDevice for VirtioDisk {
 
     fn read_block(&mut self, block: u64, buf: &mut [u8]) -> rfs2::Result<()> {
         debug_assert_eq!(buf.len(), BLOCK_SIZE);
-        if virtio_blk::read_sectors(block * SECTORS_PER_BLOCK, buf) {
+        if virtio_blk::read_sectors_dev(self.dev_index, block * SECTORS_PER_BLOCK, buf) {
             Ok(())
         } else {
             Err(Error::Io)
@@ -200,7 +203,7 @@ impl BlockDevice for VirtioDisk {
 
     fn write_block(&mut self, block: u64, buf: &[u8]) -> rfs2::Result<()> {
         debug_assert_eq!(buf.len(), BLOCK_SIZE);
-        if virtio_blk::write_sectors(block * SECTORS_PER_BLOCK, buf) {
+        if virtio_blk::write_sectors_dev(self.dev_index, block * SECTORS_PER_BLOCK, buf) {
             Ok(())
         } else {
             Err(Error::Io)
@@ -211,7 +214,7 @@ impl BlockDevice for VirtioDisk {
     /// VIRTIO_BLK_T_FLUSH when F_FLUSH was negotiated; correct no-op on a
     /// write-through device. The commit pointer-flip (COW-3) rides on this.
     fn flush(&mut self) -> rfs2::Result<()> {
-        if virtio_blk::flush() {
+        if virtio_blk::flush_dev(self.dev_index) {
             Ok(())
         } else {
             Err(Error::Io)
@@ -330,9 +333,12 @@ fn clock_ns() -> u64 {
 
 // ── Rfs2 behind vfs_core::FsBackend ───────────────────────────────────────────
 
-/// Adapter: any `Rfs2<D, IdentityTransform>` as a boxable `FsBackend`.
-struct Rfs2Backend<D: BlockDevice> {
-    fs: Rfs2<D, IdentityTransform>,
+/// Adapter: any `Rfs2<D, T>` as a boxable `FsBackend`, over any block transform
+/// — the plaintext [`IdentityTransform`] or the encrypting [`GcmTransform`]
+/// (doc 08). Both coerce to `Box<dyn FsBackend>`, so a plaintext and an
+/// encrypted volume mount through identical code.
+struct Rfs2Backend<D: BlockDevice, T: rfs2::BlockTransform> {
+    fs: Rfs2<D, T>,
 }
 
 fn meta_from(n: &rfs2::Inode, ino: u64) -> InodeMeta {
@@ -350,7 +356,7 @@ fn meta_from(n: &rfs2::Inode, ino: u64) -> InodeMeta {
     }
 }
 
-impl<D: BlockDevice> FsBackend for Rfs2Backend<D> {
+impl<D: BlockDevice, T: rfs2::BlockTransform> FsBackend for Rfs2Backend<D, T> {
     fn lookup(&mut self, path: &str) -> Result<u64, FsError> {
         self.fs.lookup(path).map_err(fs_err)
     }
@@ -361,6 +367,9 @@ impl<D: BlockDevice> FsBackend for Rfs2Backend<D> {
     }
     fn readlink(&mut self, path: &str) -> Result<String, FsError> {
         self.fs.readlink(path).map_err(fs_err)
+    }
+    fn symlink(&mut self, target: &str, link: &str) -> Result<u64, FsError> {
+        self.fs.symlink(target, link).map_err(fs_err)
     }
     fn read_at(&mut self, ino: u64, off: u64, out: &mut [u8]) -> Result<usize, FsError> {
         self.fs.read_at(ino, off, out).map_err(fs_err)
@@ -376,6 +385,9 @@ impl<D: BlockDevice> FsBackend for Rfs2Backend<D> {
     }
     fn unlink(&mut self, path: &str) -> Result<(), FsError> {
         self.fs.unlink(path).map_err(fs_err)
+    }
+    fn rmdir(&mut self, path: &str) -> Result<(), FsError> {
+        self.fs.rmdir(path).map_err(fs_err)
     }
     fn rename(&mut self, old: &str, new: &str) -> Result<(), FsError> {
         self.fs.rename(old, new).map_err(fs_err)
@@ -408,6 +420,16 @@ impl<D: BlockDevice> FsBackend for Rfs2Backend<D> {
 
 const MAX_FDS: usize = 64;
 const MAX_SYMLINK_HOPS: usize = 8;
+
+/// Set once the root volume mounts encrypted (doc 08). Drives the
+/// single-passphrase store: when the root is encrypted, the persistent store is
+/// too, keyed by a DEK persisted inside the (encrypted) root — one prompt
+/// unlocks both. A plaintext root ⇒ a plaintext store (backward compatible).
+static ROOT_ENCRYPTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Raw store DEK file inside the encrypted root (doc 08 §6, single passphrase).
+const STORE_KEY_PATH: &str = "/lth/system/store.key";
 
 #[derive(Clone)]
 struct OpenFile {
@@ -457,43 +479,243 @@ pub fn init() -> bool {
         return false;
     }
     let sectors = virtio_blk::capacity_sectors();
-    let disk = VirtioDisk { blocks: sectors / SECTORS_PER_BLOCK };
-    match Rfs2::mount(disk, IdentityTransform, clock_ns) {
+    let blocks = sectors / SECTORS_PER_BLOCK;
+
+    // Peek the plaintext static header (block 0) to see whether the root volume
+    // is encrypted (doc 08 §2: block 0 is always plaintext geometry + KDF
+    // params). This decides the block transform before we mount.
+    let mut disk = VirtioDisk { dev_index: virtio_blk::DEV_ROOT, blocks };
+    let mut hbuf = alloc::vec![0u8; BLOCK_SIZE];
+    let header = match disk.read_block(0, &mut hbuf) {
+        Ok(()) => rfs2::StaticHeader::decode(&hbuf).ok(),
+        Err(_) => None,
+    };
+    let encrypted = header
+        .as_ref()
+        .is_some_and(|h| h.feature_incompat & rfs2::layout::INCOMPAT_ENCRYPTION != 0);
+
+    let backend: Box<dyn FsBackend> = if encrypted {
+        // SAFETY of unwrap: `encrypted` implies the header decoded.
+        match mount_encrypted_root(blocks, header.as_ref().unwrap()) {
+            Some(b) => b,
+            None => {
+                crate::kprintln!("[vfs] root remains locked — no root filesystem mounted");
+                return false;
+            }
+        }
+    } else {
+        match Rfs2::mount(disk, IdentityTransform, clock_ns) {
+            Ok(fs) => {
+                log_root_mounted(&fs);
+                Box::new(Rfs2Backend { fs })
+            }
+            Err(e) => {
+                crate::kprintln!("[vfs] rfs2 root mount failed: {:?}", e);
+                return false;
+            }
+        }
+    };
+
+    // Remember the root's confidentiality for the store mount (single
+    // passphrase): only reached here after a successful mount of either kind.
+    ROOT_ENCRYPTED.store(encrypted, core::sync::atomic::Ordering::Relaxed);
+
+    let mut table = MountTable::new();
+    let root_id = match table.mount("/", backend) {
+        Ok(id) => id,
+        Err(_) => return false, // impossible: empty table accepts "/"
+    };
+    unsafe {
+        *STATE.0.get() = Some(Vfs {
+            table,
+            root_id,
+            fds: [const { None }; MAX_FDS],
+            guards: BTreeMap::new(),
+        })
+    };
+    true
+}
+
+/// Log a freshly-mounted root volume (either transform).
+fn log_root_mounted<D: BlockDevice, T: rfs2::BlockTransform>(fs: &Rfs2<D, T>) {
+    crate::kprintln!(
+        "[vfs] rfs2 root mounted: gen={} slot={} blocks={}/{} inodes={}{}{}",
+        fs.generation(),
+        if fs.current_slot() == 1 { "A" } else { "B" },
+        fs.superblock().block_count,
+        fs.header().total_blocks,
+        fs.superblock().inode_count,
+        if fs.is_read_only() { " RO" } else { "" },
+        if fs.block_count_mismatch() { " (block_count mismatch, resynced)" } else { "" },
+    );
+}
+
+/// Prompt for the passphrase and mount the encrypted root (doc 08 §6). Up to
+/// three attempts; a wrong passphrase is a loud retry, a post-unlock mount
+/// failure aborts. On success `ROOT_ENCRYPTED` is set, which drives the
+/// single-passphrase store: the store's own DEK is minted once and persisted
+/// inside this now-decrypted root (see [`obtain_store_dek`]), so the one prompt
+/// here unlocks both volumes without a second KDF.
+fn mount_encrypted_root(blocks: u64, header: &rfs2::StaticHeader) -> Option<Box<dyn FsBackend>> {
+    crate::kprintln!("[vfs] root volume is encrypted (AES-256-GCM) — unlock required");
+    for attempt in 1..=3u32 {
+        let mut pass = crate::kdf::read_passphrase("  root passphrase: ");
+        let dek = crate::kdf::open_volume_dek(&pass, header);
+        pass.iter_mut().for_each(|b| *b = 0); // zeroize passphrase bytes
+        match dek {
+            Some(mut dek) => {
+                let disk = VirtioDisk { dev_index: virtio_blk::DEV_ROOT, blocks };
+                let r = Rfs2::mount(disk, GcmTransform::new(&dek), clock_ns);
+                // The DEK now lives only inside the cipher's key schedule.
+                dek.iter_mut().for_each(|b| *b = 0);
+                match r {
+                    Ok(fs) => {
+                        log_root_mounted(&fs);
+                        return Some(Box::new(Rfs2Backend { fs }));
+                    }
+                    Err(e) => {
+                        crate::kprintln!(
+                            "[vfs] encrypted root mount failed after unlock: {:?} \
+                             (header/superblock inconsistent)",
+                            e
+                        );
+                        return None;
+                    }
+                }
+            }
+            None => {
+                crate::kprintln!("[vfs] wrong passphrase or tampered header ({attempt}/3)");
+            }
+        }
+    }
+    None
+}
+
+// ── Encrypted store (doc 08 §6, single passphrase) ───────────────────────────
+
+/// Create-or-overwrite a small file in the root volume and commit. Persists the
+/// store key into the (already-mounted) encrypted root. `false` on any error.
+fn write_root_file(path: &str, data: &[u8]) -> bool {
+    let Some(v) = state() else { return false };
+    let target = match resolve_parent(v, path) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let (mount, _, rel) = match v.table.resolve_full(&target) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let Some(be) = v.table.backend_mut(mount) else { return false };
+    let ino = match be.create(&rel) {
+        Ok(i) => i,
+        Err(FsError::Exists) => match be.lookup(&rel) {
+            Ok(i) => i,
+            Err(_) => return false,
+        },
+        Err(_) => return false,
+    };
+    if be.write_at(ino, 0, data).is_err() {
+        return false;
+    }
+    be.commit().is_ok()
+}
+
+/// The store DEK for an encrypted root. Reads the persisted key from the root;
+/// if absent AND the store disk is genuinely blank, mints a fresh key (RDRAND)
+/// and persists it. Refuses (loud) if the store is already formatted but its
+/// key is missing — a lost key is never a silent reformat; sealed content stays
+/// sealed.
+fn obtain_store_dek(blocks: u64) -> Result<[u8; 32], i64> {
+    if let Some(k) = load_file(STORE_KEY_PATH) {
+        if k.len() != 32 {
+            crate::kprintln!("[vfs] {STORE_KEY_PATH} malformed ({} bytes)", k.len());
+            return Err(EIO);
+        }
+        let mut dek = [0u8; 32];
+        dek.copy_from_slice(&k);
+        return Ok(dek);
+    }
+    // No key in root. Safe to mint one only if the store is genuinely blank.
+    let mut disk = VirtioDisk { dev_index: virtio_blk::DEV_STORE, blocks };
+    let mut hbuf = alloc::vec![0u8; BLOCK_SIZE];
+    let formatted =
+        disk.read_block(0, &mut hbuf).is_ok() && rfs2::StaticHeader::decode(&hbuf).is_ok();
+    if formatted {
+        crate::kprintln!(
+            "[vfs] store is formatted but its key is missing from the encrypted root — \
+             refusing (no silent reformat, sealed content preserved)"
+        );
+        return Err(EIO);
+    }
+    let dek = crate::kdf::rand_key().ok_or_else(|| {
+        crate::kprintln!("[vfs] no hardware RNG (RDRAND) available to mint a store key");
+        EIO
+    })?;
+    if !write_root_file(STORE_KEY_PATH, &dek) {
+        crate::kprintln!("[vfs] failed to persist {STORE_KEY_PATH} to the encrypted root");
+        return Err(EIO);
+    }
+    crate::kprintln!("[vfs] minted a fresh store key, persisted to the encrypted root");
+    Ok(dek)
+}
+
+/// Mount the persistent store, formatting it once if blank. Generic over the
+/// transform so a plaintext store (`IdentityTransform`) and an encrypted one
+/// (`GcmTransform`) share this exact code (doc 08 "one implementation, two
+/// mounts"). `make_xform` yields a fresh transform per (re)mount/format.
+fn mount_or_format_store<T, F>(blocks: u64, make_xform: F) -> Result<Box<dyn FsBackend>, i64>
+where
+    T: rfs2::BlockTransform + 'static,
+    F: Fn() -> T,
+{
+    let make_disk = || VirtioDisk { dev_index: virtio_blk::DEV_STORE, blocks };
+    match Rfs2::mount(make_disk(), make_xform(), clock_ns) {
         Ok(fs) => {
             crate::kprintln!(
-                "[vfs] rfs2 root mounted: gen={} slot={} blocks={}/{} inodes={}{}{}",
+                "[vfs] rfs2 persistent store mounted (gen={} slot={} blocks={})",
                 fs.generation(),
                 if fs.current_slot() == 1 { "A" } else { "B" },
-                fs.superblock().block_count,
-                fs.header().total_blocks,
-                fs.superblock().inode_count,
-                if fs.is_read_only() { " RO" } else { "" },
-                if fs.block_count_mismatch() { " (block_count mismatch, resynced)" } else { "" },
+                blocks,
             );
-            let mut table = MountTable::new();
-            let root_id = match table.mount("/", Box::new(Rfs2Backend { fs })) {
-                Ok(id) => id,
-                Err(_) => return false, // impossible: empty table accepts "/"
+            Ok(Box::new(Rfs2Backend { fs }))
+        }
+        Err(Error::NoSuperblock) | Err(Error::BadHeader) => {
+            crate::kprintln!("[vfs] rfs2 persistent store: blank disk — formatting once");
+            let mut dev = make_disk();
+            // feature_incompat is taken from the transform: GcmTransform stamps
+            // INCOMPAT_ENCRYPTION, IdentityTransform stamps 0. The store DEK is
+            // sourced from the root, so no header wrap fields are needed.
+            let opts = rfs2::MkfsOptions {
+                uuid: [0u8; 16],
+                label: "shade-store",
+                now: clock_ns(),
+                crypto: None,
             };
-            unsafe {
-                *STATE.0.get() = Some(Vfs {
-                    table,
-                    root_id,
-                    fds: [const { None }; MAX_FDS],
-                    guards: BTreeMap::new(),
-                })
-            };
-            true
+            if rfs2::mkfs(&mut dev, &make_xform(), &opts).is_err() {
+                return Err(EIO);
+            }
+            match Rfs2::mount(make_disk(), make_xform(), clock_ns) {
+                Ok(fs) => Ok(Box::new(Rfs2Backend { fs })),
+                Err(e) => {
+                    crate::kprintln!("[vfs] rfs2 store mount-after-format failed: {:?}", e);
+                    Err(EIO)
+                }
+            }
         }
         Err(e) => {
-            crate::kprintln!("[vfs] rfs2 root mount failed: {:?}", e);
-            false
+            crate::kprintln!("[vfs] rfs2 persistent store mount failed: {:?}", e);
+            Err(EIO)
         }
     }
 }
 
 /// SYS_MOUNT backend selector values (ABI: abi/lythos-abi/src/syscall.rs).
+/// Volatile fresh RAM-backed volume, formatted at mount time.
 pub const MOUNT_SRC_RFS2_RAM: u64 = 0;
+/// Persistent RFS V2 on the secondary virtio-blk device (`store.img`):
+/// mounted if already formatted, formatted-then-mounted on first ever boot.
+/// Content survives a power cycle.
+pub const MOUNT_SRC_RFS2_BLK: u64 = 1;
 /// SYS_MOUNT flags (ABI): attach the realize-guard (read-only-after-realize
 /// store semantics) to this mount.
 pub const MOUNT_STORE: u64 = 1 << 0;
@@ -501,8 +723,9 @@ pub const MOUNT_STORE: u64 = 1 << 0;
 /// Mount a new backend instance at `at`. Capability enforcement happens in
 /// the SYS_MOUNT handler (syscall boundary), not here.
 ///
-/// `source` must be `MOUNT_SRC_RFS2_RAM`; `flags` may set `MOUNT_STORE` to
-/// attach a [`RealizeGuard`] (read-only-after-realize, design §4.2).
+/// `source` is `MOUNT_SRC_RFS2_RAM` (volatile) or `MOUNT_SRC_RFS2_BLK`
+/// (persistent, on the secondary virtio-blk device); `flags` may set
+/// `MOUNT_STORE` to attach a [`RealizeGuard`] (read-only-after-realize).
 pub fn mount(at: &str, source: u64, flags: u64) -> i64 {
     let v = match state() {
         Some(v) => v,
@@ -511,41 +734,104 @@ pub fn mount(at: &str, source: u64, flags: u64) -> i64 {
     if flags & !MOUNT_STORE != 0 {
         return EINVAL;
     }
-    if source != MOUNT_SRC_RFS2_RAM {
-        return EINVAL;
-    }
+    let store = flags & MOUNT_STORE != 0;
 
-    // Reject early (cheaply) before allocating 16 MiB of frames.
+    // Reject early (cheaply) before building the backend.
     if v.table.is_mounted_at(at) {
         return EMOUNTED;
     }
 
-    let Some(mut dev) = RamDisk::new(RAM_DISK_BLOCKS) else {
-        return ENOSPC;
-    };
-    let opts = rfs2::MkfsOptions { uuid: [0u8; 16], label: "ram", now: clock_ns() };
-    if rfs2::mkfs(&mut dev, &IdentityTransform, &opts).is_err() {
-        return EIO;
-    }
-    let fs = match Rfs2::mount(dev, IdentityTransform, clock_ns) {
-        Ok(fs) => fs,
-        Err(e) => {
-            crate::kprintln!("[vfs] ram rfs2 mount failed: {:?}", e);
-            return EIO;
-        }
-    };
-    match v.table.mount(at, Box::new(Rfs2Backend { fs })) {
-        Ok(id) => {
-            let store = flags & MOUNT_STORE != 0;
-            if store {
-                v.guards.insert(id, RealizeGuard::new());
+    // Build the RFS2 backend for the requested source.
+    let backend: Box<dyn FsBackend> = match source {
+        MOUNT_SRC_RFS2_RAM => {
+            let Some(mut dev) = RamDisk::new(RAM_DISK_BLOCKS) else {
+                return ENOSPC;
+            };
+            let opts =
+                rfs2::MkfsOptions { uuid: [0u8; 16], label: "ram", now: clock_ns(), crypto: None };
+            if rfs2::mkfs(&mut dev, &IdentityTransform, &opts).is_err() {
+                return EIO;
             }
-            crate::kprintln!(
-                "[vfs] rfs2 ram volume mounted at {} ({} blocks{})",
-                at,
-                RAM_DISK_BLOCKS,
-                if store { ", store semantics" } else { "" },
-            );
+            match Rfs2::mount(dev, IdentityTransform, clock_ns) {
+                Ok(fs) => Box::new(Rfs2Backend { fs }),
+                Err(e) => {
+                    crate::kprintln!("[vfs] ram rfs2 mount failed: {:?}", e);
+                    return EIO;
+                }
+            }
+        }
+        MOUNT_SRC_RFS2_BLK => {
+            // Persistent backing: the secondary virtio-blk device. Must be
+            // present (probed at boot as instance 1).
+            if !virtio_blk::is_present_dev(virtio_blk::DEV_STORE) {
+                crate::kprintln!("[vfs] rfs2 blk mount: no persistent store device (instance 1)");
+                return EIO;
+            }
+            let sectors = virtio_blk::capacity_sectors_dev(virtio_blk::DEV_STORE);
+            let blocks = sectors / SECTORS_PER_BLOCK;
+            if blocks == 0 {
+                return EIO;
+            }
+            // Single-passphrase FDE: when the root is encrypted the store is too,
+            // keyed by a DEK persisted inside the encrypted root (one prompt
+            // unlocks both). A plaintext root ⇒ a plaintext store. VirtioDisk is
+            // cheap and stateless; all volume state lives on the disk.
+            if ROOT_ENCRYPTED.load(core::sync::atomic::Ordering::Relaxed) {
+                let mut dek = match obtain_store_dek(blocks) {
+                    Ok(d) => d,
+                    Err(e) => return e,
+                };
+                crate::kprintln!("[vfs] store volume is encrypted (AES-256-GCM, key from root)");
+                let r = mount_or_format_store(blocks, || GcmTransform::new(&dek));
+                dek.iter_mut().for_each(|b| *b = 0); // DEK now only in cipher schedules
+                match r {
+                    Ok(b) => b,
+                    Err(e) => return e,
+                }
+            } else {
+                match mount_or_format_store(blocks, || IdentityTransform) {
+                    Ok(b) => b,
+                    Err(e) => return e,
+                }
+            }
+        }
+        _ => return EINVAL,
+    };
+
+    match v.table.mount(at, backend) {
+        Ok(id) => {
+            if store {
+                // Reconstruct the realize-seal set from the persisted store
+                // contents. CRITICAL for MOUNT_SRC_RFS2_BLK: the seal set lives
+                // only in kernel RAM, so a cold boot starts empty while the disk
+                // still holds sealed content — without this, that content would
+                // be writable again, breaking the "seal is absolute" invariant
+                // across a power cycle. Granularity matches `seal()` exactly:
+                // one top-level store name per sealed entry, so post-reboot the
+                // NoOp/EROFS rename decisions match the pre-reboot ones. Temp
+                // dirs (`.tmp-*`) and `.`/`..` are never sealed — skipped by the
+                // dot prefix. Harmless on a fresh RAM store (empty readdir).
+                let mut guard = RealizeGuard::new();
+                if let Some(be) = v.table.backend_mut(id) {
+                    if let Ok(entries) = be.readdir("/") {
+                        for e in entries {
+                            if e.file_type == FT_DIR && !e.name.starts_with('.') {
+                                guard.seal(&e.name);
+                            }
+                        }
+                    }
+                }
+                let reconstructed = guard.sealed_count();
+                v.guards.insert(id, guard);
+                crate::kprintln!(
+                    "[vfs] store mount at {} — {} sealed entr{} reconstructed",
+                    at,
+                    reconstructed,
+                    if reconstructed == 1 { "y" } else { "ies" },
+                );
+            } else {
+                crate::kprintln!("[vfs] rfs2 volume mounted at {}", at);
+            }
             0
         }
         Err(e) => errno_mount(e),
@@ -829,6 +1115,14 @@ pub fn mkdir(path: &[u8], _uid: u32, _gid: u32) -> i64 {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
+    // A path that resolves to a mount root (backend-relative "/") is the mount
+    // point itself — it always exists. The backend's mkdir would reject "/"
+    // with Invalid (no parent to split), so report the true condition: EEXIST.
+    // `mkdir -p` over a store root (`create_dir_all` in shade-store) relies on
+    // this — it tolerates Exists, not Invalid.
+    if rel == "/" {
+        return EEXIST;
+    }
     if let Some(g) = v.guards.get(&mount) {
         if let Err(e) = g.check_mutate(&rel) {
             return errno_fs(e);
@@ -878,6 +1172,201 @@ pub fn unlink(path: &[u8]) -> i64 {
     }
     match be.commit() {
         Ok(()) => 0,
+        Err(e) => errno_fs(e),
+    }
+}
+
+/// Recursively remove the subtree at backend-relative `path` on `be`: unlink
+/// every file/symlink, rmdir every directory, depth-first. Operates directly
+/// on the backend — it never routes through the RealizeGuard, so it removes a
+/// sealed store tree BELOW the seal (it never opens a sealed file for write).
+/// `is_dir` says whether `path` itself is a directory (from the caller's stat /
+/// the parent's readdir file_type — never re-stat'd here, to avoid following a
+/// symlink). `NotFound` at any node is treated as already-gone (idempotent).
+fn remove_tree_rec(be: &mut dyn FsBackend, path: &str, is_dir: bool) -> Result<(), FsError> {
+    if is_dir {
+        let entries = match be.readdir(path) {
+            Ok(e) => e,
+            Err(FsError::NotFound) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        for e in entries {
+            if e.name == "." || e.name == ".." {
+                continue;
+            }
+            let child = if path.ends_with('/') {
+                alloc::format!("{path}{}", e.name)
+            } else {
+                alloc::format!("{path}/{}", e.name)
+            };
+            // file_type: 2 = dir (rfs2 FT_DIR); everything else (file, symlink)
+            // is unlinked, so a symlink is removed as a link, never followed.
+            remove_tree_rec(be, &child, e.file_type == FT_DIR)?;
+        }
+        match be.rmdir(path) {
+            Ok(()) | Err(FsError::NotFound) => Ok(()),
+            Err(e) => Err(e),
+        }
+    } else {
+        match be.unlink(path) {
+            Ok(()) | Err(FsError::NotFound) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Remove the whole unreferenced store entry that `path` names (SYS_STORE_REMOVE
+/// — the sole store-reclamation primitive after SYS_UNSEAL's removal). `path` is
+/// a full path into a realize-guarded (store) mount; its single backend-relative
+/// component is the top-level store name. The entire tree is deleted (files
+/// unlinked, dirs rmdir'd) and its blocks freed via RFS2 free-space — operating
+/// BELOW the seal (the seal is never lifted in place; sealed content is never
+/// made writable). The name's in-kernel seal is then dropped as the last step of
+/// the lifecycle removal. Content-addressing keeps this safe: a later realize of
+/// the same digest reproduces byte-identical content.
+///
+/// Returns 0 on success (idempotent — already-gone is success), `EINVAL` if the
+/// covering mount is not a store mount or `path` is not a single top-level entry
+/// (whole-path removal only — never a nested delete inside a sealed tree), or the
+/// usual mount / fs errnos. Capability enforcement (Filesystem+WRITE) is on the
+/// syscall boundary, not here.
+///
+/// Atomicity vs realize (first-writer-wins, not timing): the kernel is
+/// single-threaded and in-kernel FS paths are not preempted, so this whole
+/// removal (delete tree + commit + forget seal) and a concurrent realize of the
+/// same digest (rename + seal) are each an indivisible syscall — they never
+/// interleave. A realize that runs after this removal simply recreates the
+/// entry and re-seals it (content-addressed, byte-identical); one that ran
+/// before it sealed the name this removal then deletes. There is no window in
+/// which a half-removed tree is observable or in which a realize sees a
+/// partially-forgotten seal.
+pub fn store_remove_tree(path: &[u8]) -> i64 {
+    let v = match state() {
+        Some(v) => v,
+        None => return ENOMNT,
+    };
+    let p = match path_str(path) {
+        Some(s) => s,
+        None => return EINVAL,
+    };
+    let (mount, _, rel) = match v.table.resolve_full(p) {
+        Ok(t) => t,
+        Err(e) => return errno_mount(e),
+    };
+    // Must be a store (realize-guarded) mount — nothing to reclaim elsewhere.
+    if !v.guards.contains_key(&mount) {
+        return EINVAL;
+    }
+    let Some(name) = vfs_core::realize::top_component(&rel) else {
+        return EINVAL; // the mount root itself is never a store entry
+    };
+    // Whole-path removal only: `rel` must be exactly one component. A nested
+    // path would be a partial delete inside a sealed tree — forbidden.
+    if rel.split('/').filter(|c| !c.is_empty()).count() != 1 {
+        return EINVAL;
+    }
+    let name = name.to_string();
+
+    let Some(be) = v.table.backend_mut(mount) else {
+        return ENOMNT;
+    };
+    // Determine whether the top-level entry is a directory. Store tops are a
+    // directory (an output tree) or a regular file (a `.drv`) — never a symlink,
+    // so this stat cannot follow one. NotFound ⇒ already reclaimed: success.
+    let is_dir = match be.stat(&rel) {
+        Ok(m) => m.is_dir,
+        Err(FsError::NotFound) => {
+            // Nothing on disk; still drop any stale seal and report success.
+            if let Some(g) = v.guards.get_mut(&mount) {
+                g.forget(&name);
+            }
+            return 0;
+        }
+        Err(e) => return errno_fs(e),
+    };
+    if let Err(e) = remove_tree_rec(be, &rel, is_dir) {
+        return errno_fs(e);
+    }
+    if let Err(e) = be.commit() {
+        return errno_fs(e);
+    }
+    // Lifecycle-forget the seal: the path no longer exists. This is not an
+    // in-place unseal — sealed content was never made writable.
+    if let Some(g) = v.guards.get_mut(&mount) {
+        g.forget(&name);
+    }
+    0
+}
+
+/// Create a symlink at `link_path` storing `target` verbatim (never resolved
+/// — dangling links are legal; `target` crossing a mount boundary resolves at
+/// *follow* time through the mount table, not here). The final component of
+/// `link_path` is not followed; on a realize-guarded (store) mount, creating
+/// a link inside a sealed entry is EROFS.
+pub fn symlink(target: &[u8], link_path: &[u8]) -> i64 {
+    let v = match state() {
+        Some(v) => v,
+        None => return ENOMNT,
+    };
+    let (t, p) = match (path_str(target), path_str(link_path)) {
+        (Some(t), Some(p)) => (t, p),
+        _ => return EINVAL,
+    };
+    if t.is_empty() {
+        return EINVAL;
+    }
+    let link_r = match resolve_parent(v, p) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let (mount, _, rel) = match v.table.resolve_full(&link_r) {
+        Ok(t) => t,
+        Err(e) => return errno_mount(e),
+    };
+    if let Some(g) = v.guards.get(&mount) {
+        if let Err(e) = g.check_mutate(&rel) {
+            return errno_fs(e);
+        }
+    }
+    let Some(be) = v.table.backend_mut(mount) else {
+        return ENOMNT;
+    };
+    if let Err(e) = be.symlink(t, &rel) {
+        return errno_fs(e);
+    }
+    match be.commit() {
+        Ok(()) => 0,
+        Err(e) => errno_fs(e),
+    }
+}
+
+/// Read a symlink's target into `out`. The final component is not followed
+/// (it must BE the symlink; EINVAL otherwise). Returns the target length —
+/// truncated to `out.len()` bytes copied if the buffer is short (caller
+/// detects truncation by `ret > out.len()`).
+pub fn readlink(path: &[u8], out: &mut [u8]) -> i64 {
+    let v = match state() {
+        Some(v) => v,
+        None => return ENOMNT,
+    };
+    let p = match path_str(path) {
+        Some(s) => s,
+        None => return EINVAL,
+    };
+    let target = match resolve_parent(v, p) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let (be, rel) = match v.table.resolve(&target) {
+        Ok(t) => t,
+        Err(e) => return errno_mount(e),
+    };
+    match be.readlink(&rel) {
+        Ok(t) => {
+            let n = t.len().min(out.len());
+            out[..n].copy_from_slice(&t.as_bytes()[..n]);
+            t.len() as i64
+        }
         Err(e) => errno_fs(e),
     }
 }

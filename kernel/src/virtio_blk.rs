@@ -84,8 +84,13 @@ unsafe extern "C" { fn virtio_blk_isr_stub(); }
 /// independently and acts on completion, so no state needs to be set here.
 #[unsafe(no_mangle)]
 pub extern "C" fn virtio_blk_irq_handler() {
-    if let Some(dev) = dev_ref() {
-        let _ = unsafe { inb(dev.io_base + REG_ISR_STATUS) };
+    // Both devices route to this same vector; ack ISR_STATUS on each present
+    // one (a read clears the device interrupt). Which device actually raised
+    // it does not matter — the submit() poll loop reads its own status byte.
+    for index in 0..MAX_BLK_DEVS {
+        if let Some(dev) = dev_ref(index) {
+            let _ = unsafe { inb(dev.io_base + REG_ISR_STATUS) };
+        }
     }
     crate::apic::eoi();
 }
@@ -257,28 +262,37 @@ struct VirtioBlkDev {
 
 // ── Global driver state wrapper ───────────────────────────────────────────────
 
-/// Interior-mutable container for the global driver instance.
+/// Number of virtio-blk devices the driver tracks: index 0 is the root volume
+/// (`disk.img`), index 1 is the persistent `/shade/store` backing (`store.img`).
+pub const MAX_BLK_DEVS: usize = 2;
+
+/// Device index of the root volume.
+pub const DEV_ROOT: usize = 0;
+/// Device index of the persistent store volume (secondary virtio-blk device).
+pub const DEV_STORE: usize = 1;
+
+/// Interior-mutable container for the global driver instances.
 ///
 /// This kernel is single-threaded; no locking is required.  `UnsafeCell`
 /// avoids the Rust 2024 `static_mut_refs` lint while keeping the semantics
 /// of a plain `static mut`.
-struct DevState(core::cell::UnsafeCell<Option<VirtioBlkDev>>);
+struct DevState(core::cell::UnsafeCell<[Option<VirtioBlkDev>; MAX_BLK_DEVS]>);
 
 // SAFETY: single-threaded kernel — no concurrent access.
 unsafe impl Sync for DevState {}
 
-static DEV: DevState = DevState(core::cell::UnsafeCell::new(None));
+static DEV: DevState = DevState(core::cell::UnsafeCell::new([const { None }; MAX_BLK_DEVS]));
 
-/// Borrow the device mutably.
+/// Borrow device `index` mutably.
 #[inline]
-fn dev_mut() -> Option<&'static mut VirtioBlkDev> {
-    unsafe { (*DEV.0.get()).as_mut() }
+fn dev_mut(index: usize) -> Option<&'static mut VirtioBlkDev> {
+    unsafe { (*DEV.0.get()).get_mut(index).and_then(|s| s.as_mut()) }
 }
 
-/// Borrow the device immutably.
+/// Borrow device `index` immutably.
 #[inline]
-fn dev_ref() -> Option<&'static VirtioBlkDev> {
-    unsafe { (*DEV.0.get()).as_ref() }
+fn dev_ref(index: usize) -> Option<&'static VirtioBlkDev> {
+    unsafe { (*DEV.0.get()).get(index).and_then(|s| s.as_ref()) }
 }
 
 // ── Virtqueue descriptor write ────────────────────────────────────────────────
@@ -419,16 +433,29 @@ impl VirtioBlkDev {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Initialise the VirtIO block driver.
-///
-/// Scans PCI bus 0 for a VirtIO block device (0x1AF4:0x1001), initialises
-/// the device and virtqueue, and stores the driver state globally.
-///
-/// Returns `true` if a device was found and successfully initialised.
+/// Initialise the root VirtIO block device (instance 0 → slot [`DEV_ROOT`]).
 ///
 /// Must be called after `vmm::init()`, `heap::init()`, and `ioapic::init()`.
 pub fn init() -> bool {
-    let pci = match crate::pci::find_device(VIRTIO_VENDOR, VIRTIO_BLK_DEV) {
+    init_nth(DEV_ROOT)
+}
+
+/// Initialise the persistent store VirtIO block device (instance 1 → slot
+/// [`DEV_STORE`], the secondary disk, e.g. `store.img`). Returns `false` if
+/// no second virtio-blk device is attached (system boots without a persistent
+/// store; `/shade/store` mount will fail loud in lythd).
+pub fn init_store() -> bool {
+    init_nth(DEV_STORE)
+}
+
+/// Initialise VirtIO block device instance `index`.
+///
+/// Scans PCI bus 0 for the `index`+1'th VirtIO block device (0x1AF4:0x1001),
+/// initialises the device and virtqueue, and stores the driver state in slot
+/// `index`. Returns `true` if a device was found and successfully initialised.
+fn init_nth(index: usize) -> bool {
+    if index >= MAX_BLK_DEVS { return false; }
+    let pci = match crate::pci::find_nth_device(VIRTIO_VENDOR, VIRTIO_BLK_DEV, index) {
         Some(d) => d,
         None    => return false,
     };
@@ -527,15 +554,17 @@ pub fn init() -> bool {
         return false;
     }
     crate::kprintln!(
-        "[virtio-blk] device status after DRIVER_OK={:#x} features={:#x} flush={}",
+        "[virtio-blk] dev{} status after DRIVER_OK={:#x} features={:#x} flush={} sectors={}",
+        index,
         dev_status,
         features,
         if has_flush { "T_FLUSH" } else { "write-through (F_FLUSH not offered)" },
+        capacity,
     );
 
     // ── Store global state ────────────────────────────────────────────────────
     unsafe {
-        *DEV.0.get() = Some(VirtioBlkDev {
+        (*DEV.0.get())[index] = Some(VirtioBlkDev {
             io_base: io,
             q_size,
             capacity,
@@ -571,9 +600,14 @@ pub fn init() -> bool {
 /// `buf.len()` must be a non-zero multiple of `SECTOR_SIZE` no larger than
 /// 4096.  Returns `true` on success.
 pub fn read_sectors(sector: u64, buf: &mut [u8]) -> bool {
+    read_sectors_dev(DEV_ROOT, sector, buf)
+}
+
+/// Like [`read_sectors`], on virtio-blk device `index` (e.g. [`DEV_STORE`]).
+pub fn read_sectors_dev(index: usize, sector: u64, buf: &mut [u8]) -> bool {
     let count = (buf.len() / SECTOR_SIZE) as u32;
     if count == 0 || buf.len() > 4096 || buf.len() % SECTOR_SIZE != 0 { return false; }
-    let dev = match dev_mut() {
+    let dev = match dev_mut(index) {
         Some(d) => d,
         None    => return false,
     };
@@ -595,9 +629,14 @@ pub fn read_sectors(sector: u64, buf: &mut [u8]) -> bool {
 /// `buf.len()` must be a non-zero multiple of `SECTOR_SIZE` no larger than
 /// 4096.  Returns `true` on success.
 pub fn write_sectors(sector: u64, buf: &[u8]) -> bool {
+    write_sectors_dev(DEV_ROOT, sector, buf)
+}
+
+/// Like [`write_sectors`], on virtio-blk device `index` (e.g. [`DEV_STORE`]).
+pub fn write_sectors_dev(index: usize, sector: u64, buf: &[u8]) -> bool {
     let count = (buf.len() / SECTOR_SIZE) as u32;
     if count == 0 || buf.len() > 4096 || buf.len() % SECTOR_SIZE != 0 { return false; }
-    let dev = match dev_mut() {
+    let dev = match dev_mut(index) {
         Some(d) => d,
         None    => return false,
     };
@@ -620,7 +659,12 @@ pub fn write_sectors(sector: u64, buf: &[u8]) -> bool {
 /// (completed writes are already durable per the virtio spec) and this is a
 /// correct no-op. The RFS V2 commit barrier (COW-3) rides on this call.
 pub fn flush() -> bool {
-    let dev = match dev_mut() {
+    flush_dev(DEV_ROOT)
+}
+
+/// Like [`flush`], on virtio-blk device `index` (e.g. [`DEV_STORE`]).
+pub fn flush_dev(index: usize) -> bool {
+    let dev = match dev_mut(index) {
         Some(d) => d,
         None    => return false,
     };
@@ -644,10 +688,20 @@ pub fn write_sector(sector: u64, buf: &[u8; SECTOR_SIZE]) -> bool {
 
 /// Return the disk capacity in 512-byte sectors, or 0 if no device.
 pub fn capacity_sectors() -> u64 {
-    dev_ref().map_or(0, |d| d.capacity)
+    capacity_sectors_dev(DEV_ROOT)
 }
 
-/// Return `true` if a VirtIO block device was found and initialised.
+/// Like [`capacity_sectors`], for device `index`.
+pub fn capacity_sectors_dev(index: usize) -> u64 {
+    dev_ref(index).map_or(0, |d| d.capacity)
+}
+
+/// Return `true` if the root VirtIO block device was found and initialised.
 pub fn is_present() -> bool {
-    dev_ref().is_some()
+    is_present_dev(DEV_ROOT)
+}
+
+/// Like [`is_present`], for device `index`.
+pub fn is_present_dev(index: usize) -> bool {
+    dev_ref(index).is_some()
 }

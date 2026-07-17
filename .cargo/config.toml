@@ -2,4 +2,15 @@
 rustflags = ["-C", "link-arg=-Tuserspace/lib/lythos-rt/userspace.ld"]
 
 [target.x86_64-lythos]
-rustflags = ["-C", "link-arg=-Tkernel/boot/linker/x86_64.ld"]
+# The kernel target disables SSE (`-mmx,-sse,+soft-float`), so the RustCrypto
+# AES-NI/CLMUL intrinsic backends (aes, polyval/ghash — pulled in by rfs2's
+# AES-256-GCM encryption, doc 08) fail LLVM legalization ("cannot split the
+# result of this operator"). Force their pure-integer software backends, which
+# compile with soft-float and avoid enabling SSE in the kernel (that would need
+# XMM save/restore across every interrupt). `make kernel` builds from the
+# workspace root, so these must live here, not in kernel/.cargo/config.toml.
+rustflags = [
+    "-C", "link-arg=-Tkernel/boot/linker/x86_64.ld",
+    "--cfg", "aes_force_soft",
+    "--cfg", "polyval_force_soft",
+]

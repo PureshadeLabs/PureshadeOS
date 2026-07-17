@@ -4,6 +4,15 @@
 // Pass it to QEMU with:
 //   -drive file=disk.img,format=raw,if=none,id=hd0
 //   -device virtio-blk-pci,drive=hd0
+//
+// SCOPE: this script owns ONLY the root disk.img (rebuilt from rootfs/ every
+// build). It must NEVER create, truncate, overwrite, or otherwise touch
+// store.img — the persistent /shade/store backing. That image is user data
+// whose whole purpose is surviving across boots AND rebuilds; regenerating it
+// here would silently erase the store and break cold-boot persistence (a
+// persistence lie). store.img is created once by the QEMU run wiring
+// (run-limine.sh / the Makefile $(STORE_IMG) rule) and formatted lazily by the
+// kernel at the first store mount. Do not add it below.
 
 fn main() {
     // CARGO_MANIFEST_DIR = kernel/; workspace root is one level up.
@@ -16,6 +25,21 @@ fn main() {
     let mkrfs2_bin = workspace.join("tools/mkrfs2/mkrfs2");
     let rootfs_dir = workspace.join("rootfs");
     let disk_img   = workspace.join("disk.img");
+
+    // Encrypted-root flow (doc 08): when RFS2_PASSPHRASE is set the root disk is
+    // an AES-256-GCM volume created out-of-band by `make disk-enc` (the plaintext
+    // mkrfs2 here cannot encrypt). Leave the existing encrypted disk.img
+    // untouched — regenerating it plaintext would destroy the encrypted root and
+    // strip confidentiality. store.img is never touched in either mode.
+    println!("cargo:rerun-if-env-changed=RFS2_PASSPHRASE");
+    if std::env::var_os("RFS2_PASSPHRASE").is_some() {
+        if disk_img.exists() {
+            println!("cargo:warning=RFS2_PASSPHRASE set — preserving encrypted disk.img (build.rs will not regenerate it)");
+        } else {
+            println!("cargo:warning=RFS2_PASSPHRASE set but disk.img is absent — run `make disk-enc` to create the encrypted root");
+        }
+        return;
+    }
 
     // Build mkrfs2 using its own Makefile (rustc directly — avoids the
     // build-std config clash and the cargo-in-cargo target-dir lock).

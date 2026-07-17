@@ -171,13 +171,23 @@ layer only *reads* roots either way.)
    too. The output dir and its `.drv` share one digest, so marking keeps both
    and sweeping drops both.
 4. **Reclaim.** Deletion frees host blocks immediately. On the OROS RFS the
-   unlink reclaims blocks at the next mount-time mark-and-sweep — RFS keeps
+   removal reclaims blocks at the next mount-time mark-and-sweep — RFS keeps
    **no persistent free structure**; a block is free iff reachable from no valid
    superblock (RFS SPACE-1, `fs/rfs2/src/space.rs`). GC therefore never touches
-   a free bitmap: unlinking the store entry is the whole reclaim, and RFS's own
+   a free bitmap: removing the store entry is the whole reclaim, and RFS's own
    reachability sweep does the rest. This is the deliberate reuse the design
    calls for — the same mark-and-sweep shape at two layers (store references,
    then FS block reachability), neither reinventing the other.
+
+   The reclaim primitive is `StoreFs::remove_store_path` (host/mem: plain
+   recursive delete; OROS: `SYS_STORE_REMOVE`). On the realize-guarded store
+   mount the output tree is sealed, so GC does **not** and **cannot** make it
+   writable first — there is no unseal. `SYS_STORE_REMOVE` removes the whole
+   unreferenced tree **below** the seal in-kernel (unlink files, rmdir dirs,
+   free blocks) and drops the in-kernel seal only as the last lifecycle step;
+   it never opens a sealed file for write. Gated on the Filesystem cap
+   (store-owner authority — a builder cannot reclaim). With `rmdir` now issued
+   in-kernel, a swept store entry is fully removed — no empty-skeleton residue.
 
 `--dry-run` runs steps 1–2 and reports what step 3 *would* delete, touching
 nothing.
@@ -221,6 +231,58 @@ store is immutable ([`02 §7.3`](../shade-pkg/02-store.md#73-sweep) step 4).
   concurrently on OROS). Until then GC's step-1 refusal is the protection.
 - Generations (prompt 4) write `/shade/roots/` and `/shade/gen/`; this layer
   reads them as roots and is agnostic to how they are produced.
-- On OROS, the whole engine runs against the real `/shade` tree once the
-  `shade` binary has argv and a VFS `EvalIo`; the byte format and algorithm are
-  host/target-identical (std `fs` today, the same VFS calls later).
+- On OROS, the whole engine runs against the real `/shade` tree through the
+  `shade` binary's OROS `EvalIo` (`OrosIo`); the byte format and algorithm are
+  host/target-identical. All I/O goes through the injected `StoreFs` seam
+  (`HostFs` on the host, `OrosFs` over the raw Lythos syscalls), the db lock
+  through the seam's atomic `create_exclusive` (`SYS_CREATE` on target), and
+  the crate builds for the OROS target (`--features oros`). **On-device
+  verified** (the B-series end-to-end gate): the `shade e2e` bringup probe
+  runs build → store → generation → activate → rollback → gc under QEMU and gc
+  collects an unrooted throwaway while keeping the rooted generation's path.
+  - `add_root` and the profile forest work on target now — symlink
+    create/read landed (`SYS_SYMLINK`/`SYS_READLINK`).
+  - **Sweeping a sealed store path** goes through `StoreFs::remove_store_path`
+    (→ `SYS_STORE_REMOVE` on target). The store mount's `RealizeGuard` makes
+    realized trees read-only (EROFS on unlink), and **there is no unseal** — the
+    seal is absolute, no syscall makes sealed content writable. Instead the
+    kernel removes the whole unreferenced tree below the seal and frees the
+    blocks, dropping the in-kernel seal as the final lifecycle step. Gated on
+    the Filesystem cap (store-owner authority); a builder (no cap) can neither
+    reclaim nor lift a seal. Safe under input-addressing: a later realize of the
+    same digest reproduces identical bytes. No-op-safe on host/mem backends and
+    on the `.drv` (unsealed).
+  - The retired `SYS_UNSEAL` (ABI 59) is a permanent ENOSYS gap — never reused.
+
+## 6. Persistence — the store is a persistent block-device volume
+
+`/shade/store` is an RFS V2 volume on the **secondary virtio-blk device**
+(`MOUNT_SRC_RFS2_BLK`, a fixed `store.img`), not the old volatile RAM store
+(`MOUNT_SRC_RFS2_RAM`). It is formatted once on the first-ever boot and mounted
+thereafter, so store content — and the generation closures pointing into it —
+**survive a full power cycle**. Crash consistency is RFS2's dual-superblock
+atomic commit (a torn superblock write recovers to the pre- or post-commit
+state, never a corrupt store; `fs/rfs2/tests/crash.rs`).
+
+The realize-seal set lives only in kernel RAM, so it is **reconstructed at mount
+time** from the persisted store contents (each top-level store directory is
+resealed, at the same top-level-name granularity `seal()` uses). Without this a
+cold boot would start with an empty seal set while the disk still holds sealed
+content, making that content writable again — the seal must stay absolute across
+a power cycle.
+
+`boot_activate` verifies the selected generation's full **closure** exists in
+the store (not just that its tree is structurally complete); if a referenced
+store path is missing it falls back to the newest generation with a complete
+closure, and if none has one it fails loud — it never builds (no-build-at-boot
+is structural).
+
+### Next milestone — RFS2 full-volume encryption
+
+The persistent store mounts **plaintext** for now; encryption was deliberately
+sequenced after persistence. The designated next milestone is RFS2 full-volume
+encryption — **AES-256-GCM** content confidentiality/integrity with an
+**Argon2id**-derived key — landing on the same block backing (the transform seam
+`fs/rfs2/src/transform.rs` already carries per-block auth tags via the XOR test
+transform; GCM replaces it). No store-format or GC change is expected: removal,
+sealing, and closure checks are all above the transform layer.

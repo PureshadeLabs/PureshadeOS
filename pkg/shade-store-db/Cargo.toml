@@ -2,7 +2,7 @@
 name = "shade-store-db"
 version = "0.1.0"
 edition = "2024"
-description = "shade store database, GC roots, and mark-and-sweep garbage collection (docs/shade-pkg/02-store.md §7, docs/shade/store-db-gc.md). Records realized paths + references, tracks the live set (roots + build locks), reclaims unreachable store paths. std host crate."
+description = "shade store database, GC roots, and mark-and-sweep garbage collection (docs/shade-pkg/02-store.md §7, docs/shade/store-db-gc.md). Records realized paths + references, tracks the live set (roots + build locks), reclaims unreachable store paths. no_std+alloc over the StoreFs seam (features: std → HostFs, oros → OrosFs)."
 
 [lib]
 name = "shade_store_db"
@@ -10,7 +10,19 @@ path = "src/lib.rs"
 
 [dependencies]
 shade-cdf = { path = "../shade-cdf" }
-shade-store = { path = "../shade-store" }
+shade-store = { path = "../shade-store", default-features = false }
+# oros env (clock for the registered= stamp, yield between lock retries):
+# raw syscall stubs + syscall numbers (x86_64 target only).
+lythos-abi = { path = "../../abi/lythos-abi", optional = true }
+lythos-syscall = { path = "../../abi/lythos-syscall", optional = true }
+
+[features]
+# Core is no_std+alloc; all I/O goes through the injected StoreFs backend.
+# `std` adds the HostFs-backed constructors (host suite, shade-gc CLI);
+# `oros` the on-target backend + env over the Lythos ABI.
+default = ["std"]
+std = ["shade-store/std"]
+oros = ["shade-store/oros", "dep:lythos-abi", "dep:lythos-syscall"]
 
 [[bin]]
 # Host seed vehicle for `shade gc` / root management (shade-pkg 09 §2),
@@ -18,3 +30,4 @@ shade-store = { path = "../shade-store" }
 # no_std stub until argv + an OROS EvalIo exist (pkg/shade/src/main.rs).
 name = "shade-gc"
 path = "src/bin/shade-gc.rs"
+required-features = ["std"]

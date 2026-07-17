@@ -121,6 +121,31 @@ impl FsBackend for MemBackend {
         n.target.clone().ok_or(FsError::Invalid)
     }
 
+    fn symlink(&mut self, target: &str, link: &str) -> FsResult<u64> {
+        if target.is_empty() {
+            return Err(FsError::Invalid);
+        }
+        let c = canon(link).ok_or(FsError::Invalid)?;
+        if self.nodes.contains_key(&c) {
+            return Err(FsError::Exists);
+        }
+        self.parent_must_be_dir(&c)?;
+        let ino = self.alloc_ino();
+        self.nodes.insert(
+            c.clone(),
+            Node {
+                ino,
+                is_dir: false,
+                is_symlink: true,
+                data: Vec::new(),
+                target: Some(target.to_string()),
+            },
+        );
+        self.by_ino.insert(ino, c);
+        self.dirty = true;
+        Ok(ino)
+    }
+
     fn read_at(&mut self, ino: u64, off: u64, out: &mut [u8]) -> FsResult<usize> {
         let path = self.by_ino.get(&ino).ok_or(FsError::NotFound)?.clone();
         let n = self.nodes.get(&path).ok_or(FsError::NotFound)?;
@@ -198,6 +223,23 @@ impl FsBackend for MemBackend {
         Ok(())
     }
 
+    fn rmdir(&mut self, path: &str) -> FsResult<()> {
+        let c = canon(path).ok_or(FsError::Invalid)?;
+        let n = self.nodes.get(&c).ok_or(FsError::NotFound)?;
+        if !n.is_dir {
+            return Err(FsError::NotDir);
+        }
+        let prefix = alloc::format!("{c}/");
+        if self.nodes.keys().any(|k| k.starts_with(&prefix)) {
+            return Err(FsError::NotEmpty);
+        }
+        let ino = n.ino;
+        self.nodes.remove(&c);
+        self.by_ino.remove(&ino);
+        self.dirty = true;
+        Ok(())
+    }
+
     fn rename(&mut self, old: &str, new: &str) -> FsResult<()> {
         let o = canon(old).ok_or(FsError::Invalid)?;
         let nw = canon(new).ok_or(FsError::Invalid)?;
@@ -244,7 +286,13 @@ impl FsBackend for MemBackend {
                 if !rest.is_empty() && !rest.contains('/') {
                     out.push(DirEntry {
                         ino: n.ino,
-                        file_type: if n.is_dir { 2 } else { 1 },
+                        file_type: if n.is_dir {
+                            2
+                        } else if n.is_symlink {
+                            3
+                        } else {
+                            1
+                        },
                         name: rest.to_string(),
                     });
                 }

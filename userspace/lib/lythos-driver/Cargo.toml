@@ -1,0 +1,11 @@
+[package]
+name = "lythos-driver"
+version = "0.1.0"
+edition = "2024"
+
+# Userspace device-driver runtime: ergonomic wrappers over the Device-cap
+# syscalls (MMIO accessor, DMA pool, PCI-cap discovery, split-virtqueue
+# helpers) for ring-3 drivers such as netd.
+
+[dependencies]
+lythos-rt = { path = "../lythos-rt" }

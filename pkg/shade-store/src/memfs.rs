@@ -50,9 +50,13 @@ impl MemFs {
 impl StoreFs for MemFs {
     fn metadata(&mut self, path: &str) -> FsResult<NodeMeta> {
         match self.nodes.get(path) {
-            Some(Node::File { exec, .. }) => Ok(NodeMeta { kind: NodeKind::File, exec: *exec }),
-            Some(Node::Dir) => Ok(NodeMeta { kind: NodeKind::Dir, exec: false }),
-            Some(Node::Symlink(_)) => Ok(NodeMeta { kind: NodeKind::Symlink, exec: false }),
+            Some(Node::File { data, exec }) => Ok(NodeMeta {
+                kind: NodeKind::File,
+                exec: *exec,
+                len: data.len() as u64,
+            }),
+            Some(Node::Dir) => Ok(NodeMeta { kind: NodeKind::Dir, exec: false, len: 0 }),
+            Some(Node::Symlink(_)) => Ok(NodeMeta { kind: NodeKind::Symlink, exec: false, len: 0 }),
             None => Err(FsError::NotFound),
         }
     }
@@ -77,6 +81,12 @@ impl StoreFs for MemFs {
         self.nodes
             .insert(String::from(path), Node::File { data: data.to_vec(), exec });
         Ok(())
+    }
+
+    /// Same as [`write_file`](StoreFs::write_file) — MemFs is already
+    /// exclusive-create, like `SYS_CREATE`.
+    fn create_exclusive(&mut self, path: &str, data: &[u8]) -> FsResult<()> {
+        self.write_file(path, data, false)
     }
 
     fn mkdir(&mut self, path: &str) -> FsResult<()> {

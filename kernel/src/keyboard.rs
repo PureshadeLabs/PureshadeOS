@@ -247,6 +247,16 @@ static FIRST_IRQ_SEEN: core::sync::atomic::AtomicBool =
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kbd_irq_handler() {
+    // Consume a byte ONLY if the output buffer is actually full. The poll-mode
+    // fallback (`poll_hw`) may have already drained it under its cli-lock; the
+    // IRQ latched in the APIC still fires once afterwards, and reading DATA with
+    // OBF clear yields a stale/zero byte that would inject a spurious scancode
+    // and corrupt the input stream (observed corrupting the boot passphrase).
+    let st = unsafe { inb(STATUS_PORT) };
+    if st & STATUS_OBF == 0 || st & STATUS_AUX != 0 {
+        crate::apic::eoi();
+        return;
+    }
     let sc = unsafe { inb(DATA_PORT) };
 
     if !FIRST_IRQ_SEEN.swap(true, Ordering::Relaxed) {

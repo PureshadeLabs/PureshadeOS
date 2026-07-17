@@ -2,7 +2,17 @@
 target = "targets/x86_64-lythos.json"
 
 [target.x86_64-lythos]
-rustflags = ["-C", "link-arg=-Tkernel/boot/linker/x86_64.ld"]
+# The kernel target disables SSE (`-mmx,-sse,+soft-float`), so the RustCrypto
+# AES-NI/CLMUL intrinsic backends (aes, polyval/ghash) fail LLVM legalization
+# ("cannot split the result of this operator"). Force their pure-integer
+# software backends — correct, if slower, and it avoids enabling SSE in the
+# kernel (which would require XMM save/restore across every interrupt). This is
+# the only way to consume rfs2's AES-256-GCM encryption in-kernel (doc 08).
+rustflags = [
+    "-C", "link-arg=-Tkernel/boot/linker/x86_64.ld",
+    "--cfg", "aes_force_soft",
+    "--cfg", "polyval_force_soft",
+]
 
 [unstable]
 build-std = ["core", "alloc", "compiler_builtins"]

@@ -20,7 +20,7 @@ When unsure about any behavior: **read `docs/spec/` or ask**. Do not pattern-mat
 
 `abi/lythos-abi` is the verified kernel↔userspace contract. The following live here and nowhere else:
 
-- Syscall numbers + `SYSCALL_MAX = 55` (`syscall.rs`)
+- Syscall numbers + `SYSCALL_MAX = 66` (`syscall.rs`)
 - 12 error sentinels (`errno.rs`)
 - `CapRights`, `CapKind`, `CapHandle` types (`cap.rs`)
 - Boundary structs with size+offset asserts: `TaskInfo`, `PsEntry`, `Stat`, `DirEntry`, `BootInfo` (`structs.rs`)

@@ -93,6 +93,17 @@ workstation            line 2 — output selector (#<selector>, without the '#')
 
 `shade os rebuild` rewrites all three lines atomically on success (build →
 write generation N → update pointer). Trailing newline required; no comments.
+
+**Rollback re-pins line 3.** A system-line `shade rollback` also rewrites the
+pointer, but **line 3 only** — re-pinned to the rollback generation it just
+built and activated; lines 1–2 (prism path, selector) are untouched. Without
+this the next boot would activate the pre-rollback pin (§6 reads line 3), so a
+reboot would silently undo the rollback. Because a rollback produces a
+pre-built generation like any rebuild, boot still never re-evaluates a source
+prism — the no-build-at-boot invariant (§6) holds. The engine call is
+`repin_generation` ([`shade generations-profiles §3`](../shade/generations-profiles.md#3-activation-and-rollback--the-atomic-flip));
+per-user rollback has no pointer and re-pins nothing.
+
 `TODO(open):` whether a lock digest is added as a fourth field for
 rebuild-time drift detection — deferred until a consumer needs it.
 

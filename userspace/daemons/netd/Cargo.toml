@@ -1,0 +1,12 @@
+[package]
+name = "netd"
+version = "0.1.0"
+edition = "2024"
+
+# netd — userspace virtio-net driver. Owns the virtio-net device via a Device
+# capability handed to it by lythd, and brings it to virtqueue-operational over
+# the userspace device-driver framework. No protocol logic yet (no eth/IP).
+
+[dependencies]
+lythos-rt     = { path = "../../lib/lythos-rt" }
+lythos-driver = { path = "../../lib/lythos-driver" }

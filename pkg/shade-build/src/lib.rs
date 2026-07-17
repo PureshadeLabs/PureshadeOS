@@ -17,39 +17,58 @@
 //!    tree, then [`shade_store::realize_cdf`] installs it atomically and
 //!    idempotently. On a hit, nothing builds.
 //!
-//! ## Placement / what is deferred
+//! ## Feature split / what is deferred
 //!
-//! This core is `std` and host-testable now. It takes the recipe as a direct
-//! argument ([`RecipeRef`]); argv parsing is a thin wrapper. The OROS `shade`
-//! binary (`pkg/shade`) stays a `no_std` stub — it cannot call [`build`] until
-//! OROS has a filesystem [`EvalIo`] and argv (blocked on the ABI). The
-//! sandboxed [`Builder`] (shade-pkg 06 phase 3) is likewise deferred; this
-//! crate defines the seam and the lookup/realize logic around it.
+//! The plan/address half (eval → CDF → store paths) and the executor's
+//! filesystem scaffolding are `no_std + alloc` over the B1 [`StoreFs`] seam
+//! and compile for the OROS target (feature `oros`). The executor **run
+//! loop** and both sandboxes stay behind `std`: [`BuildSandbox`]'s host
+//! vehicles spawn real processes, and the native OROS builder task (lowering
+//! `SandboxPlan` to `SYS_MOUNT` + capability grants — audit step 3(b)) is
+//! deferred. Likewise the OROS `shade` binary (`pkg/shade`) stays a stub
+//! until an OROS `EvalIo` exists.
 
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
+
+extern crate alloc;
+
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+#[cfg(feature = "std")]
 use std::io;
+#[cfg(feature = "std")]
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use shadec::error::{EvalError, Pos};
 use shadec::eval::Evaluator;
 use shadec::io::EvalIo;
 use shadec::value::Value;
 
-pub use shade_store::StorePaths;
+pub use shade_store::{FsError, StoreFs, StorePaths};
 
 /// shade-store's seam API is `&str`-pathed (`no_std` — no `std::path`); this
 /// crate's host-facing API stays `Path`-based and converts at the boundary.
+#[cfg(feature = "std")]
 pub(crate) fn path_str(p: &Path) -> &str {
     p.to_str().expect("store paths must be UTF-8")
 }
 
 mod executor;
 pub use executor::{
+    build_log_path, clean_scratch, prepare_scratch, scratch_dir, write_build_log,
+    CANONICAL_BUILD_ROOT, CANONICAL_LOG_ROOT,
+};
+#[cfg(feature = "std")]
+pub use executor::{
     BuildEnv, BuildSandbox, DbRegistrar, ExecOutcome, Executor, NoopRegistrar, PermissiveSandbox,
-    Registration, SandboxSpec, StoreRegistrar, CANONICAL_BUILD_ROOT, CANONICAL_LOG_ROOT,
+    Registration, SandboxSpec, StoreRegistrar,
 };
 
+#[cfg(feature = "std")]
 mod sandbox;
+#[cfg(feature = "std")]
 pub use sandbox::{
     CapGrant, LythosSandbox, MountPlan, SandboxPlan, BUILD_GID, BUILD_UID, BUILD_UMASK,
     SANDBOX_HOME,
@@ -57,7 +76,7 @@ pub use sandbox::{
 
 /// What to build: a recipe file or an inline expression. Argv parsing (the
 /// CLI) turns its positional argument into one of these; it is stubbed for
-/// OROS (no argv yet) and thin on the host.
+/// OROS (no OROS `EvalIo` yet) and thin on the host.
 #[derive(Debug, Clone)]
 pub enum RecipeRef {
     /// A path to a `.shade` file (or a directory containing `default.shade`).
@@ -89,6 +108,7 @@ pub struct BuildPlan {
 /// made the output available in the local store (for the local store, it was
 /// already there; a substituter would fetch-and-install here), or `Ok(None)`
 /// if this source cannot satisfy the plan.
+#[cfg(feature = "std")]
 pub trait Resolver {
     /// A short source name for diagnostics / the build outcome.
     fn source(&self) -> &str;
@@ -98,9 +118,11 @@ pub trait Resolver {
 /// The local store resolver: a hit iff `<out_path>` already exists. Stateless
 /// — the store root is encoded in `plan.paths.out_path`. This is the only
 /// resolver source wired today (the base of the LOOKUP-THEN-BUILD stack).
+#[cfg(feature = "std")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LocalStore;
 
+#[cfg(feature = "std")]
 impl Resolver for LocalStore {
     fn source(&self) -> &str {
         "local"
@@ -117,6 +139,7 @@ impl Resolver for LocalStore {
 /// A staged output tree ready to be realized into the store, plus an optional
 /// scratch directory removed on drop. The [`Builder`] owns temp-dir policy and
 /// hands one of these back; [`build`] realizes `root`, then drops the guard.
+#[cfg(feature = "std")]
 pub struct StagedOutput {
     /// The staged tree to install as `<out_path>`.
     pub root: PathBuf,
@@ -125,6 +148,7 @@ pub struct StagedOutput {
     pub cleanup: Option<PathBuf>,
 }
 
+#[cfg(feature = "std")]
 impl StagedOutput {
     /// A staged tree at `root` with no separate scratch to clean up.
     pub fn at(root: impl Into<PathBuf>) -> Self {
@@ -137,6 +161,7 @@ impl StagedOutput {
     }
 }
 
+#[cfg(feature = "std")]
 impl Drop for StagedOutput {
     fn drop(&mut self) {
         if let Some(dir) = &self.cleanup {
@@ -150,11 +175,13 @@ impl Drop for StagedOutput {
 /// OROS). [`build`] only invokes this on a resolver miss; the returned tree is
 /// handed to [`shade_store::realize_cdf`]. Host builders and test doubles
 /// implement the trait.
+#[cfg(feature = "std")]
 pub trait Builder {
     fn build(&self, plan: &BuildPlan) -> io::Result<StagedOutput>;
 }
 
 /// How the plan was satisfied.
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Built {
     /// Satisfied by a [`Resolver`]; no build ran. `source` is the resolver
@@ -164,6 +191,7 @@ pub enum Built {
     Realized { out_path: PathBuf },
 }
 
+#[cfg(feature = "std")]
 impl Built {
     /// The output store path either way.
     pub fn out_path(&self) -> &Path {
@@ -174,6 +202,7 @@ impl Built {
 }
 
 /// The result of [`build`]: the resolved plan and how it was satisfied.
+#[cfg(feature = "std")]
 #[derive(Debug, Clone)]
 pub struct Outcome {
     pub plan: BuildPlan,
@@ -189,6 +218,7 @@ pub enum BuildError {
     /// Addressing/realization in the store layer failed.
     Store(shade_store::StoreError),
     /// The builder or a resolver failed with an IO error.
+    #[cfg(feature = "std")]
     Io(io::Error),
     /// A `.drv` in the closure is not readable canonical CDF.
     CdfParse { drv: String, error: shade_cdf::CdfParseError },
@@ -203,16 +233,18 @@ pub enum BuildError {
     /// A source derivation (`builder=fetch`) missed every resolver; the
     /// fetcher (shade-pkg 06 §2 phase 1) is not implemented yet.
     FetchUnrealized { drv: String },
-    /// A builder phase exited nonzero. `log` has the captured output.
-    PhaseFailed { drv: String, phase: usize, code: i32, log: PathBuf },
+    /// A builder phase exited nonzero. `log` (a seam path under the
+    /// executor's log root) has the captured output.
+    PhaseFailed { drv: String, phase: usize, code: i32, log: String },
     /// The build succeeded but a declared output was not produced.
     MissingOutput { drv: String, detail: String },
     /// The store registrar rejected a realization.
+    #[cfg(feature = "std")]
     Register(io::Error),
 }
 
-impl std::fmt::Display for BuildError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for BuildError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             BuildError::Eval(e) => write!(f, "eval: {e}"),
             BuildError::NotADerivation => write!(
@@ -220,6 +252,7 @@ impl std::fmt::Display for BuildError {
                 "recipe did not evaluate to a derivation (package-set selection is the driver's job)"
             ),
             BuildError::Store(e) => write!(f, "store: {e}"),
+            #[cfg(feature = "std")]
             BuildError::Io(e) => write!(f, "io: {e}"),
             BuildError::CdfParse { drv, error } => write!(f, "{drv}: unreadable CDF: {error}"),
             BuildError::BadDrv { drv, detail } => write!(f, "{drv}: {detail}"),
@@ -237,15 +270,16 @@ impl std::fmt::Display for BuildError {
             ),
             BuildError::PhaseFailed { drv, phase, code, log } => write!(
                 f,
-                "{drv}: phase {phase} failed with exit code {code} (log: {})",
-                log.display()
+                "{drv}: phase {phase} failed with exit code {code} (log: {log})"
             ),
             BuildError::MissingOutput { drv, detail } => write!(f, "{drv}: {detail}"),
+            #[cfg(feature = "std")]
             BuildError::Register(e) => write!(f, "register: {e}"),
         }
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for BuildError {}
 
 impl BuildError {
@@ -255,6 +289,7 @@ impl BuildError {
     /// error to exit code 1 (shade-pkg 07 §1) and print the message.
     pub fn errno(&self) -> u64 {
         use lythos_abi::errno as e;
+        #[cfg(feature = "std")]
         fn io_errno(err: &io::Error) -> u64 {
             use lythos_abi::errno as e;
             match err.kind() {
@@ -299,6 +334,7 @@ impl BuildError {
                 shade_store::FsError::Device => e::EIO,
                 shade_store::FsError::Unsupported => e::ENOSYS,
             },
+            #[cfg(feature = "std")]
             BuildError::Io(err) | BuildError::Register(err) => io_errno(err),
         }
     }
@@ -327,16 +363,17 @@ pub struct PlanGraph {
     pub root_drv: String,
     /// Canonical drvPath → CDF bytes, every derivation emitted during eval
     /// (a superset of the root's reachable closure).
-    pub closure: std::collections::BTreeMap<String, Vec<u8>>,
+    pub closure: alloc::collections::BTreeMap<String, Vec<u8>>,
 }
 
 /// Evaluate `recipe` and address it into `store_root`, without building.
 /// Separated from [`build`] so callers can inspect the plan (path, digest)
 /// — e.g. `shade build --dry-run`-style lookups — and so the eval/address
-/// half is unit-testable on its own.
+/// half is unit-testable on its own. `store_root` is a seam path (absolute,
+/// `/`-separated — `no_std` has no `std::path`).
 pub fn plan(
     recipe: &RecipeRef,
-    store_root: &Path,
+    store_root: &str,
     toolchain: Option<&str>,
     io: &dyn EvalIo,
 ) -> Result<BuildPlan, BuildError> {
@@ -346,7 +383,7 @@ pub fn plan(
 /// [`plan`], keeping the emitted derivation closure for the executor.
 pub fn plan_graph(
     recipe: &RecipeRef,
-    store_root: &Path,
+    store_root: &str,
     toolchain: Option<&str>,
     io: &dyn EvalIo,
 ) -> Result<PlanGraph, BuildError> {
@@ -378,7 +415,7 @@ pub fn plan_graph(
 pub fn plan_value(
     ev: &mut Evaluator,
     value: &Value,
-    store_root: &Path,
+    store_root: &str,
 ) -> Result<PlanGraph, BuildError> {
     let pos = Pos { file: Arc::from("<shade-build>"), line: 0, col: 0 };
 
@@ -403,7 +440,7 @@ pub fn plan_value(
     let name = ev.force_attr_string(m, "name", &pos)?.s.to_string();
     let version = ev.force_attr_string(m, "version", &pos)?.s.to_string();
 
-    let paths = shade_store::store_paths_at(path_str(store_root), &name, &version, &cdf)?;
+    let paths = shade_store::store_paths_at(store_root, &name, &version, &cdf)?;
     let root = BuildPlan { name, version, cdf, paths };
     let closure = ev
         .drvs
@@ -423,6 +460,7 @@ pub fn plan_value(
 ///
 /// The evaluator is `Rc`-based and recurses on deep recipes; run this on a
 /// generously sized stack (the host seed CLI uses a large worker thread).
+#[cfg(feature = "std")]
 pub fn build(
     recipe: &RecipeRef,
     store_root: &Path,
@@ -431,7 +469,7 @@ pub fn build(
     toolchain: Option<&str>,
     io: &dyn EvalIo,
 ) -> Result<Outcome, BuildError> {
-    let plan = plan(recipe, store_root, toolchain, io)?;
+    let plan = plan(recipe, path_str(store_root), toolchain, io)?;
 
     // Lookup first, across every resolver source in order (local store, then
     // any future substituters). First hit wins; nothing is built.

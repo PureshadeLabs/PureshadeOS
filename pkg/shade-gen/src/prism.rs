@@ -89,12 +89,12 @@ pub fn build_prism_packages(
 
     let mut packages = Vec::with_capacity(selected.len());
     for v in &selected {
-        let graph = plan_value(&mut ev, v, roots.store)?;
+        let graph = plan_value(&mut ev, v, &roots.store.to_string_lossy())?;
         let outcome = exec.run_graph(&graph)?;
         packages.push(PackageEntry {
             name: graph.root.name,
             version: graph.root.version,
-            store_path: outcome.root_result().out_path().to_path_buf(),
+            store_path: crate::path_str(outcome.root_result().out_path()).to_string(),
             requested: true,
         });
     }
@@ -285,7 +285,7 @@ pub fn os_rebuild(
     let generation = line.create(&packages, lock.as_deref(), &reason, parent)?;
     line.activate(generation)?;
     if let Some(link) = lth_bin {
-        line.wire_view(link)?;
+        line.wire_view(crate::path_str(link))?;
     }
 
     // First-rebuild retirement (10 §3): an explicit prism supersedes the

@@ -130,7 +130,7 @@ impl BlockTransform for XorTransform {
 // ── Fixture helpers ──────────────────────────────────────────────────────────
 
 pub fn opts() -> MkfsOptions<'static> {
-    MkfsOptions { uuid: UUID, label: "test-volume", now: tnow() }
+    MkfsOptions { uuid: UUID, label: "test-volume", now: tnow(), crypto: None }
 }
 
 pub fn fresh_fs(blocks: u64) -> Rfs2<MemDev, IdentityTransform> {

@@ -5,9 +5,11 @@ members = [
     "kernel",
     "userspace/lib/lythos-rt",
     "userspace/lib/lythos-libstd",
+    "userspace/lib/lythos-driver",
     "userspace/init/lythd",
     "userspace/daemons/lythdist",
     "userspace/daemons/lythmsg",
+    "userspace/daemons/netd",
     "userspace/shell/lysh",
     "userspace/apps/rkilo",
     "userspace/apps/rutils",
@@ -40,9 +42,9 @@ default-members = [
     "fs/vfs-core", # VFS mount table + realize guard; no_std+alloc, host tests (mount-syscall plan)
     "pkg/shade-cdf", # the one shared CDF canonicalizer (shade 08 §1); no_std+alloc, host tests
     "pkg/shade-store", # input-addressed store realization (02 §2-3); no_std+alloc over the StoreFs seam (features: std → HostFs, oros → OrosFs), host tests
-    "pkg/shade-store-db", # store db + GC roots + mark-and-sweep gc (02 §7); std host crate, host tests
-    "pkg/shade-build", # shade build core: eval → digest → resolve → realize; std host crate, host tests
-    "pkg/shade-gen",  # generations + profiles + activation (02 §5-6, 10); std host crate, host tests
+    "pkg/shade-store-db", # store db + GC roots + mark-and-sweep gc (02 §7); no_std+alloc over the StoreFs seam (features: std → HostFs, oros → OrosFs), host tests
+    "pkg/shade-build", # shade build core: eval → digest → resolve → realize; no_std+alloc plan/scaffolding over the StoreFs seam (std → host executor+sandboxes, oros), host tests
+    "pkg/shade-gen",  # generations + profiles + activation (02 §5-6, 10); no_std+alloc over the StoreFs seam (std → HostFs + rebuild drivers, oros → OrosFs), host tests
     "pkg/shadec",    # Shade evaluator lib + host shadec binary (seed vehicle, shade-pkg 09 §2)
 ]
 resolver = "2"

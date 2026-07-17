@@ -124,8 +124,8 @@ fn run(opts: Opts) -> ExitCode {
     };
 
     if opts.dry_run {
-        return match shade_build::plan(&recipe, &opts.store_root, opts.toolchain.as_deref(), &io)
-        {
+        let store_root = opts.store_root.to_string_lossy();
+        return match shade_build::plan(&recipe, &store_root, opts.toolchain.as_deref(), &io) {
             Ok(p) => {
                 println!("{}", p.paths.out_path);
                 ExitCode::SUCCESS
