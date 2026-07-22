@@ -51,7 +51,7 @@ OVMF_VARS  ?= $(shell \
     [ -f "$$p" ] && echo "$$p" && break; \
   done)
 
-.PHONY: all oros kernel run run-release run-gui debug run-limine image run-iso-bios run-iso-uefi clean oros-closed kernel-closed closed
+.PHONY: all oros kernel run run-probes run-release run-gui debug run-limine image run-iso-bios run-iso-uefi clean oros-closed kernel-closed closed
 
 all: oros kernel
 
@@ -151,6 +151,15 @@ run: kernel limine.img
 	@./run-limine.sh $(OVMF_CODE) $(OVMF_VARS)
 
 run-limine: run
+
+## Like `make run`, but builds the kernel with --features boot-tests so the
+## in-kmain integration/probe suite (core_smoke: exit-record retention, etc.)
+## executes during boot. Serial output shows `[integration] … passed` lines; a
+## failed probe panics the kernel with the assert message. Prereq order matters
+## (kernel-tests before limine.img, matching `run: kernel limine.img`): the
+## boot-tests ELF is built first, then repacked into the boot image.
+run-probes: kernel-tests limine.img
+	@./run-limine.sh $(OVMF_CODE) $(OVMF_VARS)
 
 ## Run release kernel under QEMU (Limine UEFI boot).
 run-release: kernel-release

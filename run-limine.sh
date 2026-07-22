@@ -118,6 +118,11 @@ if [ ! -S "$SOCK" ]; then
     exit 1
 fi
 
+# Serial console bridge: connect the terminal to QEMU's unix serial socket in
+# raw-ish mode (no echo, char-at-a-time, signals still delivered to this bridge
+# so Ctrl-C detaches rather than reaching the guest). Prefer python3; fall back
+# to socat, then nc, so hosts without python (e.g. the nix devShell) still work.
+if command -v python3 >/dev/null 2>&1; then
 BRIDGE="$(mktemp)"
 cat > "$BRIDGE" <<'PYEOF'
 import socket, sys, os, select, termios
@@ -158,5 +163,14 @@ except (KeyboardInterrupt, BrokenPipeError, OSError):
 finally:
     termios.tcsetattr(0, termios.TCSADRAIN, old_attrs)
 PYEOF
-
-python3 "$BRIDGE" "$SOCK"
+    python3 "$BRIDGE" "$SOCK"
+elif command -v socat >/dev/null 2>&1; then
+    # -,echo=0,icanon=0: no local echo, char-at-a-time; isig stays on so host
+    # Ctrl-C interrupts socat instead of being forwarded to the guest.
+    socat -,echo=0,icanon=0 UNIX-CONNECT:"$SOCK"
+elif command -v nc >/dev/null 2>&1; then
+    nc -U "$SOCK"
+else
+    echo "[run-limine.sh] error: no serial bridge available (need python3, socat, or nc)" >&2
+    exit 1
+fi
