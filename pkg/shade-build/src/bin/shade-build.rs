@@ -164,7 +164,7 @@ fn run(opts: Opts) -> ExitCode {
                     Built::Realized { .. } => eprintln!("shade-build: {store_name} — built"),
                 }
             }
-            println!("{}", outcome.root_result().out_path().display());
+            println!("{}", outcome.root_result().out_path());
             ExitCode::SUCCESS
         }
         Err(e) => {

@@ -74,7 +74,10 @@ use std::path::Path;
 #[cfg(feature = "std")]
 mod prism;
 #[cfg(feature = "std")]
-pub use prism::{build_prism_packages, home_rebuild, os_rebuild, BuildRoots, OsRebuildOutcome};
+pub use prism::{
+    build_prism_packages, build_prism_packages_on, home_rebuild, home_rebuild_on, os_rebuild,
+    os_rebuild_on, BuildRoots, OsRebuildOutcome,
+};
 
 /// The seam API is `&str`-pathed (`no_std` — no `std::path`); the host-facing
 /// convenience API stays `Path`-based and converts at the boundary.

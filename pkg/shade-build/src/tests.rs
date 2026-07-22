@@ -112,9 +112,9 @@ impl Resolver for MockSubstituter {
     fn source(&self) -> &str {
         "mock"
     }
-    fn resolve(&self, plan: &BuildPlan) -> std::io::Result<Option<PathBuf>> {
+    fn resolve(&self, plan: &BuildPlan) -> Result<Option<String>, BuildError> {
         self.consulted.fetch_add(1, Ordering::Relaxed);
-        Ok(self.hit.then(|| PathBuf::from(&plan.paths.out_path)))
+        Ok(self.hit.then(|| plan.paths.out_path.clone()))
     }
 }
 
@@ -133,6 +133,7 @@ fn build_miss_realizes() {
         assert_eq!(builder.runs(), 1, "a miss must build exactly once");
         match &out.result {
             Built::Realized { out_path } => {
+                let out_path = Path::new(out_path);
                 assert!(out_path.join("bin/demo").exists(), "output tree installed");
                 assert_eq!(
                     std::fs::read(out_path.join("bin/demo")).unwrap(),
@@ -171,7 +172,7 @@ fn build_hit_is_noop() {
         match &second.result {
             Built::Resolved { source, out_path } => {
                 assert_eq!(source, "local");
-                assert_eq!(out_path, first.result.out_path());
+                assert_eq!(out_path.as_str(), first.result.out_path());
             }
             other => panic!("expected Resolved hit, got {other:?}"),
         }
@@ -286,14 +287,23 @@ impl CountingSandbox {
     }
 }
 impl BuildSandbox for CountingSandbox {
-    fn prepare(&self, spec: &SandboxSpec) -> std::io::Result<BuildEnv> {
+    fn prepare(&self, spec: &SandboxSpec) -> Result<BuildEnv, SandboxError> {
         self.inner.prepare(spec)
     }
-    fn spawn(&self, env: &BuildEnv, command: &str, log: &fs::File) -> std::io::Result<i32> {
+    fn spawn(
+        &self,
+        env: &BuildEnv,
+        command: &str,
+        log: &mut dyn BuildLogSink,
+    ) -> Result<i32, SandboxError> {
         self.spawns.fetch_add(1, Ordering::Relaxed);
         self.inner.spawn(env, command, log)
     }
-    fn collect_outputs(&self, env: &BuildEnv, declared: &[String]) -> std::io::Result<Vec<PathBuf>> {
+    fn collect_outputs(
+        &self,
+        env: &BuildEnv,
+        declared: &[String],
+    ) -> Result<Vec<String>, SandboxError> {
         self.inner.collect_outputs(env, declared)
     }
 }
@@ -305,7 +315,7 @@ struct RecordingRegistrar {
     seen: Mutex<Vec<(String, String, Vec<String>)>>, // (store_name, cdf_hash, refs)
 }
 impl StoreRegistrar for RecordingRegistrar {
-    fn register(&self, reg: &Registration) -> std::io::Result<()> {
+    fn register(&self, reg: &Registration) -> Result<(), BuildError> {
         self.seen.lock().unwrap().push((
             reg.store_name.to_string(),
             reg.cdf_hash.to_string(),
@@ -344,13 +354,14 @@ fn executor_gate_build_then_pure_lookup() {
         let resolvers: [&dyn Resolver; 1] = [&local];
         let sandbox = CountingSandbox::new();
         let registrar = RecordingRegistrar::default();
-        let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+        let mut exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
 
         // Run 1: builds and realizes.
         let out = exec.run(&trivial_recipe(), Some("tc-1"), &io).expect("first run");
         let Built::Realized { out_path } = out.root_result() else {
             panic!("expected Realized, got {:?}", out.root_result());
         };
+        let out_path = Path::new(out_path);
         assert!(out_path.starts_with(&store));
         assert_eq!(fs::read(out_path.join("bin/demo")).unwrap(), b"hi");
         // The .drv sits next to the output, byte-equal to the CDF.
@@ -376,7 +387,7 @@ fn executor_gate_build_then_pure_lookup() {
         match out2.root_result() {
             Built::Resolved { source, out_path: p2 } => {
                 assert_eq!(source, "local");
-                assert_eq!(p2, out_path);
+                assert_eq!(Path::new(p2), out_path);
             }
             other => panic!("expected a lookup hit, got {other:?}"),
         }
@@ -418,7 +429,7 @@ in derivation {
         let resolvers: [&dyn Resolver; 1] = [&local];
         let sandbox = PermissiveSandbox;
         let registrar = RecordingRegistrar::default();
-        let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+        let mut exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
 
         let out = exec.run(&recipe, Some("tc-1"), &io).expect("run");
         assert_eq!(out.results.len(), 2);
@@ -427,7 +438,7 @@ in derivation {
         // top's build ran depa's binary off PATH (dep bin dirs head PATH),
         // proving the dep was realized and wired in before top built.
         assert_eq!(
-            fs::read(out.root_result().out_path().join("bin/top")).unwrap(),
+            fs::read(Path::new(out.root_result().out_path()).join("bin/top")).unwrap(),
             b"depa\n"
         );
         // Registration refs: top carries depa's canonical store path.
@@ -461,10 +472,10 @@ derivation {
         let local = LocalStore;
         let resolvers: [&dyn Resolver; 1] = [&local];
         let (sandbox, registrar) = (PermissiveSandbox, NoopRegistrar);
-        let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+        let mut exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
         let out = exec.run(&recipe, Some("tc-1"), &io).expect("run");
         assert_eq!(
-            fs::read(out.root_result().out_path().join("bin/envy")).unwrap(),
+            fs::read(Path::new(out.root_result().out_path()).join("bin/envy")).unwrap(),
             b"hello"
         );
     });
@@ -483,10 +494,15 @@ impl OutRecordingSandbox {
     }
 }
 impl BuildSandbox for OutRecordingSandbox {
-    fn prepare(&self, spec: &SandboxSpec) -> std::io::Result<BuildEnv> {
+    fn prepare(&self, spec: &SandboxSpec) -> Result<BuildEnv, SandboxError> {
         self.inner.prepare(spec)
     }
-    fn spawn(&self, env: &BuildEnv, command: &str, log: &fs::File) -> std::io::Result<i32> {
+    fn spawn(
+        &self,
+        env: &BuildEnv,
+        command: &str,
+        log: &mut dyn BuildLogSink,
+    ) -> Result<i32, SandboxError> {
         let out = env
             .vars
             .iter()
@@ -496,7 +512,11 @@ impl BuildSandbox for OutRecordingSandbox {
         self.per_phase_out.lock().unwrap().push(out);
         self.inner.spawn(env, command, log)
     }
-    fn collect_outputs(&self, env: &BuildEnv, declared: &[String]) -> std::io::Result<Vec<PathBuf>> {
+    fn collect_outputs(
+        &self,
+        env: &BuildEnv,
+        declared: &[String],
+    ) -> Result<Vec<String>, SandboxError> {
         self.inner.collect_outputs(env, declared)
     }
 }
@@ -535,7 +555,7 @@ derivation {
         let resolvers: [&dyn Resolver; 1] = [&local];
         let sandbox = OutRecordingSandbox::new();
         let registrar = NoopRegistrar;
-        let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+        let mut exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
 
         let out = exec.run(&recipe, Some("tc-1"), &io).expect("run");
 
@@ -550,7 +570,8 @@ derivation {
 
         // On-disk view: the three append phases each wrote the same staging
         // `$out`, and that value matches what the seam recorded.
-        let trace = fs::read_to_string(out.root_result().out_path().join("bin/trace")).unwrap();
+        let trace =
+            fs::read_to_string(Path::new(out.root_result().out_path()).join("bin/trace")).unwrap();
         let lines: Vec<&str> = trace.lines().collect();
         assert_eq!(lines.len(), 3, "three append phases, three lines: {trace:?}");
         assert!(lines.iter().all(|l| *l == staging), "trace disagrees with $out: {trace:?}");
@@ -581,7 +602,7 @@ derivation {
         let local = LocalStore;
         let resolvers: [&dyn Resolver; 1] = [&local];
         let (sandbox, registrar) = (PermissiveSandbox, NoopRegistrar);
-        let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+        let mut exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
 
         let err = exec.run(&recipe, Some("tc-1"), &io).unwrap_err();
         match &err {
@@ -627,7 +648,7 @@ derivation {
         let local = LocalStore;
         let resolvers: [&dyn Resolver; 1] = [&local];
         let (sandbox, registrar) = (PermissiveSandbox, NoopRegistrar);
-        let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+        let mut exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
 
         let err = exec.run(&recipe, Some("tc-1"), &io).unwrap_err();
         match &err {
@@ -703,7 +724,7 @@ derivation {
         let local = LocalStore;
         let resolvers: [&dyn Resolver; 1] = [&local];
         let (sandbox, registrar) = (PermissiveSandbox, NoopRegistrar);
-        let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+        let mut exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
         let err = exec.run(&recipe, Some("tc-1"), &io).unwrap_err();
         assert!(matches!(err, BuildError::FetchUnrealized { .. }), "got {err}");
         assert_eq!(err.errno(), lythos_abi::errno::ENOSYS);
@@ -748,7 +769,7 @@ in derivation {
         let resolvers: [&dyn Resolver; 1] = [&local];
         let sandbox = PermissiveSandbox;
         let registrar = DbRegistrar::for_store_root(&store);
-        let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+        let mut exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
 
         let out = exec.run(&recipe, Some("tc-1"), &io).expect("run");
         assert_eq!(out.results.len(), 2);
@@ -768,7 +789,7 @@ in derivation {
         assert!(db.read_refs(dep_digest).unwrap().is_empty(), "leaf dep has no refs");
 
         // GATE tail: root top → gc keeps both; unroot → gc collects both.
-        db.add_root("test-top", out.root_result().out_path().to_str().unwrap()).unwrap();
+        db.add_root("test-top", out.root_result().out_path()).unwrap();
         let r1 = db.gc(&shade_store_db::GcOptions::default()).unwrap();
         assert_eq!(r1.collected.len(), 0, "rooted closure fully kept");
         assert!(store.join(dep_name).exists() && store.join(top_name).exists());
@@ -795,7 +816,7 @@ fn non_derivation_is_rejected() {
     });
 }
 
-// ---- LythosSandbox tests ------------------------------------------------------
+// ---- SeatbeltSandbox tests ------------------------------------------------------
 //
 // The enforcement vehicle is macOS Seatbelt (docs/shade/build-sandbox.md §3),
 // so the tests that need real denial are macOS-gated; the pure SandboxPlan
@@ -822,13 +843,13 @@ fn tree_bytes(root: &Path) -> Vec<(String, Vec<u8>)> {
     v
 }
 
-/// GATE (sandbox): the same derivation built twice through [`LythosSandbox`]
+/// GATE (sandbox): the same derivation built twice through [`SeatbeltSandbox`]
 /// yields byte-identical outputs. The recipe deliberately samples every
 /// determinism knob the sandbox pins (epoch, TZ, locale, HOME, umask-affected
 /// file bits) so drift in any of them changes the bytes.
 #[cfg(target_os = "macos")]
 #[test]
-fn lythos_sandbox_rebuild_is_byte_identical() {
+fn seatbelt_sandbox_rebuild_is_byte_identical() {
     with_stack(|| {
         let recipe_src = r#"
 derivation {
@@ -851,18 +872,18 @@ derivation {
         let local = LocalStore;
         let resolvers: [&dyn Resolver; 1] = [&local];
         let registrar = NoopRegistrar;
-        let sandbox = LythosSandbox::new().expect("sandbox-exec available on macOS");
+        let sandbox = SeatbeltSandbox::new().expect("sandbox-exec available on macOS");
 
         let mut trees = Vec::new();
         for run in 0..2 {
             let tmp = TmpDir::new(&format!("lyth-det-{run}"));
             let (store, build, log) = exec_roots(&tmp);
-            let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+            let mut exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
             let out = exec.run(&recipe("/base"), Some("tc-1"), &io).expect("build");
             let Built::Realized { out_path } = out.root_result() else {
                 panic!("fresh store must build, got {:?}", out.root_result());
             };
-            trees.push(tree_bytes(out_path));
+            trees.push(tree_bytes(Path::new(out_path)));
         }
         assert_eq!(trees[0], trees[1], "same derivation twice ⇒ byte-identical outputs");
         assert!(!trees[0].is_empty());
@@ -874,7 +895,7 @@ derivation {
 /// enforces it — the phase dies with "Operation not permitted".
 #[cfg(target_os = "macos")]
 #[test]
-fn lythos_sandbox_denies_network() {
+fn seatbelt_sandbox_denies_network() {
     with_stack(|| {
         let tmp = TmpDir::new("lyth-net");
         let (store, build, log) = exec_roots(&tmp);
@@ -894,8 +915,8 @@ derivation {
         let local = LocalStore;
         let resolvers: [&dyn Resolver; 1] = [&local];
         let registrar = NoopRegistrar;
-        let sandbox = LythosSandbox::new().unwrap();
-        let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+        let sandbox = SeatbeltSandbox::new().unwrap();
+        let mut exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
 
         let err = exec.run(&recipe, Some("tc-1"), &io).unwrap_err();
         let BuildError::PhaseFailed { phase, log: log_file, .. } = &err else {
@@ -915,8 +936,8 @@ derivation {
         fs::create_dir_all(&staging).unwrap();
         let spec = SandboxSpec {
             store_name: "x-netprobe-1.0",
-            scratch: &scratch,
-            staging: &staging,
+            scratch: scratch.to_str().unwrap(),
+            staging: staging.to_str().unwrap(),
             system: "x86_64-oros",
             env: &[],
             inputs: &[],
@@ -932,7 +953,7 @@ derivation {
 /// sandbox, not the recipe.
 #[cfg(target_os = "macos")]
 #[test]
-fn lythos_sandbox_denies_out_of_tree_read() {
+fn seatbelt_sandbox_denies_out_of_tree_read() {
     with_stack(|| {
         let tmp = TmpDir::new("lyth-read");
         let secret = tmp.path().join("secret.txt");
@@ -960,8 +981,8 @@ derivation {{
         {
             let (store, build, log) =
                 (tmp.path().join("s1"), tmp.path().join("b1"), tmp.path().join("l1"));
-            let sandbox = LythosSandbox::new().unwrap();
-            let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+            let sandbox = SeatbeltSandbox::new().unwrap();
+            let mut exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
             let err = exec.run(&recipe, Some("tc-1"), &io).unwrap_err();
             let BuildError::PhaseFailed { log: log_file, .. } = &err else {
                 panic!("expected PhaseFailed, got {err}");
@@ -978,8 +999,8 @@ derivation {{
             fs::create_dir_all(&staging).unwrap();
             let spec = SandboxSpec {
                 store_name: "x-peek-1.0",
-                scratch: &scratch,
-                staging: &staging,
+                scratch: scratch.to_str().unwrap(),
+                staging: staging.to_str().unwrap(),
                 system: "x86_64-oros",
                 env: &[],
                 inputs: &[],
@@ -997,10 +1018,10 @@ derivation {{
             let (store, build, log) =
                 (tmp.path().join("s2"), tmp.path().join("b2"), tmp.path().join("l2"));
             let sandbox = PermissiveSandbox;
-            let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+            let mut exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
             let out = exec.run(&recipe, Some("tc-1"), &io).expect("permissive control build");
             assert_eq!(
-                fs::read(out.root_result().out_path().join("bin/loot")).unwrap(),
+                fs::read(Path::new(out.root_result().out_path()).join("bin/loot")).unwrap(),
                 b"TOPSECRET",
                 "control proves the sandbox, not the recipe, caused the denial"
             );
@@ -1012,7 +1033,7 @@ derivation {{
 /// store sibling is not readable even though it sits in the same store root.
 #[cfg(target_os = "macos")]
 #[test]
-fn lythos_sandbox_hides_undeclared_store_paths() {
+fn seatbelt_sandbox_hides_undeclared_store_paths() {
     with_stack(|| {
         let tmp = TmpDir::new("lyth-store");
         let (store, build, log) = exec_roots(&tmp);
@@ -1051,11 +1072,11 @@ in derivation {
         let local = LocalStore;
         let resolvers: [&dyn Resolver; 1] = [&local];
         let registrar = NoopRegistrar;
-        let sandbox = LythosSandbox::new().unwrap();
-        let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+        let sandbox = SeatbeltSandbox::new().unwrap();
+        let mut exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
 
         let out = exec.run(&recipe, Some("tc-1"), &io).expect("build");
-        let bytes = fs::read(out.root_result().out_path().join("bin/dep-out")).unwrap();
+        let bytes = fs::read(Path::new(out.root_result().out_path()).join("bin/dep-out")).unwrap();
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.contains("depa-ok"), "declared dep runs: {text}");
         assert!(text.contains("denied"), "undeclared store sibling unreadable: {text}");
@@ -1067,7 +1088,7 @@ in derivation {
 /// identity/env table is exactly what the builder sees.
 #[cfg(target_os = "macos")]
 #[test]
-fn lythos_sandbox_env_is_hermetic() {
+fn seatbelt_sandbox_env_is_hermetic() {
     with_stack(|| {
         let tmp = TmpDir::new("lyth-env");
         let (store, build, log) = exec_roots(&tmp);
@@ -1087,11 +1108,12 @@ derivation {
         let local = LocalStore;
         let resolvers: [&dyn Resolver; 1] = [&local];
         let registrar = NoopRegistrar;
-        let sandbox = LythosSandbox::new().unwrap();
-        let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+        let sandbox = SeatbeltSandbox::new().unwrap();
+        let mut exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
 
         let out = exec.run(&recipe, Some("tc-1"), &io).expect("build");
-        let dump = fs::read_to_string(out.root_result().out_path().join("bin/dump")).unwrap();
+        let dump =
+            fs::read_to_string(Path::new(out.root_result().out_path()).join("bin/dump")).unwrap();
         // Host identity/env must not leak.
         for host_var in ["USER=", "LOGNAME=", "SSH_AUTH_SOCK=", "XDG_", "CARGO_"] {
             assert!(!dump.contains(host_var), "host env leaked ({host_var}): {dump}");
@@ -1116,7 +1138,7 @@ fn shade_build_home() -> &'static str {
 /// top-level tree under $out is rejected before anything reaches the store.
 #[cfg(target_os = "macos")]
 #[test]
-fn lythos_sandbox_rejects_undeclared_staged_output() {
+fn seatbelt_sandbox_rejects_undeclared_staged_output() {
     with_stack(|| {
         let tmp = TmpDir::new("lyth-smuggle");
         let (store, build, log) = exec_roots(&tmp);
@@ -1137,8 +1159,8 @@ derivation {
         let local = LocalStore;
         let resolvers: [&dyn Resolver; 1] = [&local];
         let registrar = NoopRegistrar;
-        let sandbox = LythosSandbox::new().unwrap();
-        let exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
+        let sandbox = SeatbeltSandbox::new().unwrap();
+        let mut exec = Executor::new(&store, &build, &log, &resolvers, &sandbox, &registrar);
 
         let err = exec.run(&recipe, Some("tc-1"), &io).unwrap_err();
         let BuildError::MissingOutput { detail, .. } = &err else {
@@ -1217,42 +1239,48 @@ impl shade_store::StoreFs for SharedMem {
 struct SeamSandbox(SharedMem);
 
 impl BuildSandbox for SeamSandbox {
-    fn prepare(&self, spec: &SandboxSpec) -> std::io::Result<BuildEnv> {
+    fn prepare(&self, spec: &SandboxSpec) -> Result<BuildEnv, SandboxError> {
         Ok(BuildEnv {
-            cwd: spec.scratch.to_path_buf(),
-            staging: spec.staging.to_path_buf(),
+            cwd: spec.scratch.to_string(),
+            staging: spec.staging.to_string(),
             vars: Vec::new(),
         })
     }
-    fn spawn(&self, env: &BuildEnv, command: &str, log: &fs::File) -> std::io::Result<i32> {
-        // Phase output goes to the sandbox-provided fd, like a real child.
-        use std::io::Write;
-        writeln!(&mut &*log, "SEAM-PHASE ran: {command}")?;
+    fn spawn(
+        &self,
+        env: &BuildEnv,
+        command: &str,
+        log: &mut dyn BuildLogSink,
+    ) -> Result<i32, SandboxError> {
+        // Phase output goes straight to the portable sink — no host fd at all,
+        // proving the seam decouples from `std::fs::File`.
+        log.write_all(format!("SEAM-PHASE ran: {command}\n").as_bytes())?;
         // "Build": stage the declared output tree through the shared seam.
-        let staging = env.staging.to_str().unwrap();
+        let staging = &env.staging;
         let mut fs = self.0.clone();
         let bin = format!("{staging}/bin");
         shade_store::backend::create_dir_all(&mut fs, &bin)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+            .map_err(|e| SandboxError::new(e.to_string()))?;
         let demo = format!("{bin}/demo");
         if !fs.0.borrow_mut().exists(&demo) {
             fs.write_file(&demo, b"hi", true)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+                .map_err(|e| SandboxError::new(e.to_string()))?;
         }
         Ok(0)
     }
-    fn collect_outputs(&self, env: &BuildEnv, declared: &[String]) -> std::io::Result<Vec<PathBuf>> {
-        let staging = env.staging.to_str().unwrap();
+    fn collect_outputs(
+        &self,
+        env: &BuildEnv,
+        declared: &[String],
+    ) -> Result<Vec<String>, SandboxError> {
+        let staging = &env.staging;
         let mut out = Vec::new();
         for rel in declared {
             let p = format!("{staging}/{rel}");
             if !self.0.clone().0.borrow_mut().exists(&p) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("declared output `{rel}` was not staged"),
-                ));
+                return Err(SandboxError::new(format!("declared output `{rel}` was not staged")));
             }
-            out.push(PathBuf::from(p));
+            out.push(p);
         }
         Ok(out)
     }
@@ -1286,7 +1314,7 @@ fn executor_scratch_log_store_route_through_seam() {
         let Built::Realized { out_path } = out.root_result() else {
             panic!("expected Realized, got {:?}", out.root_result());
         };
-        let out_str = out_path.to_str().unwrap();
+        let out_str = out_path.as_str();
         let store_name = &out.root.paths.store_name;
 
         // Output + .drv realized in the MemFs, addressed under /shade/store.
@@ -1309,5 +1337,139 @@ fn executor_scratch_log_store_route_through_seam() {
                 && !Path::new("/shade/store").join(store_name).exists(),
             "host /shade untouched"
         );
+    });
+}
+
+// ---- Sandbox error fold (BuildError::Sandbox / MissingOutput) --------------------
+//
+// `BuildError::Sandbox` was added so the de-gated executor could fold
+// prepare/spawn failures portably, but nothing in the suite made a sandbox
+// error before now (`PermissiveSandbox` never fails). `FailingSandbox` exercises
+// each fold point and pins the current behavior: the variant, its `errno`, that
+// the `SandboxError` message survives into `Display`, and that the failure path
+// still cleans the scratch through the seam.
+
+/// Which `BuildSandbox` method [`FailingSandbox`] fails in.
+#[derive(Debug, Clone, Copy)]
+enum FailAt {
+    Prepare,
+    Spawn,
+    CollectOutputs,
+}
+
+/// A `BuildSandbox` that fails at a configured point with a distinguishable
+/// message. Non-failing methods succeed minimally so the executor reaches the
+/// intended fold site (e.g. `Spawn` returns `Ok(0)` so the loop advances to
+/// `collect_outputs`).
+struct FailingSandbox(FailAt);
+
+impl BuildSandbox for FailingSandbox {
+    fn prepare(&self, spec: &SandboxSpec) -> Result<BuildEnv, SandboxError> {
+        if let FailAt::Prepare = self.0 {
+            return Err(SandboxError::new("prepare-boom"));
+        }
+        Ok(BuildEnv {
+            cwd: spec.scratch.to_string(),
+            staging: spec.staging.to_string(),
+            vars: Vec::new(),
+        })
+    }
+    fn spawn(
+        &self,
+        _env: &BuildEnv,
+        _command: &str,
+        log: &mut dyn BuildLogSink,
+    ) -> Result<i32, SandboxError> {
+        if let FailAt::Spawn = self.0 {
+            return Err(SandboxError::new("spawn-boom"));
+        }
+        log.write_all(b"FAILING-PHASE ran\n")?;
+        Ok(0)
+    }
+    fn collect_outputs(
+        &self,
+        _env: &BuildEnv,
+        _declared: &[String],
+    ) -> Result<Vec<String>, SandboxError> {
+        if let FailAt::CollectOutputs = self.0 {
+            return Err(SandboxError::new("collect-boom"));
+        }
+        Ok(Vec::new())
+    }
+}
+
+/// Run `trivial_recipe` through a `FailingSandbox` over a shared `MemFs`, and
+/// return the error. The store/build/log roots are the canonical `/shade/*` so
+/// scratch lifecycle is fully in the MemFs.
+fn run_failing(mem: &SharedMem, sandbox: &dyn BuildSandbox) -> BuildError {
+    let resolvers: [&dyn Resolver; 0] = [];
+    let registrar = NoopRegistrar;
+    let mut exec = Executor::new(
+        "/shade/store",
+        "/shade/build",
+        "/shade/log",
+        &resolvers,
+        sandbox,
+        &registrar,
+    );
+    exec.set_fs(mem.clone());
+    exec.run(&trivial_recipe(), Some("tc-1"), &HostIo).unwrap_err()
+}
+
+/// No scratch subtree survives under `/shade/build` after a failed build — the
+/// executor's unconditional `clean_scratch` ran through the seam.
+fn assert_scratch_clean(mem: &SharedMem) {
+    use shade_store::StoreFs;
+    let leftovers = mem.0.borrow_mut().read_dir("/shade/build").unwrap_or_default();
+    assert!(leftovers.is_empty(), "scratch leaked under /shade/build: {leftovers:?}");
+}
+
+#[test]
+fn sandbox_prepare_failure_folds_to_sandbox_variant() {
+    with_stack(|| {
+        let mem = SharedMem::new();
+        let sandbox = FailingSandbox(FailAt::Prepare);
+        let err = run_failing(&mem, &sandbox);
+        match &err {
+            BuildError::Sandbox(msg) => assert_eq!(msg, "prepare-boom"),
+            other => panic!("expected BuildError::Sandbox, got {other:?}"),
+        }
+        // The fold's contract: Sandbox → EINVAL, message preserved in Display.
+        assert_eq!(err.errno(), lythos_abi::errno::EINVAL);
+        assert_eq!(err.to_string(), "sandbox: prepare-boom");
+        assert_scratch_clean(&mem);
+    });
+}
+
+#[test]
+fn sandbox_spawn_failure_folds_to_sandbox_variant() {
+    with_stack(|| {
+        let mem = SharedMem::new();
+        let sandbox = FailingSandbox(FailAt::Spawn);
+        let err = run_failing(&mem, &sandbox);
+        match &err {
+            BuildError::Sandbox(msg) => assert_eq!(msg, "spawn-boom"),
+            other => panic!("expected BuildError::Sandbox, got {other:?}"),
+        }
+        assert_eq!(err.errno(), lythos_abi::errno::EINVAL);
+        assert_eq!(err.to_string(), "sandbox: spawn-boom");
+        assert_scratch_clean(&mem);
+    });
+}
+
+#[test]
+fn sandbox_collect_outputs_failure_folds_to_missing_output() {
+    with_stack(|| {
+        let mem = SharedMem::new();
+        let sandbox = FailingSandbox(FailAt::CollectOutputs);
+        let err = run_failing(&mem, &sandbox);
+        // collect_outputs folds to MissingOutput, NOT Sandbox — its message is
+        // carried in `detail` and reaches Display.
+        match &err {
+            BuildError::MissingOutput { detail, .. } => assert_eq!(detail, "collect-boom"),
+            other => panic!("expected BuildError::MissingOutput, got {other:?}"),
+        }
+        assert!(err.to_string().contains("collect-boom"), "message preserved: {err}");
+        assert_scratch_clean(&mem);
     });
 }

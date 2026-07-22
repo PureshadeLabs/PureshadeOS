@@ -21,12 +21,14 @@
 //!
 //! The plan/address half (eval → CDF → store paths) and the executor's
 //! filesystem scaffolding are `no_std + alloc` over the B1 [`StoreFs`] seam
-//! and compile for the OROS target (feature `oros`). The executor **run
-//! loop** and both sandboxes stay behind `std`: [`BuildSandbox`]'s host
-//! vehicles spawn real processes, and the native OROS builder task (lowering
-//! `SandboxPlan` to `SYS_MOUNT` + capability grants — audit step 3(b)) is
-//! deferred. Likewise the OROS `shade` binary (`pkg/shade`) stays a stub
-//! until an OROS `EvalIo` exists.
+//! and compile for the OROS target (feature `oros`). The [`BuildSandbox`] seam
+//! itself is portable (nameable without `std`) so the native OROS impl can
+//! satisfy it; only the executor **run loop** and the host sandbox *vehicles*
+//! (`PermissiveSandbox`, `SeatbeltSandbox`) stay behind `std`, since they spawn
+//! real processes. The native OROS builder task (lowering `SandboxPlan` to
+//! `SYS_MOUNT` + capability grants — audit step 3(b)) is still deferred.
+//! Likewise the OROS `shade` binary (`pkg/shade`) stays a stub until an OROS
+//! `EvalIo` exists.
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
@@ -56,21 +58,22 @@ pub(crate) fn path_str(p: &Path) -> &str {
 }
 
 mod executor;
+// The `BuildSandbox` seam and the types its signature names are portable
+// (nameable without `std`) so a native OROS impl can satisfy it.
 pub use executor::{
-    build_log_path, clean_scratch, prepare_scratch, scratch_dir, write_build_log,
-    CANONICAL_BUILD_ROOT, CANONICAL_LOG_ROOT,
+    build_log_path, clean_scratch, prepare_scratch, scratch_dir, write_build_log, BuildEnv,
+    BuildLogSink, BuildSandbox, Executor, ExecOutcome, NoopRegistrar, Registration, SandboxError,
+    SandboxSpec, StoreRegistrar, CANONICAL_BUILD_ROOT, CANONICAL_LOG_ROOT,
 };
+// The host sandbox vehicle and the db-backed registrar stay `std`-gated.
 #[cfg(feature = "std")]
-pub use executor::{
-    BuildEnv, BuildSandbox, DbRegistrar, ExecOutcome, Executor, NoopRegistrar, PermissiveSandbox,
-    Registration, SandboxSpec, StoreRegistrar,
-};
+pub use executor::{DbRegistrar, PermissiveSandbox};
 
 #[cfg(feature = "std")]
 mod sandbox;
 #[cfg(feature = "std")]
 pub use sandbox::{
-    CapGrant, LythosSandbox, MountPlan, SandboxPlan, BUILD_GID, BUILD_UID, BUILD_UMASK,
+    CapGrant, MountPlan, SandboxPlan, SeatbeltSandbox, BUILD_GID, BUILD_UID, BUILD_UMASK,
     SANDBOX_HOME,
 };
 
@@ -108,11 +111,14 @@ pub struct BuildPlan {
 /// made the output available in the local store (for the local store, it was
 /// already there; a substituter would fetch-and-install here), or `Ok(None)`
 /// if this source cannot satisfy the plan.
-#[cfg(feature = "std")]
+/// Portable seam (nameable without `std`): the executor names `&dyn Resolver`.
+/// `resolve` returns the satisfying store path as a seam string; errors fold
+/// into [`BuildError`] directly (a host resolver may use the `std`-only
+/// `BuildError::Io` internally — the trait return stays portable).
 pub trait Resolver {
     /// A short source name for diagnostics / the build outcome.
     fn source(&self) -> &str;
-    fn resolve(&self, plan: &BuildPlan) -> io::Result<Option<PathBuf>>;
+    fn resolve(&self, plan: &BuildPlan) -> Result<Option<String>, BuildError>;
 }
 
 /// The local store resolver: a hit iff `<out_path>` already exists. Stateless
@@ -127,12 +133,12 @@ impl Resolver for LocalStore {
     fn source(&self) -> &str {
         "local"
     }
-    fn resolve(&self, plan: &BuildPlan) -> io::Result<Option<PathBuf>> {
+    fn resolve(&self, plan: &BuildPlan) -> Result<Option<String>, BuildError> {
         // Immutable store: "exists ⇒ complete" (shade-store realize contract),
-        // so existence alone is a hit.
+        // so existence alone is a hit. Infallible on the host.
         Ok(Path::new(&plan.paths.out_path)
             .exists()
-            .then(|| PathBuf::from(&plan.paths.out_path)))
+            .then(|| plan.paths.out_path.clone()))
     }
 }
 
@@ -180,21 +186,20 @@ pub trait Builder {
     fn build(&self, plan: &BuildPlan) -> io::Result<StagedOutput>;
 }
 
-/// How the plan was satisfied.
-#[cfg(feature = "std")]
+/// How the plan was satisfied. Portable — the executor returns it in
+/// [`ExecOutcome`]; paths are seam strings (no `std::path`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Built {
     /// Satisfied by a [`Resolver`]; no build ran. `source` is the resolver
     /// that provided it (`"local"` for a store hit).
-    Resolved { source: String, out_path: PathBuf },
+    Resolved { source: String, out_path: String },
     /// Built locally and realized into the store.
-    Realized { out_path: PathBuf },
+    Realized { out_path: String },
 }
 
-#[cfg(feature = "std")]
 impl Built {
-    /// The output store path either way.
-    pub fn out_path(&self) -> &Path {
+    /// The output store path either way (a seam string).
+    pub fn out_path(&self) -> &str {
         match self {
             Built::Resolved { out_path, .. } | Built::Realized { out_path } => out_path,
         }
@@ -238,6 +243,11 @@ pub enum BuildError {
     PhaseFailed { drv: String, phase: usize, code: i32, log: String },
     /// The build succeeded but a declared output was not produced.
     MissingOutput { drv: String, detail: String },
+    /// A build-sandbox vehicle operation (`prepare`/`spawn`) failed. Carries
+    /// the portable [`SandboxError`] message. Portable (unlike `Io`) so the
+    /// de-gated executor can fold sandbox failures without `std`. Distinct from
+    /// `PhaseFailed` (a phase ran and exited nonzero).
+    Sandbox(String),
     /// The store registrar rejected a realization.
     #[cfg(feature = "std")]
     Register(io::Error),
@@ -273,6 +283,7 @@ impl core::fmt::Display for BuildError {
                 "{drv}: phase {phase} failed with exit code {code} (log: {log})"
             ),
             BuildError::MissingOutput { drv, detail } => write!(f, "{drv}: {detail}"),
+            BuildError::Sandbox(msg) => write!(f, "sandbox: {msg}"),
             #[cfg(feature = "std")]
             BuildError::Register(e) => write!(f, "register: {e}"),
         }
@@ -316,6 +327,9 @@ impl BuildError {
             // as the caller is concerned (there is no dedicated child-exit
             // sentinel in the 14-code ABI table).
             BuildError::PhaseFailed { .. } => e::EINVAL,
+            // A sandbox-vehicle failure — same errno the old `Io(other)` fold
+            // produced (kind `Other` → `EINVAL`).
+            BuildError::Sandbox(_) => e::EINVAL,
             // Store: a conflicting .drv already occupies the path.
             BuildError::Store(shade_store::StoreError::DrvMismatch(_)) => e::EEXIST,
             BuildError::Store(shade_store::StoreError::Cdf(_))
@@ -474,7 +488,7 @@ pub fn build(
     // Lookup first, across every resolver source in order (local store, then
     // any future substituters). First hit wins; nothing is built.
     for r in resolvers {
-        if let Some(out_path) = r.resolve(&plan).map_err(BuildError::Io)? {
+        if let Some(out_path) = r.resolve(&plan)? {
             let result = Built::Resolved { source: r.source().to_string(), out_path };
             return Ok(Outcome { plan, result });
         }
@@ -491,7 +505,7 @@ pub fn build(
         &plan.cdf,
         path_str(&staged.root),
     )?;
-    let result = Built::Realized { out_path: PathBuf::from(&realized.paths.out_path) };
+    let result = Built::Realized { out_path: realized.paths.out_path };
     Ok(Outcome { plan, result })
 }
 

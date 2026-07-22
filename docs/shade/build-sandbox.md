@@ -1,16 +1,19 @@
-# shade — Build Sandbox (`LythosSandbox`)
+# shade — Build Sandbox (`SeatbeltSandbox`)
 
-The isolating implementation of the executor's `BuildSandbox` seam
-([build-executor.md §2.1](build-executor.md#21-seam-a--buildsandbox)):
+The **host macOS-Seatbelt** implementation of the executor's `BuildSandbox`
+seam ([build-executor.md §2.1](build-executor.md#21-seam-a--buildsandbox)):
 `pkg/shade-build/src/sandbox.rs`. It enforces the sandbox profile `1`
 contract ([shade-pkg 06 §3.1](../shade-pkg/06-build.md#31-contract-sandbox-profile-1))
-that `PermissiveSandbox` only names. The executor is unchanged — this is a
-second impl of the same trait, selected by the caller.
+that `PermissiveSandbox` only names — but via macOS Seatbelt, **not** Lythos
+capabilities. The real `SYS_MOUNT` + capability-enforced native OROS sandbox
+that will consume the same `SandboxPlan` is a separate, **as-yet-unwritten**
+impl; `SeatbeltSandbox` does not stand in for it. The executor is unchanged —
+this is one impl of the same trait, selected by the caller.
 
 **Verified gate** (`pkg/shade-build/src/tests.rs`):
-`lythos_sandbox_rebuild_is_byte_identical` — the same derivation built twice
-yields byte-identical output trees; `lythos_sandbox_denies_network` and
-`lythos_sandbox_denies_out_of_tree_read` — a builder attempting network
+`seatbelt_sandbox_rebuild_is_byte_identical` — the same derivation built twice
+yields byte-identical output trees; `seatbelt_sandbox_denies_network` and
+`seatbelt_sandbox_denies_out_of_tree_read` — a builder attempting network
 access or an undeclared read fails, with a `PermissiveSandbox` control build
 proving the denial came from the sandbox, not the recipe.
 
@@ -36,7 +39,7 @@ Two layers, split so the contract outlives the enforcement mechanism:
   nothing inherited). Denials surface inside the builder as host `EPERM` —
   the host spelling of the plan's `ENOPERM`.
 
-Construction is **fail-closed**: `LythosSandbox::new()` errors on a host
+Construction is **fail-closed**: `SeatbeltSandbox::new()` errors on a host
 with no enforcement facility (non-macOS, or `sandbox-exec` missing). There
 is no silent fallback — the permissive impl already exists and is honestly
 named.
@@ -152,7 +155,7 @@ environment (secrets, other builds, the network).
    timestamps.
 7. **Vehicle longevity.** `sandbox-exec` is deprecated-but-functional Apple
    tooling (the same facility Nix uses on darwin). Non-macOS hosts have no
-   vehicle at all — `LythosSandbox::new()` fails closed there.
+   vehicle at all — `SeatbeltSandbox::new()` fails closed there.
 
 ## 7. Errno map
 

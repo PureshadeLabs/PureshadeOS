@@ -796,3 +796,101 @@ fn rfc3339_formatting_is_sane() {
     assert_eq!(rfc3339_utc(1_709_164_800), "2024-02-29T00:00:00Z");
     assert_eq!(rfc3339_utc(1_735_689_599), "2024-12-31T23:59:59Z");
 }
+
+// ---- Prism config-file seam (10 §3/§4) — driven by MemFs, zero host FS -------------
+//
+// The `.bak` retirement and source resolution now route entirely through the
+// StoreFs seam (`retire_default_prism` / `resolve_system_source`) — the exact
+// rename/existence path `os_rebuild` runs, exercised here against a pure
+// in-memory backend so any `std::fs` fallthrough would be visible (it produces
+// no MemFs effect and no logged op). The full `os_rebuild` gate above stays on
+// `HostFs` because the evaluator + executor it drives are host-bound.
+
+use crate::prism::{resolve_system_source, retire_default_prism};
+
+/// A `MemFs` with `/cfg/shade` created and, when `default` is set, a live
+/// `/cfg/shade/prism.shade` holding those bytes.
+fn cfg_memfs(default: Option<&[u8]>) -> MemFs {
+    let mut fs = MemFs::new();
+    fs.mkdir("/cfg").unwrap();
+    fs.mkdir("/cfg/shade").unwrap();
+    if let Some(bytes) = default {
+        fs.write_file("/cfg/shade/prism.shade", bytes, false).unwrap();
+    }
+    fs
+}
+
+#[test]
+fn seam_retire_moves_live_default_to_bak_in_memory() {
+    let mut fs = cfg_memfs(Some(b"the default prism"));
+    let mark = fs.ops.len();
+
+    // An explicit prism elsewhere supersedes the bootstrap default (10 §3).
+    retire_default_prism(&mut fs, "/cfg/shade", "/home/lyon/.prism/prism.shade").unwrap();
+
+    // The live default is replaced; the `.bak` is created from its bytes.
+    assert!(!fs.exists("/cfg/shade/prism.shade"), "live default must be replaced");
+    assert!(fs.exists("/cfg/shade/prism.shade.bak"), ".bak must be created");
+    assert_eq!(
+        fs.read_file("/cfg/shade/prism.shade.bak").unwrap(),
+        b"the default prism",
+        ".bak carries the original default bytes",
+    );
+
+    // The retirement was exactly one seam rename — no other backend op, and
+    // (MemFs being pure memory) no host FS access.
+    let ops: Vec<&str> = fs.ops[mark..].iter().map(|(o, _)| o.as_str()).collect();
+    assert_eq!(ops, ["rename_src", "rename_dst"], "retire is one backend rename");
+}
+
+#[test]
+fn seam_retire_is_a_clean_noop_without_a_default() {
+    let mut fs = cfg_memfs(None); // no prism.shade present
+    let mark = fs.ops.len();
+
+    // No default to retire: a clean no-op, never an error.
+    retire_default_prism(&mut fs, "/cfg/shade", "/home/lyon/.prism/prism.shade").unwrap();
+
+    assert!(!fs.exists("/cfg/shade/prism.shade.bak"));
+    assert_eq!(fs.ops.len(), mark, "no-op must not mutate the backend");
+}
+
+#[test]
+fn seam_retire_skips_when_built_prism_is_the_default_itself() {
+    let mut fs = cfg_memfs(Some(b"prism"));
+    let mark = fs.ops.len();
+
+    // Building the default in place must not rename it onto its own `.bak`.
+    retire_default_prism(&mut fs, "/cfg/shade", "/cfg/shade/prism.shade").unwrap();
+
+    assert!(fs.exists("/cfg/shade/prism.shade"), "the default stays live");
+    assert!(!fs.exists("/cfg/shade/prism.shade.bak"));
+    assert_eq!(fs.ops.len(), mark, "self-build is a no-op");
+}
+
+#[test]
+fn seam_source_resolution_probes_through_the_seam() {
+    // An explicit arg wins, is marked explicit, and its selector is split off.
+    let mut fs = cfg_memfs(None);
+    let (path, sel, explicit) =
+        resolve_system_source(&mut fs, "/cfg/shade", Some("/p/prism#a.b")).unwrap();
+    assert_eq!((path.as_str(), sel.as_deref(), explicit), ("/p/prism", Some("a.b"), true));
+
+    // No arg, no pointer, no source → NoSystemPrism (existence checks seamed).
+    let mut fs = cfg_memfs(None);
+    assert!(matches!(
+        resolve_system_source(&mut fs, "/cfg/shade", None),
+        Err(GenError::NoSystemPrism)
+    ));
+
+    // No arg, no pointer, live default present → resolves the live default.
+    let mut fs = cfg_memfs(Some(b"prism"));
+    let (path, sel, explicit) = resolve_system_source(&mut fs, "/cfg/shade", None).unwrap();
+    assert_eq!((path.as_str(), sel, explicit), ("/cfg/shade/prism.shade", None, false));
+
+    // No arg, no pointer, only `.bak` present → resolves the `.bak` (10 §4).
+    let mut fs = cfg_memfs(None);
+    fs.write_file("/cfg/shade/prism.shade.bak", b"bak", false).unwrap();
+    let (path, _sel, explicit) = resolve_system_source(&mut fs, "/cfg/shade", None).unwrap();
+    assert_eq!((path.as_str(), explicit), ("/cfg/shade/prism.shade.bak", false));
+}

@@ -89,10 +89,12 @@ the derivation-visible contract (cwd = scratch, `$out`, the
 impl overstates it. Recipe `env` keys are restored from the CDF's lowercase
 fold to uppercase (invertible: emission validates `[A-Z_][A-Z0-9_]*`).
 
-Real isolation is **`LythosSandbox`**, a second impl of this trait
+The host-isolation impl is **`SeatbeltSandbox`**, one impl of this trait
 ([build-sandbox.md](build-sandbox.md)): a pure sandbox plan (mounts,
-minimal capability set, deterministic env) enforced on the host via a
-Seatbelt profile. The executor did not change.
+minimal capability set, deterministic env) enforced on the host via a macOS
+Seatbelt profile — **not** native Lythos isolation. The capability-enforced
+OROS sandbox that consumes the same `SandboxPlan` is still unwritten. The
+executor did not change.
 
 ### 2.2 Seam B — `StoreRegistrar`
 
@@ -229,7 +231,7 @@ shade-build: 9wg74a0m…-smoke-0.1 — hit (local)
 
 ## 7. Deferred
 
-- **Isolation, native half**: `LythosSandbox`
+- **Isolation, native half**: `SeatbeltSandbox`
   ([build-sandbox.md](build-sandbox.md)) enforces the 06 §3.1 contract
   host-assisted (Seatbelt); the capability-restricted builder *task* on OROS
   per [`06 §3.2`](../shade-pkg/06-build.md#3-sandbox) remains blocked on a

@@ -1,17 +1,25 @@
-//! LythosSandbox — the isolating [`BuildSandbox`] impl (docs/shade/build-sandbox.md;
-//! contract: docs/shade-pkg/06-build.md §3.1, sandbox profile `1`).
+//! SeatbeltSandbox — the **host** macOS-Seatbelt [`BuildSandbox`] impl
+//! (docs/shade/build-sandbox.md; contract: docs/shade-pkg/06-build.md §3.1,
+//! sandbox profile `1`).
+//!
+//! This is a host vehicle, not the native OROS sandbox. It carries no Lythos
+//! enforcement: it enforces isolation with macOS Seatbelt (`sandbox-exec` +
+//! an SBPL profile) and its [`SeatbeltSandbox::new`] is **fail-closed to
+//! macOS**. The real `SYS_MOUNT` + capability-enforced OROS sandbox that will
+//! consume the same [`SandboxPlan`] is **unwritten** — it does not exist in the
+//! tree, and this impl deliberately does not stand in for it.
 //!
 //! Two layers, deliberately separated:
 //!
-//! - [`SandboxPlan`] is the **pure model**: given a [`SandboxSpec`], it computes
-//!   the mount list (the builder's filesystem view, in [`SYS_MOUNT`] terms —
-//!   declared input store paths read-only under `/shade/store`, one writable
-//!   build dir), the minimal capability grant set ([`CapKind`] + rights bits
-//!   from `lythos-abi`), and the fixed deterministic environment. Its
-//!   `check_read` / `check_write` / `check_network` answer with **ABI errnos**
-//!   exactly as the Lythos syscall boundary would. This layer is what the
-//!   native OROS builder task will be constructed from; it has no host
-//!   dependencies and is fully unit-tested.
+//! - [`SandboxPlan`] is the **pure model** (kept and named for the native impl):
+//!   given a [`SandboxSpec`], it computes the mount list (the builder's
+//!   filesystem view, in [`SYS_MOUNT`] terms — declared input store paths
+//!   read-only under `/shade/store`, one writable build dir), the minimal
+//!   capability grant set ([`CapKind`] + rights bits from `lythos-abi`), and
+//!   the fixed deterministic environment. Its `check_read` / `check_write` /
+//!   `check_network` answer with **ABI errnos** exactly as the Lythos syscall
+//!   boundary would. This layer is what the native OROS builder task will be
+//!   constructed from; it is fully unit-tested.
 //! - The **host vehicle** enforces the plan while builds still run on the dev
 //!   host (host-assisted mode, 06 intro): on macOS the plan compiles to a
 //!   Seatbelt (SBPL) profile and every phase runs under
@@ -19,23 +27,24 @@
 //!   plan's mounts, writes outside the build dir, and all network access fail
 //!   inside the builder with EPERM — the host spelling of the plan's ENOPERM.
 //!
-//! Construction is **fail-closed**: [`LythosSandbox::new`] errors if the host
+//! Construction is **fail-closed**: [`SeatbeltSandbox::new`] errors if the host
 //! has no enforcement facility. There is no silent fallback to permissive
-//! behavior — that impl already exists and is honestly named.
+//! behavior — that impl already exists ([`PermissiveSandbox`]) and is honestly
+//! named.
 //!
-//! The executor is untouched: this is a new impl of the [`BuildSandbox`] seam.
+//! The executor is untouched: this is one impl of the [`BuildSandbox`] seam.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Mutex;
 
 use lythos_abi::cap::{CapKind, RIGHT_READ, RIGHT_WRITE};
 use lythos_abi::errno;
 
-use crate::executor::{BuildEnv, BuildSandbox, SandboxSpec};
+use crate::executor::{BuildEnv, BuildLogSink, BuildSandbox, SandboxError, SandboxSpec};
 
 /// Fixed build identity (06 §3.1 "fixed build uid/gid"). Model values; the
 /// host vehicle cannot change uid unprivileged and documents that gap
@@ -128,7 +137,7 @@ impl SandboxPlan {
             let source = fs::canonicalize(input).map_err(|e| {
                 io::Error::new(
                     e.kind(),
-                    format!("declared input {} is not realized: {e}", input.display()),
+                    format!("declared input {input} is not realized: {e}"),
                 )
             })?;
             let name = source
@@ -173,7 +182,7 @@ impl SandboxPlan {
         // Deterministic environment (06 §4), complete. Recipe env first so
         // the fixed table wins on collision (03 §5.3: recipes may not
         // override it; `Command::envs` keeps the later duplicate).
-        let staging_str = spec.staging.to_string_lossy().into_owned();
+        let staging_str = spec.staging.to_string();
         let mut env: Vec<(String, String)> = spec.env.to_vec();
         // PATH: input bin/ dirs in dep order, then the host tool tail — the
         // host shell + coreutils are trusted bringup infrastructure, mirrored
@@ -182,7 +191,7 @@ impl SandboxPlan {
         let mut path_entries: Vec<String> = spec
             .inputs
             .iter()
-            .map(|d| d.join("bin").to_string_lossy().into_owned())
+            .map(|d| Path::new(d).join("bin").to_string_lossy().into_owned())
             .collect();
         path_entries.push("/usr/bin".into());
         path_entries.push("/bin".into());
@@ -192,7 +201,7 @@ impl SandboxPlan {
             ("OUT".to_string(), staging_str.clone()),
             ("out".to_string(), staging_str),
             ("TARGET".to_string(), spec.system.to_string()),
-            ("TMPDIR".to_string(), spec.scratch.join("tmp").to_string_lossy().into_owned()),
+            ("TMPDIR".to_string(), Path::new(spec.scratch).join("tmp").to_string_lossy().into_owned()),
             ("SOURCE_DATE_EPOCH".to_string(), "0".to_string()),
             ("TZ".to_string(), "UTC".to_string()),
             ("LANG".to_string(), "C.UTF-8".to_string()),
@@ -290,21 +299,23 @@ impl SandboxPlan {
     }
 }
 
-/// The isolating sandbox. See the module docs for the model/vehicle split.
-pub struct LythosSandbox {
+/// The host macOS-Seatbelt sandbox. See the module docs for the model/vehicle
+/// split — the native OROS sandbox that consumes the same [`SandboxPlan`] is a
+/// separate, as-yet-unwritten impl.
+pub struct SeatbeltSandbox {
     /// Plans by scratch dir (`BuildEnv::cwd`), stashed at `prepare` for
     /// `spawn`/`collect_outputs` — the seam's `BuildEnv` stays unchanged.
-    plans: Mutex<BTreeMap<PathBuf, SandboxPlan>>,
+    plans: Mutex<BTreeMap<String, SandboxPlan>>,
 }
 
-impl LythosSandbox {
+impl SeatbeltSandbox {
     /// Fail-closed constructor: errors unless the host enforcement facility
     /// exists (macOS `sandbox-exec`). No silent permissive fallback.
-    pub fn new() -> io::Result<LythosSandbox> {
+    pub fn new() -> io::Result<SeatbeltSandbox> {
         if !cfg!(target_os = "macos") {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "LythosSandbox host vehicle requires macOS sandbox-exec; \
+                "SeatbeltSandbox host vehicle requires macOS sandbox-exec; \
                  no enforcement facility on this host (see docs/shade/build-sandbox.md)",
             ));
         }
@@ -314,36 +325,41 @@ impl LythosSandbox {
                 "/usr/bin/sandbox-exec not found; cannot enforce the build sandbox",
             ));
         }
-        Ok(LythosSandbox { plans: Mutex::new(BTreeMap::new()) })
+        Ok(SeatbeltSandbox { plans: Mutex::new(BTreeMap::new()) })
     }
 
-    fn plan_for(&self, cwd: &Path) -> io::Result<SandboxPlan> {
+    fn plan_for(&self, cwd: &str) -> io::Result<SandboxPlan> {
         self.plans.lock().unwrap().get(cwd).cloned().ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "no sandbox plan prepared for this build")
         })
     }
 }
 
-impl BuildSandbox for LythosSandbox {
-    fn prepare(&self, spec: &SandboxSpec) -> io::Result<BuildEnv> {
+impl BuildSandbox for SeatbeltSandbox {
+    fn prepare(&self, spec: &SandboxSpec) -> Result<BuildEnv, SandboxError> {
         let plan = SandboxPlan::from_spec(spec)?;
         let env = BuildEnv {
-            cwd: spec.scratch.to_path_buf(),
-            staging: spec.staging.to_path_buf(),
+            cwd: spec.scratch.to_string(),
+            staging: spec.staging.to_string(),
             vars: plan.env.clone(),
         };
         self.plans.lock().unwrap().insert(env.cwd.clone(), plan);
         Ok(env)
     }
 
-    fn spawn(&self, env: &BuildEnv, command: &str, log: &fs::File) -> io::Result<i32> {
+    fn spawn(
+        &self,
+        env: &BuildEnv,
+        command: &str,
+        log: &mut dyn BuildLogSink,
+    ) -> Result<i32, SandboxError> {
         let plan = self.plan_for(&env.cwd)?;
         let profile = plan.seatbelt_profile()?;
         // The wrapper pins the umask before the recipe command; identity and
         // cwd are pinned by the spawn itself.
         let wrapped = format!("umask {BUILD_UMASK}; {command}");
-        let status = Command::new("/usr/bin/sandbox-exec")
-            .arg("-p")
+        let mut cmd = Command::new("/usr/bin/sandbox-exec");
+        cmd.arg("-p")
             .arg(profile)
             .arg("/bin/sh")
             .arg("-c")
@@ -352,26 +368,25 @@ impl BuildSandbox for LythosSandbox {
             // The environment is the plan's table and nothing else — no host
             // inheritance of any kind.
             .env_clear()
-            .envs(env.vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log.try_clone()?))
-            .stderr(Stdio::from(log.try_clone()?))
-            .status()?;
-        Ok(status.code().unwrap_or(-1))
+            .envs(env.vars.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        crate::executor::spawn_capturing(cmd, log)
     }
 
-    fn collect_outputs(&self, env: &BuildEnv, declared: &[String]) -> io::Result<Vec<PathBuf>> {
+    fn collect_outputs(
+        &self,
+        env: &BuildEnv,
+        declared: &[String],
+    ) -> Result<Vec<String>, SandboxError> {
         // Every declared output must exist…
         let mut out = Vec::with_capacity(declared.len());
         for rel in declared {
-            let p = env.staging.join(rel);
+            let p = Path::new(&env.staging).join(rel);
             if !p.exists() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("declared output `{rel}` was not produced by the build"),
-                ));
+                return Err(SandboxError::new(format!(
+                    "declared output `{rel}` was not produced by the build"
+                )));
             }
-            out.push(p);
+            out.push(p.to_string_lossy().into_owned());
         }
         // …and only declared top-level trees may exist under $out (06 §5
         // step 1): output confinement's staging half — the profile already
@@ -386,10 +401,9 @@ impl BuildSandbox for LythosSandbox {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if !declared_tops.contains(name.as_ref()) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("undeclared top-level entry `{name}` in $out (06 §5 step 1)"),
-                ));
+                return Err(SandboxError::new(format!(
+                    "undeclared top-level entry `{name}` in $out (06 §5 step 1)"
+                )));
             }
         }
         Ok(out)
@@ -421,6 +435,11 @@ mod plan_tests {
 
     fn plan_with(root: &Path, inputs: Vec<PathBuf>, env: Vec<(String, String)>) -> SandboxPlan {
         let (scratch, staging) = mk_spec(root, &inputs);
+        // The seam is `&str`-pathed; convert at the boundary (the dirs above
+        // still exist on the host, which `from_spec`'s canonicalize needs).
+        let scratch = scratch.to_str().unwrap().to_string();
+        let staging = staging.to_str().unwrap().to_string();
+        let inputs: Vec<String> = inputs.iter().map(|p| p.to_str().unwrap().to_string()).collect();
         let spec = SandboxSpec {
             store_name: "abc-demo-1.0",
             scratch: &scratch,
