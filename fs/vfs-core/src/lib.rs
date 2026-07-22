@@ -32,5 +32,5 @@ pub mod realize;
 mod testutil;
 
 pub use backend::{DirEntry, FsBackend, FsError, InodeMeta};
-pub use mount::{MountError, MountId, MountTable};
+pub use mount::{BackendId, BackendStore, MountError, MountId, MountTable};
 pub use realize::{RealizeGuard, RenameOutcome};

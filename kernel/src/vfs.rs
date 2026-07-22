@@ -36,7 +36,8 @@ use alloc::vec::Vec;
 
 use rfs2::{BlockDevice, Error, GcmTransform, IdentityTransform, Rfs2};
 use vfs_core::{
-    FsBackend, FsError, InodeMeta, MountError, MountId, MountTable, RealizeGuard, RenameOutcome,
+    BackendId, BackendStore, FsBackend, FsError, InodeMeta, MountError, MountId, MountTable,
+    RealizeGuard, RenameOutcome,
 };
 
 use crate::virtio_blk;
@@ -433,8 +434,11 @@ const STORE_KEY_PATH: &str = "/lth/system/store.key";
 
 #[derive(Clone)]
 struct OpenFile {
-    /// Which mount the fd was opened on — fds keep addressing their backend
-    /// even as other mounts come and go.
+    /// Which backend the fd was opened on — the `Copy` [`MountId`]/`BackendId`
+    /// (one identity; see `vfs_core::mount`). An fd keeps addressing its backend
+    /// through this id even as other mounts come and go, because backends live
+    /// in the global [`BackendStore`] keyed by exactly this id, not in the
+    /// (namespace-local, clonable) routing table.
     mount:    MountId,
     ino:      u64,
     offset:   u64,
@@ -449,12 +453,22 @@ struct OpenFile {
 }
 
 struct Vfs {
+    /// The single owner of every mounted backend, keyed by [`BackendId`]. A
+    /// field **disjoint** from `table`: an FS handler resolves against `table`
+    /// (borrowing it alone, taking a `Copy` id) and then borrows exactly one
+    /// backend here for one operation — the two borrows never alias, so the
+    /// "one `&mut`, one op" discipline holds by lexical scoping with no
+    /// `RefCell` (docs/plans/per-task-mount-namespace.md §5.1).
+    backends: BackendStore,
+    /// Routing only: `prefix → BackendId`. Owns no backend, so it stays cheap to
+    /// clone when per-task namespaces land.
     table:   MountTable,
-    root_id: MountId,
+    root_id: BackendId,
     fds:     [Option<OpenFile>; MAX_FDS],
-    /// Read-only-after-realize guards, present only for mounts created with
-    /// MOUNT_STORE (stage 2 — docs/plans/mount-syscall-shade-store.md §4.2).
-    guards:  BTreeMap<MountId, RealizeGuard>,
+    /// Read-only-after-realize guards, keyed by the guarded backend's id,
+    /// present only for mounts created with MOUNT_STORE (stage 2 —
+    /// docs/plans/mount-syscall-shade-store.md §4.2).
+    guards:  BTreeMap<BackendId, RealizeGuard>,
 }
 
 struct VfsState(core::cell::UnsafeCell<Option<Vfs>>);
@@ -521,12 +535,14 @@ pub fn init() -> bool {
     ROOT_ENCRYPTED.store(encrypted, core::sync::atomic::Ordering::Relaxed);
 
     let mut table = MountTable::new();
-    let root_id = match table.mount("/", backend) {
+    let mut backends = BackendStore::new();
+    let root_id = match table.mount("/", backend, &mut backends) {
         Ok(id) => id,
         Err(_) => return false, // impossible: empty table accepts "/"
     };
     unsafe {
         *STATE.0.get() = Some(Vfs {
+            backends,
             table,
             root_id,
             fds: [const { None }; MAX_FDS],
@@ -601,11 +617,11 @@ fn write_root_file(path: &str, data: &[u8]) -> bool {
         Ok(t) => t,
         Err(_) => return false,
     };
-    let (mount, _, rel) = match v.table.resolve_full(&target) {
+    let (mount, rel) = match v.table.resolve(&target) {
         Ok(t) => t,
         Err(_) => return false,
     };
-    let Some(be) = v.table.backend_mut(mount) else { return false };
+    let Some(be) = v.backends.get(mount) else { return false };
     let ino = match be.create(&rel) {
         Ok(i) => i,
         Err(FsError::Exists) => match be.lookup(&rel) {
@@ -798,7 +814,7 @@ pub fn mount(at: &str, source: u64, flags: u64) -> i64 {
         _ => return EINVAL,
     };
 
-    match v.table.mount(at, backend) {
+    match v.table.mount(at, backend, &mut v.backends) {
         Ok(id) => {
             if store {
                 // Reconstruct the realize-seal set from the persisted store
@@ -812,7 +828,7 @@ pub fn mount(at: &str, source: u64, flags: u64) -> i64 {
                 // dirs (`.tmp-*`) and `.`/`..` are never sealed — skipped by the
                 // dot prefix. Harmless on a fresh RAM store (empty readdir).
                 let mut guard = RealizeGuard::new();
-                if let Some(be) = v.table.backend_mut(id) {
+                if let Some(be) = v.backends.get(id) {
                     if let Ok(entries) = be.readdir("/") {
                         for e in entries {
                             if e.file_type == FT_DIR && !e.name.starts_with('.') {
@@ -838,6 +854,42 @@ pub fn mount(at: &str, source: u64, flags: u64) -> i64 {
     }
 }
 
+/// Unmount the filesystem at exactly `at` and free its backend. Teardown in the
+/// order the namespace lifetime work (docs/plans/per-task-mount-namespace.md §4)
+/// will reuse: drop the route first, then free the backend from the global
+/// [`BackendStore`] **only once no route still reaches it** — so removing one
+/// route to a shared backend (future namespaces) never frees a backend another
+/// route still names, and, conversely, a dropped route never leaves a dangling
+/// [`BackendId`] behind. The realize guard, keyed by the same id, is dropped
+/// with the backend. Open fds addressing the freed backend fail gracefully
+/// afterwards (their `BackendStore::get` returns `None` → `EBADF`/no-op), the
+/// same "backend unmounted underneath the fd" path `close`/`read` already take.
+///
+/// Not yet wired to a syscall (there is no `SYS_UNMOUNT`); it is the teardown
+/// primitive the namespace reaper calls. `#[allow(dead_code)]` (module-wide)
+/// covers the currently-unreferenced entry.
+pub fn unmount(at: &str) -> i64 {
+    let v = match state() {
+        Some(v) => v,
+        None => return ENOMNT,
+    };
+    // Root is pinned — the whole system routes through it (§4 root-namespace
+    // pinning); refuse to strand every path with no `/`.
+    if v.table.resolve(at).map(|(id, rel)| id == v.root_id && rel == "/").unwrap_or(false) {
+        return EINVAL;
+    }
+    let freed = match v.table.unmount(at) {
+        Ok(id) => id,
+        Err(e) => return errno_mount(e),
+    };
+    // Free the backend + its guard only when the last route to it is gone.
+    if !v.table.routes_to(freed) {
+        v.guards.remove(&freed);
+        v.backends.remove(freed);
+    }
+    0
+}
+
 // ── Path resolution (symlink following, mount-aware) ──────────────────────────
 
 /// Canonicalize `path`, following symlinks in every component (hop-capped).
@@ -858,7 +910,13 @@ fn resolve(v: &mut Vfs, path: &str, hops: usize) -> Result<String, i64> {
         let mut cand = resolved.clone();
         cand.push('/');
         cand.push_str(comp);
-        let (be, rel) = v.table.resolve(&cand).map_err(errno_mount)?;
+        // Route → Copy BackendId (routing borrow ends), then borrow that one
+        // backend for this hop's stat. `meta`/`target` are owned, so the
+        // backend borrow is released before the tail-recursive `resolve` below
+        // re-borrows the table — the reentrancy safety is now structural, not a
+        // matter of the old `&mut`-into-the-table borrow ending "just in time".
+        let (bid, rel) = v.table.resolve(&cand).map_err(errno_mount)?;
+        let be = v.backends.get(bid).ok_or(ENOMNT)?;
         let meta = be.stat(&rel).map_err(errno_fs)?;
         if meta.is_symlink {
             let target = be.readlink(&rel).map_err(errno_fs)?;
@@ -924,10 +982,11 @@ pub fn open(path: &[u8]) -> i64 {
         Ok(r) => r,
         Err(e) => return e,
     };
-    let (mount, be, rel) = match v.table.resolve_full(&resolved) {
+    let (mount, rel) = match v.table.resolve(&resolved) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
+    let Some(be) = v.backends.get(mount) else { return ENOMNT };
     let meta = match be.stat(&rel) {
         Ok(m) => m,
         Err(e) => return errno_fs(e),
@@ -940,7 +999,7 @@ pub fn open(path: &[u8]) -> i64 {
     }
     let Some(slot) = v.fds.iter().position(|s| s.is_none()) else {
         // Undo the pin we just took; the fd table is full.
-        if let Some(be) = v.table.backend_mut(mount) {
+        if let Some(be) = v.backends.get(mount) {
             let _ = be.unpin(meta.ino);
         }
         return EMFILE;
@@ -967,7 +1026,7 @@ pub fn read(fd: u64, buf: &mut [u8]) -> i64 {
         Some(f) => f.clone(),
         None => return EBADF,
     };
-    let Some(be) = v.table.backend_mut(of.mount) else {
+    let Some(be) = v.backends.get(of.mount) else {
         return EBADF;
     };
     match be.read_at(of.ino, of.offset, buf) {
@@ -1006,7 +1065,7 @@ pub fn write(fd: u64, buf: &[u8]) -> i64 {
     if buf.is_empty() {
         return 0;
     }
-    let Some(be) = v.table.backend_mut(of.mount) else {
+    let Some(be) = v.backends.get(of.mount) else {
         return EBADF;
     };
     if let Err(e) = be.write_at(of.ino, of.size, buf) {
@@ -1034,7 +1093,7 @@ pub fn close(fd: u64) -> i64 {
         None => return EBADF,
     };
     v.fds[fd as usize] = None;
-    let Some(be) = v.table.backend_mut(of.mount) else {
+    let Some(be) = v.backends.get(of.mount) else {
         return 0; // backend unmounted underneath the fd — nothing to unpin
     };
     let _ = be.unpin(of.ino);
@@ -1063,7 +1122,7 @@ pub fn create(path: &[u8], _uid: u32, _gid: u32) -> i64 {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let (mount, _, rel) = match v.table.resolve_full(&target) {
+    let (mount, rel) = match v.table.resolve(&target) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
@@ -1072,7 +1131,7 @@ pub fn create(path: &[u8], _uid: u32, _gid: u32) -> i64 {
             return errno_fs(e);
         }
     }
-    let Some(be) = v.table.backend_mut(mount) else {
+    let Some(be) = v.backends.get(mount) else {
         return ENOMNT;
     };
     let ino = match be.create(&rel) {
@@ -1086,7 +1145,7 @@ pub fn create(path: &[u8], _uid: u32, _gid: u32) -> i64 {
         return errno_fs(e);
     }
     let Some(slot) = v.fds.iter().position(|s| s.is_none()) else {
-        if let Some(be) = v.table.backend_mut(mount) {
+        if let Some(be) = v.backends.get(mount) {
             let _ = be.unpin(ino);
             let _ = be.commit();
         }
@@ -1111,7 +1170,7 @@ pub fn mkdir(path: &[u8], _uid: u32, _gid: u32) -> i64 {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let (mount, _, rel) = match v.table.resolve_full(&target) {
+    let (mount, rel) = match v.table.resolve(&target) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
@@ -1128,7 +1187,7 @@ pub fn mkdir(path: &[u8], _uid: u32, _gid: u32) -> i64 {
             return errno_fs(e);
         }
     }
-    let Some(be) = v.table.backend_mut(mount) else {
+    let Some(be) = v.backends.get(mount) else {
         return ENOMNT;
     };
     if let Err(e) = be.mkdir(&rel) {
@@ -1155,7 +1214,7 @@ pub fn unlink(path: &[u8]) -> i64 {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let (mount, _, rel) = match v.table.resolve_full(&target) {
+    let (mount, rel) = match v.table.resolve(&target) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
@@ -1164,7 +1223,7 @@ pub fn unlink(path: &[u8]) -> i64 {
             return errno_fs(e);
         }
     }
-    let Some(be) = v.table.backend_mut(mount) else {
+    let Some(be) = v.backends.get(mount) else {
         return ENOMNT;
     };
     if let Err(e) = be.unlink(&rel) {
@@ -1249,7 +1308,7 @@ pub fn store_remove_tree(path: &[u8]) -> i64 {
         Some(s) => s,
         None => return EINVAL,
     };
-    let (mount, _, rel) = match v.table.resolve_full(p) {
+    let (mount, rel) = match v.table.resolve(p) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
@@ -1267,7 +1326,7 @@ pub fn store_remove_tree(path: &[u8]) -> i64 {
     }
     let name = name.to_string();
 
-    let Some(be) = v.table.backend_mut(mount) else {
+    let Some(be) = v.backends.get(mount) else {
         return ENOMNT;
     };
     // Determine whether the top-level entry is a directory. Store tops are a
@@ -1319,7 +1378,7 @@ pub fn symlink(target: &[u8], link_path: &[u8]) -> i64 {
         Ok(r) => r,
         Err(e) => return e,
     };
-    let (mount, _, rel) = match v.table.resolve_full(&link_r) {
+    let (mount, rel) = match v.table.resolve(&link_r) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
@@ -1328,7 +1387,7 @@ pub fn symlink(target: &[u8], link_path: &[u8]) -> i64 {
             return errno_fs(e);
         }
     }
-    let Some(be) = v.table.backend_mut(mount) else {
+    let Some(be) = v.backends.get(mount) else {
         return ENOMNT;
     };
     if let Err(e) = be.symlink(t, &rel) {
@@ -1357,10 +1416,11 @@ pub fn readlink(path: &[u8], out: &mut [u8]) -> i64 {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let (be, rel) = match v.table.resolve(&target) {
+    let (mount, rel) = match v.table.resolve(&target) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
+    let Some(be) = v.backends.get(mount) else { return ENOMNT };
     match be.readlink(&rel) {
         Ok(t) => {
             let n = t.len().min(out.len());
@@ -1392,11 +1452,11 @@ pub fn rename(old_path: &[u8], new_path: &[u8]) -> i64 {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let (old_mount, _, old_rel) = match v.table.resolve_full(&old_r) {
+    let (old_mount, old_rel) = match v.table.resolve(&old_r) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
-    let (new_mount, _, new_rel) = match v.table.resolve_full(&new_r) {
+    let (new_mount, new_rel) = match v.table.resolve(&new_r) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
@@ -1419,7 +1479,7 @@ pub fn rename(old_path: &[u8], new_path: &[u8]) -> i64 {
         None => None,
     };
 
-    let Some(be) = v.table.backend_mut(new_mount) else {
+    let Some(be) = v.backends.get(new_mount) else {
         return ENOMNT;
     };
     if let Err(e) = be.rename(&old_rel, &new_rel) {
@@ -1482,7 +1542,8 @@ pub fn stat_path(path: &[u8], out: &mut Stat) -> bool {
     };
     let Some(p) = path_str(path) else { return false };
     let Ok(resolved) = resolve(v, p, 0) else { return false };
-    let Ok((be, rel)) = v.table.resolve(&resolved) else { return false };
+    let Ok((mount, rel)) = v.table.resolve(&resolved) else { return false };
+    let Some(be) = v.backends.get(mount) else { return false };
     match be.stat(&rel) {
         Ok(meta) => {
             *out = Stat::from(&meta);
@@ -1497,7 +1558,8 @@ pub fn readdir_path(path: &[u8]) -> Option<Vec<DirEntry>> {
     let v = state()?;
     let p = path_str(path)?;
     let resolved = resolve(v, p, 0).ok()?;
-    let (be, rel) = v.table.resolve(&resolved).ok()?;
+    let (mount, rel) = v.table.resolve(&resolved).ok()?;
+    let be = v.backends.get(mount)?;
     let entries = be.readdir(&rel).ok()?;
     Some(
         entries
@@ -1511,7 +1573,8 @@ pub fn readdir_path(path: &[u8]) -> Option<Vec<DirEntry>> {
 pub fn load_file(path: &str) -> Option<Vec<u8>> {
     let v = state()?;
     let resolved = resolve(v, path, 0).ok()?;
-    let (be, rel) = v.table.resolve(&resolved).ok()?;
+    let (mount, rel) = v.table.resolve(&resolved).ok()?;
+    let be = v.backends.get(mount)?;
     let meta = be.stat(&rel).ok()?;
     if meta.is_dir {
         return None;
@@ -1531,15 +1594,15 @@ pub fn load_file(path: &str) -> Option<Vec<u8>> {
 /// Current committed generation of the ROOT volume (crash-consistency probes).
 pub fn generation() -> Option<u64> {
     let v = state()?;
-    Some(v.table.backend_mut(v.root_id)?.generation())
+    Some(v.backends.get(v.root_id)?.generation())
 }
 
 /// Committed generation of the mount covering `path` (boot probes: proves a
 /// mounted volume is a distinct backend instance from root).
 pub fn generation_at(path: &str) -> Option<u64> {
     let v = state()?;
-    let (be, _) = v.table.resolve(path).ok()?;
-    Some(be.generation())
+    let (mount, _) = v.table.resolve(path).ok()?;
+    Some(v.backends.get(mount)?.generation())
 }
 
 /// Whether a mount is installed at exactly `at` (boot probes).
