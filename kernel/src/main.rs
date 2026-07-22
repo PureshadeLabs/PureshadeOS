@@ -790,6 +790,53 @@ pub extern "C" fn kernel_main() -> ! {
             kprintln!("{TAG}[mount]{RST} unmount probe {OK}passed{RST} — cap gate, teardown+free, root pinned, ENOMNT");
         }
 
+        // ── RamDisk frame-reclaim probe (namespaces stage 2 part A) ────────
+        // `Drop for RamDisk` returns the volume's PMM frames on unmount. Without
+        // it, each mount/unmount cycle would leak a whole RAM_DISK_BLOCKS worth
+        // of frames (~16 MiB) — the standard cost of a builder's private RAM
+        // scratch once namespace teardown unmounts on task exit. This probe
+        // proves the free-frame count returns to baseline across many cycles.
+        {
+            let r = vfs::mkdir(b"/mnt-ra", 0, 0);
+            assert!(r == 0 || r == vfs::EEXIST, "ramfree probe: mkdir /mnt-ra failed: {r}");
+
+            // Warm-up cycle: absorb any one-time kernel-heap growth so the
+            // steady-state measurement below is exact (heap frames, once taken,
+            // stay resident and are not part of the RAM-disk reclaim).
+            assert_eq!(vfs::mount("/mnt-ra", vfs::MOUNT_SRC_RFS2_RAM, 0), 0, "ramfree probe: warm-up mount");
+            assert_eq!(vfs::unmount("/mnt-ra"), 0, "ramfree probe: warm-up unmount");
+
+            // A single cycle must consume frames at mount and return to exactly
+            // the same free-frame count at unmount — Drop frees precisely what
+            // mount took, no more, no less.
+            let before = pmm::free_frame_count();
+            assert_eq!(vfs::mount("/mnt-ra", vfs::MOUNT_SRC_RFS2_RAM, 0), 0, "ramfree probe: mount");
+            let mounted = pmm::free_frame_count();
+            assert!(before > mounted, "ramfree probe: a RAM mount must consume frames");
+            assert_eq!(vfs::unmount("/mnt-ra"), 0, "ramfree probe: unmount");
+            let after = pmm::free_frame_count();
+            assert_eq!(
+                after, before,
+                "ramfree probe: one cycle leaked {} frames", before.saturating_sub(after)
+            );
+
+            // Many cycles: a per-cycle leak would compound into an unmistakable
+            // dip (16 × RAM_DISK_BLOCKS). Steady state must hold flat.
+            let base = pmm::free_frame_count();
+            for _ in 0..16 {
+                assert_eq!(vfs::mount("/mnt-ra", vfs::MOUNT_SRC_RFS2_RAM, 0), 0, "ramfree probe: cycle mount");
+                assert_eq!(vfs::unmount("/mnt-ra"), 0, "ramfree probe: cycle unmount");
+            }
+            let end = pmm::free_frame_count();
+            assert_eq!(
+                end, base,
+                "ramfree probe: 16 cycles leaked {} frames (~{}/cycle)",
+                base.saturating_sub(end), base.saturating_sub(end) / 16
+            );
+
+            kprintln!("{TAG}[mount]{RST} ramfree probe {OK}passed{RST} — RamDisk Drop reclaims every frame across 16 mount/unmount cycles");
+        }
+
         // ── Stage-1 hardening: RamDisk direct-map ceiling + cap gate across
         // the REAL ring-3 boundary (the dispatcher probe above never leaves
         // ring 0) ──────────────────────────────────────────────────────────

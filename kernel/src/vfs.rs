@@ -234,9 +234,13 @@ impl BlockDevice for VirtioDisk {
 /// Keeps the kernel heap out of the picture — only the frame-address Vec
 /// lives on the heap.
 ///
-/// Frames are never returned to the PMM after a successful mount: a mounted
-/// volume lives for the machine's uptime (no unmount syscall yet; noted in
-/// the design doc).
+/// Frames are reclaimed to the PMM when the `RamDisk` is dropped (see
+/// [`Drop for RamDisk`](RamDisk#impl-Drop)). Because the backend is owned by the
+/// global [`BackendStore`] and freed there, an unmount (`SYS_UNMOUNT`, or the
+/// namespace reaper) drops the backend box and runs that `Drop` — so a volatile
+/// RAM scratch volume returns all its memory when torn down. Putting the reclaim
+/// in `Drop` rather than an explicit free-on-unmount means no future call site
+/// that drops a `RamDisk` can forget to free its frames.
 pub struct RamDisk {
     frames: Vec<u64>, // physical frame addresses, one per block
 }
@@ -323,6 +327,24 @@ impl BlockDevice for RamDisk {
     /// RAM is always "durable" for the volume's lifetime; no barrier needed.
     fn flush(&mut self) -> rfs2::Result<()> {
         Ok(())
+    }
+}
+
+impl Drop for RamDisk {
+    /// Return every frame the volume held to the PMM. This is the *sole* reclaim
+    /// path for RAM-disk frames: `new` inserts them into `frames` only on full
+    /// success (its own failure rollback frees the partial set and never
+    /// constructs a `RamDisk`, so those never reach here — no double free), and
+    /// no other code frees a mounted volume's frames. `pmm::free_frame` itself
+    /// panics on a double free, so an accidental second reclaim would be loud,
+    /// not silent. Nothing outside `self.frames` holds the addresses — the
+    /// backend box is the RAM disk's only owner, and open fds re-address by
+    /// `BackendId` through the `BackendStore` (which no longer contains this
+    /// backend once it is being dropped), so there is no use-after-free.
+    fn drop(&mut self) {
+        for &pa in &self.frames {
+            crate::pmm::free_frame(crate::pmm::PhysAddr(pa));
+        }
     }
 }
 
