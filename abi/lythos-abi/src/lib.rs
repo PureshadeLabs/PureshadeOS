@@ -17,3 +17,4 @@ pub mod errno;
 pub mod cap;
 pub mod structs;
 pub mod ipc;
+pub mod exit;

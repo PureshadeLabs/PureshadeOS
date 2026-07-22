@@ -15,11 +15,11 @@ pub extern "C" fn _start() -> ! {
     rutils::print_help();
     println!();
     println!("Invoke commands through lysh.");
-    sys_task_exit()
+    sys_task_exit(0)
 }
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     lythos_rt::sys_log("[rutils] panic\n");
-    sys_task_exit()
+    sys_task_exit(0)
 }

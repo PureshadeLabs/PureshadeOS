@@ -1,10 +1,11 @@
 //! Syscall numbers — transcribed from `docs/spec/syscalls.md`.
 //!
 //! Source of truth: the spec table (Nr column).
-//! Cross-checked against `kernel/src/syscall.rs` — all 42 numbers match.
+//! Cross-checked against `kernel/src/syscall.rs`.
 //!
-//! Gap: 49 is unassigned and always returns ENOSYS.
-//! SYSCALL_MAX = 55 (SYS_POWEROFF).
+//! Gaps: 49, the retired UDP socket API 50–54, and the retired SYS_UNSEAL 59
+//! are unassigned and always return ENOSYS (see the notes at those numbers).
+//! SYSCALL_MAX = 66 (SYS_DEV_IRQ_ACK).
 
 // ── Process / task management ─────────────────────────────────────────────────
 
@@ -21,7 +22,9 @@ pub const SYS_MUNMAP:            u64 = 3;
 /// Privileged system reset. Requires Rollback capability (granted only to lythd).
 pub const SYS_ROLLBACK:          u64 = 9;
 /// Load an ELF image from user memory and spawn a new userspace task.
-/// a1=elf_ptr, a2=elf_len, a3=cap_handle (cap to transfer to child).
+/// a1=elf_ptr, a2=elf_len, a3=caps_ptr (*const u64 array of CapHandles),
+/// a4=caps_len (element count), a5=argv_ptr (flat "arg0\0arg1\0…" buffer,
+/// 0 if none), a6=argv_bytes (buffer length, 0 if none).
 pub const SYS_EXEC:              u64 = 10;
 /// Write a UTF-8 string to the kernel serial console (debug).
 /// a1=str_ptr, a2=str_len.

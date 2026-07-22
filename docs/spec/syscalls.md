@@ -162,14 +162,62 @@ ready queue and resumes when scheduled again.
 
 ### SYS_TASK_EXIT — 1
 
-Terminate the calling task.
+Terminate the calling task with an exit code.
 
-**Arguments:** none  
+**Arguments:**
+- a1 — exit code; only the low 8 bits are meaningful (0..=255). `0` = success.
+
 **Returns:** never
 
-Marks the task Dead and switches to the next ready task. The task's kernel
-stack and capability table are freed. User mappings are not reclaimed (no
-reference counting on page tables yet).
+Marks the task Dead, **retains its exit status** for a later `SYS_TASK_WAIT`,
+and switches to the next ready task. The task's kernel stack and capability
+table are freed by the reaper (`sweep_dead`). User mappings are not reclaimed
+(no reference counting on page tables yet).
+
+#### Exit-status encoding
+
+The status a waiter reads back is a `u32` status word (mirrored in
+`abi/lythos-abi/src/exit.rs`):
+
+| Case | Encoding |
+|---|---|
+| Normal exit (`SYS_TASK_EXIT code`) | bit 8 clear; low 8 bits = `code` (0..=255) |
+| Killed (`SYS_TASK_KILL`) | bit 8 set (`EXIT_ABNORMAL = 0x100`); low byte = `0` (`EXIT_REASON_KILLED`) |
+| Faulted (unrecoverable CPU exception) | bit 8 set; low byte = `1` (`EXIT_REASON_FAULT`) |
+
+Every status word is `< 0x1_0000`, far below the error-sentinel floor
+(`ERR_MIN`), so `SYS_TASK_WAIT` can return a status directly in RAX and the
+caller still distinguishes it from an error with the errno predicate.
+
+#### Retention / reaping model
+
+The exit status lives in an **exit-record table** in the kernel, separate from
+the `Task` struct — so the Task itself can be reaped (stack + page table freed)
+the moment it dies, while the status survives. The model is **reap-required with
+a spawner-held claim**: each record is owned by the task that spawned the child.
+
+- **Created** when the task exits (`SYS_TASK_EXIT`), is killed
+  (`SYS_TASK_KILL`), or faults. The record is tagged with the id of the task
+  that spawned the child (its parent, captured at spawn time).
+- **Consumed** (removed) by the first `SYS_TASK_WAIT` that reads it — one
+  waiter reaps one exit.
+- **Cascade-freed on spawner death.** When a task dies, the unreaped records of
+  any children *it* spawned are freed — the only task entitled to reap them is
+  gone.
+- **Never evicted.** The table is a heap `Vec`, not a fixed-size ring. A record
+  is *never* dropped to make room for a newer one, so a real exit status is
+  never silently lost. Capacity is bounded by live spawners and their
+  outstanding unreaped children, not by a fixed size.
+
+This replaces the earlier fixed 64-record ring with round-robin eviction. Under
+that scheme an evicted record was indistinguishable from a task that never
+existed — both returned `ENOENT` — so a builder that exited with, say, code 5
+could be reported to the executor that spawned it as "not found," turning a
+build *failure* into a silent lookup failure. With no eviction, a live spawner
+that waits on a child it spawned **always** reads that child's real status, no
+matter how many unrelated tasks exited in between. `SYS_TASK_WAIT` now returns
+`ENOENT` only for a child that never existed, was already reaped, or whose
+spawner has since died (cascade-freed).
 
 ---
 
@@ -619,6 +667,12 @@ exists mode. This is the locking primitive for userspace lock files
 (e.g. the shade store-db lock): winner holds the lock, losers back off on
 `EEXIST`, release is `SYS_UNLINK`.
 
+**Ownership:** the created inode is owned by uid/gid 0 with mode `0644`; caller
+identity is not recorded and no ownership argument is honored (rfs2 create-time
+policy — see [`rfs-v2/07 §3`](../rfs-v2/07-directories.md)). The kernel path
+still carries the caller's uid/gid, so a chown-equivalent can be added later
+without an ABI break; chmod/chown are deferred.
+
 ---
 
 ### SYS_UNLINK — 29
@@ -644,13 +698,31 @@ Check whether keyboard or serial data is available without blocking.
 
 ### SYS_TASK_WAIT — 31
 
-Block the calling task until the target task exits.
+Block the calling task until the target task exits, then reap and return its
+exit status.
 
 **Arguments:**
 - a1 — task ID to wait for
 
-**Returns:** 0 when the target exits; 0 immediately if the target is not found
-or is already dead
+**Returns:**
+- the target's **exit status word** (see [SYS_TASK_EXIT](#sys_task_exit--1)
+  encoding; always `< 0x1_0000`) once it has exited. A clean exit with code `0`
+  returns `0`.
+- `ENOENT` if the target is not a live task **and** has no retained exit record
+  — it never existed, its status was already consumed by an earlier waiter, or
+  the task that spawned it has since died (which cascade-frees the record).
+  Records are never evicted to make room, so this never happens to a live
+  spawner waiting on a child it spawned.
+
+If the target is still alive, the caller blocks until it exits (no polling). If
+the target has already exited, the call returns its retained status immediately
+and consumes the record (a second wait on the same id returns `ENOENT`).
+
+> **Disambiguation.** The pre-exit-code ABI returned `0` for both "exited" and
+> "not found". Those are now distinct: a status word (`0` for a clean zero
+> exit) versus the `ENOENT` error sentinel. Callers test with the errno
+> predicate (`errno::is_err`) — an error means "not found", anything else is a
+> status.
 
 ---
 
@@ -665,6 +737,12 @@ Create a new directory.
 **Returns:** 0 on success; `EEXIST` if the path already exists; `ENOTDIR` if a
 path component is not a directory; `ENOSPC` if the device has no free blocks;
 `ENOMNT` if not mounted; `EINVAL` on bad arguments
+
+**Ownership:** the created directory is owned by uid/gid 0 with mode `0755`;
+caller identity is not recorded and no ownership argument is honored (rfs2
+create-time policy — see [`rfs-v2/07 §3`](../rfs-v2/07-directories.md)). The
+kernel path still carries the caller's uid/gid, so a chown-equivalent can be
+added later without an ABI break; chmod/chown are deferred.
 
 ---
 

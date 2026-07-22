@@ -36,6 +36,7 @@ exclude = [
 # lythos-libc and lythos-unwind need the lythos sysroot target.
 # Use `cargo xtask build-kernel` / `cargo xtask build-userspace` (xtask TBD).
 default-members = [
+    "abi/lythos-abi", # no_std ABI contract; its exit-status encoding tests run on host via `cargo test`
     "tools/orox-pack",
     "tools/lythos-toolchain/sysroot-builder",
     "fs/rfs2", # no_std+alloc lib, host-compilable; tests run on host

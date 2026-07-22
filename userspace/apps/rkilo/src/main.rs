@@ -522,7 +522,7 @@ impl Editor {
                     return;
                 }
                 sys_log("\x1b[2J\x1b[H");
-                sys_task_exit();
+                sys_task_exit(0);
             }
 
             Key::CtrlS => {
@@ -742,5 +742,5 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
         if let Ok(s) = core::str::from_utf8(&tmp[..n]) { sys_log(s); }
     }
     sys_log("\n");
-    sys_task_exit()
+    sys_task_exit(0)
 }

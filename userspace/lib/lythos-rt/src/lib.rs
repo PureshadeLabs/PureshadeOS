@@ -182,10 +182,13 @@ use lythos_syscall::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall6}
 #[inline]
 pub fn sys_yield() { unsafe { syscall0(SYS_YIELD) }; }
 
-/// Exit the current task. Never returns. See also `task::exit`.
+/// Exit the current task with `code`. Never returns. See also `task::exit`.
+///
+/// Only the low 8 bits of `code` are meaningful (0..=255); `0` = success. The
+/// kernel retains the code until a `sys_task_wait` reaps it.
 #[inline]
-pub fn sys_task_exit() -> ! {
-    unsafe { syscall0(SYS_TASK_EXIT) };
+pub fn sys_task_exit(code: i32) -> ! {
+    unsafe { syscall1(SYS_TASK_EXIT, code as u32 as u64) };
     unreachable!()
 }
 
@@ -469,13 +472,15 @@ pub fn sys_serial_avail() -> bool {
     unsafe { syscall0(SYS_SERIAL_AVAIL) != 0 }
 }
 
-/// Block the calling task until task `tid` has exited.
+/// Block the calling task until task `tid` has exited, returning its exit
+/// status (the `lythos_abi::exit` encoding: low 8 bits = code, bit 8 set ⇒
+/// killed/faulted). A clean exit with code `0` returns `Ok(0)`.
 ///
-/// Returns immediately if the task is already dead. Returns `Err` only if
-/// the kernel rejects the call (e.g. invalid tid format).
-pub fn sys_task_wait(tid: u64) -> Result<(), SysError> {
+/// Returns `Err(ENOENT)` if `tid` is not a live task and has no retained exit
+/// record — it never existed, or its status was already reaped or evicted.
+pub fn sys_task_wait(tid: u64) -> Result<i32, SysError> {
     let r = unsafe { syscall1(SYS_TASK_WAIT, tid) };
-    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(()) }
+    if SysError::is_err_raw(r) { Err(SysError::from_raw(r)) } else { Ok(r as i32) }
 }
 
 /// Read bytes from the COM1 serial port into `buf`.

@@ -536,7 +536,7 @@ pub extern "C" fn kernel_main() -> ! {
                 IPC_RECV_COUNT.fetch_add(1, O::Relaxed);
             }
             kprintln!("{VRB}[ipc] receiver done{RST}");
-            task::task_exit();
+            task::task_exit(task::exit_status_normal(0));
         }
 
         fn ipc_sender() -> ! {
@@ -549,7 +549,7 @@ pub extern "C" fn kernel_main() -> ! {
                 kprintln!("{VRB}[ipc] sent message {}{RST}", i);
             }
             kprintln!("{VRB}[ipc] sender done{RST}");
-            task::task_exit();
+            task::task_exit(task::exit_status_normal(0));
         }
 
         task::spawn_kernel_task(ipc_receiver);
@@ -1143,7 +1143,7 @@ pub extern "C" fn kernel_main() -> ! {
 /// Probe task for the sweep_dead resource-release check: exits immediately.
 #[cfg(feature = "boot-tests")]
 fn sweep_probe_task() -> ! {
-    task::task_exit()
+    task::task_exit(task::exit_status_normal(0))
 }
 
 /// Core integration checklist.  Runs before lythd is spawned so all checks
@@ -1353,7 +1353,7 @@ fn core_smoke() {
 
             let msg = [0xCCu8; ipc::MSG_SIZE];
             ipc::send_cap(ep, &msg, the_cap);
-            task::task_exit();
+            task::task_exit(task::exit_status_normal(0));
         }
 
         fn scap_receiver() -> ! {
@@ -1370,7 +1370,7 @@ fn core_smoke() {
                 "scap recv: wrong rights"
             );
             SCAP_DONE.store(1, core::sync::atomic::Ordering::Relaxed);
-            task::task_exit();
+            task::task_exit(task::exit_status_normal(0));
         }
 
         let ep_idx = ipc::create_endpoint().expect("create_endpoint");
@@ -1402,7 +1402,7 @@ fn core_smoke() {
             ipc::recv(ep, &mut buf);
             assert_eq!(buf[0], 0xAA, "triangular IPC: task A got wrong payload");
             TRI_DONE.fetch_or(1, core::sync::atomic::Ordering::Relaxed);
-            task::task_exit();
+            task::task_exit(task::exit_status_normal(0));
         }
 
         fn tri_task_b() -> ! {
@@ -1411,7 +1411,7 @@ fn core_smoke() {
             ipc::recv(ep, &mut buf);
             assert_eq!(buf[0], 0xBB, "triangular IPC: task B got wrong payload");
             TRI_DONE.fetch_or(2, core::sync::atomic::Ordering::Relaxed);
-            task::task_exit();
+            task::task_exit(task::exit_status_normal(0));
         }
 
         fn tri_task_c() -> ! {
@@ -1423,7 +1423,7 @@ fn core_smoke() {
             m2[0] = 0xBB;
             ipc::send(ep1, &m1); // wakes task A
             ipc::send(ep2, &m2); // wakes task B
-            task::task_exit();
+            task::task_exit(task::exit_status_normal(0));
         }
 
         let ep1 = ipc::create_endpoint().expect("create_endpoint");
@@ -1695,6 +1695,95 @@ fn core_smoke() {
         );
     }
     kprintln!("{TAG}[integration]{RST} syscall fuzz {OK}passed{RST} {VRB}— all bad inputs rejected{RST}");
+
+    // ── Exit-code round-trip: SYS_TASK_EXIT status → wait_for_task ────────────
+    // The exit-code ABI (Part 2): a child's exit status is retained until a
+    // waiter reaps it, and "exited cleanly with 0" is distinguishable from
+    // "not found". Runs here (no concurrent userspace) so scheduling is
+    // deterministic: the bootstrap task blocks in wait_for_task and the child
+    // is the only other ready task.
+    {
+        fn exit_zero() -> ! { task::task_exit(task::exit_status_normal(0)) }
+        fn exit_42()   -> ! { task::task_exit(task::exit_status_normal(42)) }
+
+        // 1) Clean exit (code 0): wait must return 0 — not conflated with the
+        //    old "not found ⇒ 0" overload.
+        let child = task::spawn_kernel_task(exit_zero);
+        assert_eq!(task::wait_for_task(child), 0,
+            "exit-code: clean exit must wait→0");
+
+        // 2) Nonzero exit: the exact code must round-trip.
+        let child = task::spawn_kernel_task(exit_42);
+        assert_eq!(task::wait_for_task(child), 42,
+            "exit-code: code 42 must round-trip");
+
+        // 3) Wait on an already-dead task: let the child exit and be reaped
+        //    first, then wait — the retained record still answers with the
+        //    code. A second wait on the same id finds no record (consumed) and
+        //    returns ENOENT.
+        let child = task::spawn_kernel_task(exit_42);
+        while task::task_status_raw(child) != 0 { task::yield_task(); }
+        assert_eq!(task::wait_for_task(child), 42,
+            "exit-code: wait-on-already-dead returns the code");
+        assert_eq!(task::wait_for_task(child), syscall::ENOENT,
+            "exit-code: consumed record → ENOENT");
+
+        // 4) Wait on a task that never existed → ENOENT (the disambiguation).
+        assert_eq!(task::wait_for_task(0xDEAD_BEEF), syscall::ENOENT,
+            "exit-code: nonexistent task → ENOENT");
+    }
+    kprintln!("{TAG}[integration]{RST} exit-code round-trip {OK}passed{RST}");
+
+    // ── Exit-record retention: no eviction, spawner-death cascade ─────────────
+    // Part 1: the exit-record table is a heap Vec with reap-required, spawner-
+    // owned records — not a fixed round-robin ring. Two properties matter:
+    //   (a) No eviction. Far more unreaped records than the old 64-entry ring
+    //       held can coexist, and the *oldest* is still readable — a real exit
+    //       status is never silently dropped to make room for a newer one (the
+    //       regression that turned a builder's exit-5 into ENOENT).
+    //   (b) Spawner-death cascade. When a task dies, the unreaped records of
+    //       children IT spawned are freed, since no one is left to reap them.
+    {
+        fn exit_42() -> ! { task::task_exit(task::exit_status_normal(42)) }
+
+        // (a) Accumulate N unreaped records (N well above the old ring size of
+        //     64), letting each child exit and be reaped but NOT waiting on it.
+        //     ids are contiguous: only these spawns advance next_id here.
+        const N: task::TaskId = 80;
+        let first = task::spawn_kernel_task(exit_42);
+        while task::task_status_raw(first) != 0 { task::yield_task(); }
+        for _ in 1..N {
+            let c = task::spawn_kernel_task(exit_42);
+            while task::task_status_raw(c) != 0 { task::yield_task(); }
+        }
+        // Every record from `first` onward is still present (the old ring would
+        // have evicted the earliest N-64). Waiting drains them.
+        for id in first..first + N {
+            assert_eq!(task::wait_for_task(id), 42,
+                "retention: unreaped record must survive with no eviction");
+        }
+
+        // (b) Spawner-death cascade. A parent task spawns a child that exits,
+        //     never waits on it, then exits itself. The child's record (owned
+        //     by the now-dead parent) is cascade-freed; a later wait sees it as
+        //     gone. The parent's own record (owned by the bootstrap task) is
+        //     unaffected and still readable.
+        fn leaky_spawner() -> ! {
+            // Spawn a child that exits, then yield enough for it to run and be
+            // recorded before we exit (so the cascade has something to free).
+            let _child = task::spawn_kernel_task(exit_42);
+            for _ in 0..16 { task::yield_task(); }
+            task::task_exit(task::exit_status_normal(7))
+        }
+        let parent = task::spawn_kernel_task(leaky_spawner);
+        let child  = parent + 1; // the only next spawn is leaky_spawner's child
+        while task::task_status_raw(parent) != 0 { task::yield_task(); }
+        assert_eq!(task::wait_for_task(child), syscall::ENOENT,
+            "retention: spawner death cascade-frees unreaped child record");
+        assert_eq!(task::wait_for_task(parent), 7,
+            "retention: spawner's own record (owned by bootstrap) survives");
+    }
+    kprintln!("{TAG}[integration]{RST} exit-record retention {OK}passed{RST}");
 }
 
 // ── Boot-info helpers ─────────────────────────────────────────────────────────
@@ -1809,7 +1898,7 @@ fn task_b() -> ! {
         task::yield_task();
     }
     kprintln!("{VRB}[task B] done, exiting{RST}");
-    task::task_exit();
+    task::task_exit(task::exit_status_normal(0));
 }
 
 #[panic_handler]

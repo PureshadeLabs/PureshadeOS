@@ -145,10 +145,14 @@ pub unsafe fn sys_yield() {
     unsafe { syscall0(sys::SYS_YIELD) };
 }
 
-/// Terminate the calling task (does not return).
+/// Terminate the calling task with exit `code` (does not return).
+///
+/// Only the low 8 bits of `code` are meaningful (0..=255); `0` = success. The
+/// code is retained by the kernel until a `SYS_TASK_WAIT` reaps it — see
+/// `lythos_abi::exit`.
 #[inline(always)]
-pub unsafe fn sys_task_exit() -> ! {
-    unsafe { syscall0(sys::SYS_TASK_EXIT) };
+pub unsafe fn sys_task_exit(code: u64) -> ! {
+    unsafe { syscall1(sys::SYS_TASK_EXIT, code) };
     unreachable!()
 }
 
@@ -280,7 +284,9 @@ pub unsafe fn sys_task_kill(task_id: u64) -> u64 {
     unsafe { syscall1(sys::SYS_TASK_KILL, task_id) }
 }
 
-/// Block until task exits. Returns 0.
+/// Block until task exits. Returns its exit status (`lythos_abi::exit`
+/// encoding, `< 0x1_0000`), or `errno::ENOENT` if the task is not found and has
+/// no retained exit record.
 #[inline(always)]
 pub unsafe fn sys_task_wait(task_id: u64) -> u64 {
     unsafe { syscall1(sys::SYS_TASK_WAIT, task_id) }

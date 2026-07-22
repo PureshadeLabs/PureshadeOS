@@ -824,5 +824,5 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
         lythos_rt::sys_log("\n");
     }
     let _ = sys_rollback();
-    sys_task_exit()
+    sys_task_exit(0)
 }

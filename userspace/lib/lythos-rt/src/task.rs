@@ -47,7 +47,13 @@ pub fn yield_now() {
     crate::sys_yield();
 }
 
-/// Terminate the current task immediately. Never returns.
+/// Terminate the current task successfully (exit code 0). Never returns.
 pub fn exit() -> ! {
-    crate::sys_task_exit()
+    crate::sys_task_exit(0)
+}
+
+/// Terminate the current task with exit `code` (0..=255; 0 = success). Never
+/// returns. The kernel retains the code for a parent's `sys_task_wait`.
+pub fn exit_code(code: i32) -> ! {
+    crate::sys_task_exit(code)
 }

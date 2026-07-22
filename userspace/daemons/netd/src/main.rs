@@ -38,7 +38,7 @@ pub extern "C" fn _start() -> ! {
     if let Err(e) = run() {
         eprintln!("[netd] FAILED: {}", e);
     }
-    sys_task_exit()
+    sys_task_exit(0)
 }
 
 fn run() -> Result<(), &'static str> {
@@ -246,5 +246,5 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
         lythos_rt::sys_log(msg);
     }
     lythos_rt::sys_log("\n");
-    sys_task_exit()
+    sys_task_exit(0)
 }

@@ -323,7 +323,7 @@ fn dispatch_single(line: &str, cwd: &mut String, current_user: &mut String) {
     match cmd {
         "help"  => cmd_help(),
         "clear" => print!("{}", CLEAR_SCREEN),
-        "exit"     => { println!("Goodbye."); sys_task_exit() }
+        "exit"     => { println!("Goodbye."); sys_task_exit(0) }
         "poweroff" => { println!("Shutting down..."); lythos_rt::sys_poweroff() }
         "cd"    => cmd_cd(args.first().copied(), cwd),
         "pwd"   => println!("{}", cwd),
@@ -564,5 +564,5 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     } else {
         lythos_rt::sys_log("\n");
     }
-    sys_task_exit()
+    sys_task_exit(0)
 }

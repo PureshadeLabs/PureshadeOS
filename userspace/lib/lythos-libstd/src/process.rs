@@ -7,16 +7,15 @@ use lythos_rt::SysError;
 
 /// Exit the current task with the given status code.
 ///
-/// On Lythos, exit codes are not currently observable by the parent; this
-/// function always calls `SYS_TASK_EXIT`.
+/// The code (low 8 bits; 0 = success) is retained by the kernel until the
+/// parent reaps it with `SYS_TASK_WAIT`.
 pub fn exit(code: i32) -> ! {
-    let _ = code;
-    process_impl::exit_task()
+    process_impl::exit_task(code)
 }
 
-/// Abort: exit immediately (equivalent to `exit(1)` on Lythos).
+/// Abort: exit immediately with a nonzero status (equivalent to `exit(1)`).
 pub fn abort() -> ! {
-    process_impl::exit_task()
+    process_impl::exit_task(1)
 }
 
 /// Spawn a new Lythos task from a raw ELF image.

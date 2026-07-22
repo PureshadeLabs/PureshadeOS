@@ -636,5 +636,5 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     // The panic message names the failing stage — worth the format cost.
     let msg = format!("[shade] panic: {}\n", info);
     lythos_rt::sys_log(&msg);
-    lythos_rt::sys_task_exit()
+    lythos_rt::sys_task_exit(1)
 }

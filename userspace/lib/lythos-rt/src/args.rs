@@ -123,7 +123,7 @@ macro_rules! entry {
             unsafe { $crate::args::init(rsp) };
             let main_fn: fn() = $main;
             main_fn();
-            $crate::sys_task_exit()
+            $crate::sys_task_exit(0)
         }
     };
 }

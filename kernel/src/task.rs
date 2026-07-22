@@ -103,6 +103,11 @@ const STACK_CANARY: u64 = 0x5AFE_C0DE_DEAD_BEEF;
 
 pub struct Task {
     pub id:        TaskId,
+    /// Id of the task that spawned this one (its "parent"). Captured at spawn
+    /// time and used to tag this task's exit record so a spawner's death can
+    /// cascade-free the unreaped records of children it spawned. The bootstrap
+    /// task is its own parent (0).
+    pub parent:    TaskId,
     pub state:     TaskState,
     pub context:   TaskContext,
     /// Scheduling priority: 0=low, 1=normal (default), 2=high.
@@ -187,6 +192,103 @@ const MAX_WAITERS: usize = 32;
 static TASK_WAITERS: crate::serial::SpinLock<[Option<(TaskId, TaskId)>; MAX_WAITERS]> =
     crate::serial::SpinLock::new([None; MAX_WAITERS]);
 
+// ── Exit-status retention ───────────────────────────────────────────────────────
+//
+// When a task exits (task_exit) or is killed (kill_task) the kernel keeps a
+// record `(child, spawner, status)` so a later `wait_for_task(child)` can read
+// the exit status even after sweep_dead has reaped the Task itself. The status
+// word is the ABI encoding from `lythos_abi::exit` (low byte = code/reason,
+// bit 8 = abnormal).
+//
+// Retention/reaping model — reap-required with a spawner-held claim:
+//   * A record is *created* at exit/kill, tagged with the id of the task that
+//     spawned the child (its `parent`, captured at spawn time).
+//   * It is *consumed* (removed) by the first `wait_for_task(child)` that reads
+//     it — one waiter reaps one exit, mirroring the Task's own single lifetime.
+//   * When a task itself dies, the records of any of ITS children that exited
+//     but were never reaped are cascade-freed (`reap_children_of`): the only
+//     task entitled to reap them — the spawner — is gone, so the record can
+//     never usefully be read again.
+//
+// The table is a heap `Vec`, NOT a fixed ring with round-robin eviction. This
+// is the load-bearing property: a real exit status is never silently evicted to
+// make room for a newer one, so a spawner that waits on a child it spawned
+// ALWAYS reads that child's real status, no matter how many unrelated tasks
+// exited in between. (The old 64-entry ring evicted the oldest record on
+// overflow, and an evicted record was indistinguishable from a task that never
+// existed — both returned ENOENT — so a builder that exited with code 5 could
+// be reported to its executor as "not found", turning a build *failure* into a
+// silent lookup failure. That failure mode is now unreachable.) Capacity is
+// bounded by live spawners and their outstanding unreaped children, not by a
+// fixed size; `wait_for_task` still returns ENOENT only for a child that never
+// existed, was already reaped, or whose spawner has since died.
+//
+// Exit-status encoding — mirrors `lythos_abi::exit` (the kernel re-declares ABI
+// constants locally, as it does for syscall numbers and errno). A normal exit
+// puts the code (0..=255) in the low byte with bit 8 clear; an abnormal
+// (kernel-forced) termination sets bit 8 and puts a reason in the low byte.
+const EXIT_CODE_MASK: u32 = 0x0000_00FF;
+/// Bit 8: set when the kernel terminated the task (kill/fault), not the task.
+pub const EXIT_ABNORMAL: u32 = 0x0000_0100;
+/// Abnormal reason: terminated by `SYS_TASK_KILL`.
+pub const EXIT_REASON_KILLED: u32 = 0;
+/// Abnormal reason: terminated by an unrecoverable CPU exception.
+pub const EXIT_REASON_FAULT: u32 = 1;
+
+/// Status word for a normal `SYS_TASK_EXIT` with `code` (low 8 bits kept).
+#[inline(always)]
+pub const fn exit_status_normal(code: u32) -> u32 {
+    code & EXIT_CODE_MASK
+}
+
+/// Status word for a kernel-forced termination with `reason`.
+#[inline(always)]
+pub const fn exit_status_abnormal(reason: u32) -> u32 {
+    EXIT_ABNORMAL | (reason & EXIT_CODE_MASK)
+}
+
+/// One retained exit status: the exited `child`, the `spawner` that created it
+/// (captured from the child's `parent` at exit time), and the ABI-encoded
+/// `status` word.
+struct ExitRecord {
+    child:   TaskId,
+    spawner: TaskId,
+    status:  u32,
+}
+
+static EXIT_RECORDS: crate::serial::SpinLock<Vec<ExitRecord>> =
+    crate::serial::SpinLock::new(Vec::new());
+
+/// Record `status` for exited/killed task `child`, spawned by `spawner`.
+/// Overwrites any existing record for the same child (a task exits at most once,
+/// but this defends against an exit/kill race); otherwise appends. Never drops
+/// an existing record — there is no eviction, so a real status cannot be lost.
+fn record_exit(child: TaskId, spawner: TaskId, status: u32) {
+    let mut recs = EXIT_RECORDS.lock();
+    if let Some(r) = recs.iter_mut().find(|r| r.child == child) {
+        r.spawner = spawner;
+        r.status  = status;
+        return;
+    }
+    recs.push(ExitRecord { child, spawner, status });
+}
+
+/// Consume and return the exit status recorded for `child`, if any.
+fn consume_exit(child: TaskId) -> Option<u32> {
+    let mut recs = EXIT_RECORDS.lock();
+    let idx = recs.iter().position(|r| r.child == child)?;
+    Some(recs.swap_remove(idx).status)
+}
+
+/// Cascade-free the retained records of every child spawned by `spawner`.
+/// Called when `spawner` itself dies (task_exit / kill_task): no surviving task
+/// is entitled to reap those records, so they are reclaimed here rather than
+/// lingering until the heap is exhausted.
+fn reap_children_of(spawner: TaskId) {
+    let mut recs = EXIT_RECORDS.lock();
+    recs.retain(|r| r.spawner != spawner);
+}
+
 /// Get a `&mut Scheduler`, panicking if `init()` has not been called.
 #[inline]
 unsafe fn get_sched() -> &'static mut Scheduler {
@@ -256,6 +358,7 @@ fn find_next_ready(sched: &Scheduler, start_idx: usize) -> Option<usize> {
 pub fn init() {
     let bootstrap = Box::new(Task {
         id:             0,
+        parent:         0,                      // bootstrap is its own parent
         state:          TaskState::Running,
         context:        TaskContext { rsp: 0 }, // filled by the first switch_context
         priority:       1,
@@ -279,6 +382,12 @@ pub fn init() {
     unsafe {
         *SCHED.0.get() = Some(Scheduler { tasks, current: 0, next_id: 1 });
     }
+
+    // Pre-reserve the exit-record table so the common exit path — including the
+    // abnormal (fault) path through task_exit — pushes without reallocating up
+    // to this many concurrent unreaped records. Growth beyond this is possible
+    // (the table is unbounded by design) but no longer typical.
+    EXIT_RECORDS.lock().reserve(64);
 }
 
 /// Spawn a new kernel-mode task beginning execution at `entry`.
@@ -324,9 +433,11 @@ pub fn spawn_kernel_task(entry: fn() -> !) -> TaskId {
     let sched = unsafe { get_sched() };
     let id    = sched.next_id;
     sched.next_id += 1;
+    let parent = sched.tasks[sched.current].id;
 
     sched.tasks.push(Box::new(Task {
         id,
+        parent,
         state:          TaskState::Ready,
         context:        TaskContext { rsp: initial_rsp as u64 },
         priority:       1,
@@ -496,9 +607,14 @@ pub fn yield_task() {
     unsafe { core::arch::asm!("sti", options(nostack)) };
 }
 
-/// Terminate the current task.  Marks it Dead, switches to the next ready task,
-/// and never returns.  If no other task is ready, halts the CPU.
-pub fn task_exit() -> ! {
+/// Terminate the current task.  Marks it Dead, records its exit `status` for a
+/// later `wait_for_task`, switches to the next ready task, and never returns.
+/// If no other task is ready, halts the CPU.
+///
+/// `status` is the `lythos_abi::exit` encoding: a normal exit passes
+/// `exit::normal(code)`; an unrecoverable fault passes
+/// `exit::abnormal(exit::EXIT_REASON_FAULT)`.
+pub fn task_exit(status: u32) -> ! {
     // Disable interrupts before marking ourselves Dead and keep them off
     // through switch_context (task_exit never returns, so no restore).
     //
@@ -516,8 +632,16 @@ pub fn task_exit() -> ! {
     check_stack_canary(&sched.tasks[sched.current]);
     let current = sched.current;
     let dying_id = sched.tasks[current].id;
+    let dying_parent = sched.tasks[current].parent;
 
     sched.tasks[current].state = TaskState::Dead;
+
+    // Retain the exit status before waking waiters, so any waiter we wake is
+    // guaranteed to find the record (it cannot run until we switch away below).
+    record_exit(dying_id, dying_parent, status);
+    // We are leaving: free the retained records of any children we spawned that
+    // exited but were never reaped — no one is left entitled to reap them.
+    reap_children_of(dying_id);
 
     // Wake any tasks blocked in wait_for_task on this task.
     {
@@ -651,14 +775,22 @@ pub fn kill_task(id: TaskId) -> bool {
     let current_id = sched.tasks[sched.current].id;
     if id == current_id { return false; }
 
+    let mut victim_parent = 0;
     let killed = if let Some(t) = sched.tasks.iter_mut().find(|t| t.id == id && t.state != TaskState::Dead) {
         t.state = TaskState::Dead;
+        victim_parent = t.parent;
         true
     } else {
         false
     };
 
     if killed {
+        // Record the forced-termination status before waking waiters, so any
+        // waiter we wake finds the record.
+        record_exit(id, victim_parent, exit_status_abnormal(EXIT_REASON_KILLED));
+        // The victim is gone: free the records of any children it spawned that
+        // exited but were never reaped (same cascade as task_exit).
+        reap_children_of(id);
         let mut waiters = TASK_WAITERS.lock();
         for slot in waiters.iter_mut() {
             if let Some((waiter_id, target_id)) = *slot {
@@ -674,25 +806,46 @@ pub fn kill_task(id: TaskId) -> bool {
     killed
 }
 
-/// Block the current task until task `target_id` exits.
+/// Block the current task until task `target_id` exits, and return its exit
+/// status (the `lythos_abi::exit` encoding, always `< 0x1_0000`).
 ///
-/// Returns immediately if `target_id` is not found or already Dead.
+/// Returns `lythos_abi::errno::ENOENT` if `target_id` has no live task and no
+/// retained exit record — i.e. it never existed, its record was already
+/// consumed by an earlier waiter, or the task that spawned it has since died
+/// (which cascade-frees the record). A record is never dropped merely to make
+/// room for a newer one, so a live spawner waiting on a child it spawned always
+/// reads the real status. This disambiguates "exited cleanly with code 0"
+/// (returns `0`) from "not found" (returns an error sentinel), which the
+/// pre-exit-code ABI conflated.
+///
 /// Used by `SYS_TASK_WAIT` to let a parent block on a child without polling.
-pub fn wait_for_task(target_id: TaskId) {
-    {
+pub fn wait_for_task(target_id: TaskId) -> u64 {
+    let already_gone = {
         let mut waiters = TASK_WAITERS.lock();
         // Re-check status under the lock: target_id cannot exit between this
         // check and registration because task_exit also takes TASK_WAITERS.
-        if task_status_raw(target_id) == 0 { return; }
-        let current_id = current_task_id();
-        for slot in waiters.iter_mut() {
-            if slot.is_none() {
-                *slot = Some((current_id, target_id));
-                break;
+        if task_status_raw(target_id) == 0 {
+            true
+        } else {
+            let current_id = current_task_id();
+            for slot in waiters.iter_mut() {
+                if slot.is_none() {
+                    *slot = Some((current_id, target_id));
+                    break;
+                }
             }
+            false
         }
+    };
+    if !already_gone {
+        block_and_yield();
     }
-    block_and_yield();
+    // Either the target was already gone on entry, or we blocked until it
+    // exited and task_exit woke us — its record (if any) is now present.
+    match consume_exit(target_id) {
+        Some(status) => status as u64,
+        None => crate::syscall::ENOENT,
+    }
 }
 
 /// Return the ID of the currently running task.
@@ -807,6 +960,7 @@ pub fn spawn_userspace_task(
     let sched = unsafe { get_sched() };
     let id    = sched.next_id;
     sched.next_id += 1;
+    let parent = sched.tasks[sched.current].id;
 
     // Inherit capabilities from the current (spawning) task.
     let mut cap_table = crate::cap::CapabilityTable::new();
@@ -821,6 +975,7 @@ pub fn spawn_userspace_task(
 
     sched.tasks.push(Box::new(Task {
         id,
+        parent,
         state:          TaskState::Ready,
         context:        TaskContext { rsp: initial_rsp as u64 },
         priority:       1,

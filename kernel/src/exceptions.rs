@@ -70,7 +70,7 @@ fn page_fault_handler(frame: &ExceptionFrame) -> ! {
         let user_rsp   = unsafe { *frame_ptr.add(struct_u64s) };
         let user_ss    = unsafe { *frame_ptr.add(struct_u64s + 1) };
         kprintln!("[#PF] user rsp={:#x}  ss={:#x}  → killing task", user_rsp, user_ss);
-        crate::task::task_exit();
+        crate::task::task_exit(crate::task::exit_status_abnormal(crate::task::EXIT_REASON_FAULT));
     }
 
     loop { unsafe { core::arch::asm!("hlt") }; }
@@ -94,7 +94,7 @@ pub extern "C" fn exception_handler(frame: *const ExceptionFrame) {
 
     if f.cs & 3 == 3 {
         kprintln!("[exception] killing user task {} ({})", tid, name);
-        crate::task::task_exit();
+        crate::task::task_exit(crate::task::exit_status_abnormal(crate::task::EXIT_REASON_FAULT));
     }
 
     loop { unsafe { core::arch::asm!("hlt") }; }

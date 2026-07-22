@@ -2,9 +2,10 @@
 
 use lythos_rt::SysError;
 
-/// Terminate the current task immediately.  Never returns.
-pub fn exit_task() -> ! {
-    lythos_rt::sys_task_exit()
+/// Terminate the current task with exit `code` (0..=255; 0 = success).  Never
+/// returns.
+pub fn exit_task(code: i32) -> ! {
+    lythos_rt::sys_task_exit(code)
 }
 
 /// Load and start a new task from a static ELF64 image.

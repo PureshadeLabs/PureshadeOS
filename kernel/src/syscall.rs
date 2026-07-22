@@ -546,7 +546,9 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             0
         }
         SYS_TASK_EXIT => {
-            crate::task::task_exit();
+            // a1 = exit code; only the low 8 bits are meaningful (0..=255),
+            // 0 = success. Encoded as a normal (non-abnormal) status word.
+            crate::task::task_exit(crate::task::exit_status_normal(frame.a1 as u32));
         }
         SYS_MMAP => {
             // Require page-aligned virtual address.
@@ -1229,9 +1231,10 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         }
 
         SYS_TASK_WAIT => {
-            // a1 = target TaskId. Block until it exits; return 0.
-            crate::task::wait_for_task(frame.a1);
-            0
+            // a1 = target TaskId. Block until it exits; return its exit status
+            // (lythos_abi::exit encoding, < 0x1_0000), or ENOENT if the task is
+            // not found and has no retained exit record.
+            crate::task::wait_for_task(frame.a1)
         }
 
         SYS_NANOSLEEP => {

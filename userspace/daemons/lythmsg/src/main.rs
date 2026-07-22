@@ -280,5 +280,5 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     } else {
         lythos_rt::sys_log("\n");
     }
-    sys_task_exit()
+    sys_task_exit(0)
 }
