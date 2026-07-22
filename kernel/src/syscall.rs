@@ -220,6 +220,12 @@ pub const SYS_POWEROFF:  u64 = 55;
 /// a1=at_ptr, a2=at_len, a3=source (0 = fresh RAM-backed RFS V2), a4=flags.
 /// Returns 0 or negative errno (ENOPERM, EMOUNTED, ENOENT, ENOTDIR, EINVAL, …).
 pub const SYS_MOUNT:     u64 = 56;
+/// Unmount the filesystem at exactly `at`, freeing its backend once no mount
+/// namespace still routes to it. Same cap gate as SYS_MOUNT (Filesystem+WRITE).
+/// The root mount (`/`) is pinned — unmounting it is EINVAL. a1=at_ptr, a2=at_len.
+/// Returns 0 or negative errno (ENOPERM, ENOMNT, EINVAL). Numbered 69 because
+/// 67-68 are reserved for the namespace syscalls (per-task-mount-namespace §1.1).
+pub const SYS_UNMOUNT:   u64 = 69;
 /// Create a symlink at `link` storing `target` verbatim (dangling legal; the
 /// final component of `link` is not followed). On a store mount, creating a
 /// link inside a sealed entry is EROFS.
@@ -277,8 +283,9 @@ pub const SYS_DEV_IRQ_ACK:  u64 = 66;
 /// Highest assigned syscall number. Update this when adding a new syscall.
 /// Used by the fuzz test in main.rs to verify that numbers above this return ENOSYS.
 /// Numbers 49, 50-54 and 59 are unassigned gaps (59 = retired SYS_UNSEAL,
-/// 50-54 = retired UDP socket API).
-pub const SYSCALL_MAX: u64 = SYS_DEV_IRQ_ACK;
+/// 50-54 = retired UDP socket API); 67-68 are reserved for the not-yet-landed
+/// namespace syscalls (SYS_NS_CREATE/SYS_NS_ENTER) and also return ENOSYS.
+pub const SYSCALL_MAX: u64 = SYS_UNMOUNT;
 
 // ── Error sentinel ────────────────────────────────────────────────────────────
 
@@ -1679,6 +1686,35 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             )); }
             let Ok(at) = core::str::from_utf8(&kpath) else { return EINVAL; };
             crate::vfs::mount(at, frame.a3, frame.a4) as u64
+        }
+
+        SYS_UNMOUNT => {
+            // a1=at_ptr, a2=at_len.
+            //
+            // Capability gate FIRST, identically to SYS_MOUNT: tearing a mount
+            // down is the same Filesystem+WRITE authority as making one — no
+            // ambient authority, and no argument validation before the check
+            // (a caller without the cap learns nothing about the mount table).
+            let current_id = crate::task::current_task_id();
+            let table_ptr  = crate::task::cap_table_ptr(current_id);
+            if table_ptr.is_null() { return ENOPERM; }
+            let table = unsafe { &*table_ptr };
+            if !table.has_kind_with_rights(
+                crate::cap::CapKind::Filesystem,
+                crate::cap::CapRights::WRITE,
+            ) {
+                return ENOPERM;
+            }
+
+            let path_len = frame.a2 as usize;
+            if path_len == 0 || path_len > 4096 { return EINVAL; }
+            if !valid_user_range(frame.a1, frame.a2) { return EINVAL; }
+            let mut kpath = alloc::vec![0u8; path_len];
+            unsafe { with_user_access(|| core::ptr::copy_nonoverlapping(
+                frame.a1 as *const u8, kpath.as_mut_ptr(), path_len,
+            )); }
+            let Ok(at) = core::str::from_utf8(&kpath) else { return EINVAL; };
+            crate::vfs::unmount(at) as u64
         }
 
         SYS_SYMLINK => {

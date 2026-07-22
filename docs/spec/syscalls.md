@@ -51,10 +51,13 @@ Errors are returned in RAX as large `u64` values (two's-complement negative
 | `0xFFFF_FFFF_FFFF_FFF0` | -16 | `ENOTEMPTY` | Directory not empty (SYS_RENAME onto a non-empty directory; future rmdir) |
 | `0xFFFF_FFFF_FFFF_FFEF` | -17 | `EIO`     | I/O or integrity fault — block device error, failed authentication, corrupt on-disk structure (any FS syscall, SYS_MOUNT). Distinct from ENOMNT |
 
-`SYSCALL_MAX = 66`. Syscall numbers above 66 and the unassigned gaps 49, 50–54
-and 59 always return `ENOSYS` (59 = retired `SYS_UNSEAL`; 50–54 = retired UDP
+`SYSCALL_MAX = 69`. Syscall numbers above 69 and the unassigned gaps 49, 50–54,
+59 and 67–68 always return `ENOSYS` (59 = retired `SYS_UNSEAL`; 50–54 = retired UDP
 socket API — networking moved to a userspace `netd` driver over the device
-framework; never reuse any of these numbers).
+framework; never reuse any of these numbers). Numbers 67–68 are **reserved** (not
+yet assigned) for the per-task mount-namespace syscalls `SYS_NS_CREATE` /
+`SYS_NS_ENTER` (see `docs/plans/per-task-mount-namespace.md` §1.1) and return
+`ENOSYS` until they land; `SYS_UNMOUNT` therefore took 69, past that reservation.
 
 ---
 
@@ -125,6 +128,8 @@ framework; never reuse any of these numbers).
 | 64 | `SYS_DEV_DMA_ALLOC` | Allocate a DMA buffer, return its phys addr (Device-cap gated) |
 | 65 | `SYS_DEV_IRQ_WAIT` | Block until the device raises its IRQ (Device-cap gated) |
 | 66 | `SYS_DEV_IRQ_ACK` | Acknowledge/unmask the device IRQ (Device-cap gated) |
+| 67–68 | *(reserved)* | For `SYS_NS_CREATE` / `SYS_NS_ENTER` (not yet landed); return `ENOSYS` |
+| 69 | `SYS_UNMOUNT` | Unmount a filesystem at a path (Filesystem+WRITE gated) |
 
 ---
 
@@ -1091,6 +1096,38 @@ lifts it in place. On a persistent (`MOUNT_SRC_RFS2_BLK`) store mount the seal
 set is reconstructed from the on-disk store contents at mount time, so it holds
 across a power cycle. Dead store entries are reclaimed only by whole-path
 removal (`SYS_STORE_REMOVE`, below), never by making sealed content writable.
+
+### SYS_UNMOUNT — 69
+
+Unmount the filesystem mounted at exactly `at`, dropping its route and freeing
+its backend. The counterpart to `SYS_MOUNT`; wired ahead of the per-task
+mount-namespace work because teardown is load-bearing for namespace isolation
+(`docs/plans/per-task-mount-namespace.md` §4).
+
+**Capability:** requires a `Filesystem` capability with the `WRITE` right in the
+caller's table — the same gate as `SYS_MOUNT`. No ambient authority: without the
+capability the call returns `ENOPERM` regardless of arguments.
+
+**Arguments:**
+
+| Reg | Meaning |
+|-----|---------|
+| a1 | `at_ptr` — mount point path (UTF-8), matched exactly |
+| a2 | `at_len` — path length in bytes |
+
+**Returns:** 0 on success; `ENOPERM` if the caller holds no `Filesystem`
+capability with `WRITE`; `EINVAL` for a bad pointer/length, non-UTF-8 or relative
+path, or an attempt to unmount the pinned root mount (`/`); `ENOMNT` if no mount
+exists at exactly `at`.
+
+`at` must name a mount point exactly (the same string that was mounted) — it is
+not longest-prefix routing. The root mount (`/`) is **pinned** and can never be
+unmounted (`EINVAL`), so the whole system always has a `/`. After the route is
+removed, the backend is freed from the global backend store **only once no mount
+namespace still routes to it** — a backend shared into several namespaces
+outlives the removal of any one route (§5.1 teardown invariant). Open fds that
+were addressing the freed backend fail closed afterwards (`EBADF` / no-op), the
+same path taken when a backend is unmounted underneath an open fd.
 
 ### SYS_STORE_REMOVE (60)
 

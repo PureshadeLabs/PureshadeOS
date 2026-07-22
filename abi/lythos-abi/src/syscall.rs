@@ -5,7 +5,10 @@
 //!
 //! Gaps: 49, the retired UDP socket API 50–54, and the retired SYS_UNSEAL 59
 //! are unassigned and always return ENOSYS (see the notes at those numbers).
-//! SYSCALL_MAX = 66 (SYS_DEV_IRQ_ACK).
+//! Numbers 67–68 are RESERVED for the per-task mount-namespace syscalls
+//! (`SYS_NS_CREATE`/`SYS_NS_ENTER`, docs/plans/per-task-mount-namespace.md §1.1)
+//! landing in a later stage; they return ENOSYS until then.
+//! SYSCALL_MAX = 69 (SYS_UNMOUNT).
 
 // ── Process / task management ─────────────────────────────────────────────────
 
@@ -208,6 +211,16 @@ pub const MOUNT_SRC_RFS2_BLK:    u64 = 1;
 /// store semantics) to this mount.
 pub const MOUNT_STORE:           u64 = 1 << 0;
 
+/// Unmount the filesystem at exactly `at`, freeing its backend once no mount
+/// namespace still routes to it. Requires a Filesystem capability with WRITE
+/// right — the same gate as SYS_MOUNT (no ambient authority). The root mount
+/// (`/`) is pinned and cannot be unmounted (EINVAL). Open fds addressing the
+/// freed backend fail closed afterwards (EBADF / no-op).
+/// a1=at_ptr, a2=at_len (mount point, UTF-8). Returns 0 or negative errno
+/// (ENOPERM, ENOMNT if nothing is mounted at `at`, EINVAL for the root mount or
+/// bad args).
+pub const SYS_UNMOUNT:           u64 = 69;
+
 // ── Symlinks ──────────────────────────────────────────────────────────────────
 
 /// Create a symbolic link at `link` pointing at `target` (target is stored
@@ -302,4 +315,6 @@ pub const SYS_DEV_IRQ_ACK:       u64 = 66;
 /// Highest assigned syscall number. Calls above this return ENOSYS.
 /// Numbers 49, 50-54 and 59 are unassigned gaps and also return ENOSYS
 /// (59 = retired SYS_UNSEAL, 50-54 = retired UDP socket API — never reuse them).
-pub const SYSCALL_MAX:           u64 = SYS_DEV_IRQ_ACK;
+/// Numbers 67-68 are reserved (not yet assigned) for the mount-namespace
+/// syscalls and also return ENOSYS until they land.
+pub const SYSCALL_MAX:           u64 = SYS_UNMOUNT;

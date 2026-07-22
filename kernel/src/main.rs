@@ -733,6 +733,63 @@ pub extern "C" fn kernel_main() -> ! {
 
         kprintln!("{TAG}[mount]{RST} stage-1 probe {OK}passed{RST} — cap gate, routing, root isolation");
 
+        // ── SYS_UNMOUNT probe (namespaces stage 1, per-task-mount-namespace §1/§4)
+        // Teardown is load-bearing for namespace isolation, so SYS_UNMOUNT is
+        // wired on day one. The routing + teardown-gate logic is host-tested in
+        // fs/vfs-core; this covers the kernel glue the host cannot: the cap gate
+        // on the syscall boundary (identical to SYS_MOUNT), a real mount→unmount
+        // round-trip that frees the backend, root-mount pinning, and the
+        // absent-mount errno. NOTE: unmounting a RAM volume drops its backend
+        // but RamDisk has no Drop, so its PMM frames are not reclaimed yet — a
+        // known follow-up the namespace RAM-scratch teardown (stage 3) must
+        // close; harmless for this one-shot probe.
+        {
+            // Cap gate, deny path: no Filesystem cap ⇒ ENOPERM before any arg.
+            let mut uframe = syscall::SyscallFrame {
+                r15: 0, r14: 0, r13: 0, r12: 0, rbx: 0, rbp: 0, r11: 0, rcx: 0,
+                nr: syscall::SYS_UNMOUNT, a1: 0, a2: 0, a3: 0, a4: 0, a5: 0, a6: 0,
+            };
+            task::set_bootstrap_cap_table(cap::CapabilityTable::new());
+            let r = syscall::syscall_dispatch(&mut uframe);
+            assert_eq!(r as i64, -3, "unmount probe: no-cap must be ENOPERM, got {}", r as i64);
+
+            // Cap gate, pass path: with Filesystem+WRITE the gate opens and the
+            // next check (null user pointer) reports EINVAL — proving the deny
+            // above came from the capability, not the arguments.
+            let obj = cap::create_object(cap::KernelObject::Filesystem)
+                .expect("unmount probe: cap OOM");
+            let mut caps = cap::CapabilityTable::new();
+            cap::create_root_cap(&mut caps, cap::CapKind::Filesystem, cap::CapRights::ALL, obj);
+            task::set_bootstrap_cap_table(caps);
+            let r = syscall::syscall_dispatch(&mut uframe);
+            assert_eq!(r as i64, -4, "unmount probe: cap+bad-args must be EINVAL, got {}", r as i64);
+
+            // Real round-trip: fresh RAM volume at /mnt-un, then tear it down.
+            let r = vfs::mkdir(b"/mnt-un", 0, 0);
+            assert!(r == 0 || r == vfs::EEXIST, "unmount probe: mkdir /mnt-un failed: {r}");
+            assert_eq!(vfs::mount("/mnt-un", vfs::MOUNT_SRC_RFS2_RAM, 0), 0, "unmount probe: mount failed");
+            assert!(vfs::is_mounted_at("/mnt-un"), "unmount probe: /mnt-un not registered");
+            let fd = vfs::create(b"/mnt-un/f", 0, 0);
+            assert!(fd >= 0, "unmount probe: create on volume failed: {fd}");
+            assert_eq!(vfs::close(fd as u64), 0);
+
+            // Unmount: the route drops and, since no namespace still routes to
+            // the backend, it is freed from the global store.
+            assert_eq!(vfs::unmount("/mnt-un"), 0, "unmount probe: unmount failed");
+            assert!(!vfs::is_mounted_at("/mnt-un"), "unmount probe: /mnt-un still registered");
+            // The mount point falls back to root, where the volume's file never
+            // existed — the freed backend is unreachable, not silently re-routed.
+            assert!(vfs::open(b"/mnt-un/f") < 0, "unmount probe: freed file still reachable");
+
+            // Absent mount ⇒ ENOMNT; root mount is pinned ⇒ EINVAL.
+            assert_eq!(vfs::unmount("/mnt-un"), vfs::ENOMNT, "unmount probe: absent must be ENOMNT");
+            assert_eq!(vfs::unmount("/"), vfs::EINVAL, "unmount probe: root must be pinned (EINVAL)");
+            // Root volume still serves after all of it.
+            assert!(vfs::generation().is_some(), "unmount probe: root gone after teardown");
+
+            kprintln!("{TAG}[mount]{RST} unmount probe {OK}passed{RST} — cap gate, teardown+free, root pinned, ENOMNT");
+        }
+
         // ── Stage-1 hardening: RamDisk direct-map ceiling + cap gate across
         // the REAL ring-3 boundary (the dispatcher probe above never leaves
         // ring 0) ──────────────────────────────────────────────────────────

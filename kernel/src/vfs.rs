@@ -36,8 +36,8 @@ use alloc::vec::Vec;
 
 use rfs2::{BlockDevice, Error, GcmTransform, IdentityTransform, Rfs2};
 use vfs_core::{
-    BackendId, BackendStore, FsBackend, FsError, InodeMeta, MountError, MountId, MountTable,
-    RealizeGuard, RenameOutcome,
+    BackendId, BackendStore, FsBackend, FsError, InodeMeta, MountError, MountId, Namespaces, NsId,
+    RealizeGuard, RenameOutcome, ROOT_NS,
 };
 
 use crate::virtio_blk;
@@ -460,9 +460,14 @@ struct Vfs {
     /// "one `&mut`, one op" discipline holds by lexical scoping with no
     /// `RefCell` (docs/plans/per-task-mount-namespace.md §5.1).
     backends: BackendStore,
-    /// Routing only: `prefix → BackendId`. Owns no backend, so it stays cheap to
-    /// clone when per-task namespaces land.
-    table:   MountTable,
+    /// The per-task mount namespaces (routing only: each is a `MountTable` of
+    /// `prefix → BackendId`, owning no backend). Stage 1 holds a single pinned
+    /// root namespace ([`ROOT_NS`]) carrying the whole-machine view; every FS
+    /// syscall still resolves against it via [`current_ns`] until stage 3 makes
+    /// resolution task-relative (docs/plans/per-task-mount-namespace.md §2).
+    /// A field **disjoint** from `backends`, so route resolution and the one
+    /// backend `&mut` never alias.
+    namespaces: Namespaces,
     root_id: BackendId,
     fds:     [Option<OpenFile>; MAX_FDS],
     /// Read-only-after-realize guards, keyed by the guarded backend's id,
@@ -481,6 +486,18 @@ static STATE: VfsState = VfsState(core::cell::UnsafeCell::new(None));
 #[inline]
 fn state() -> Option<&'static mut Vfs> {
     unsafe { (*STATE.0.get()).as_mut() }
+}
+
+/// The namespace the current syscall resolves against. Stage 1: every task
+/// still shares the root namespace, so this is always [`ROOT_NS`] and the
+/// system behaves exactly as before namespaces existed. Stage 3 makes this the
+/// calling task's own namespace (docs/plans/per-task-mount-namespace.md §2);
+/// keeping it a single free function (borrowing no [`Vfs`]) means that
+/// conversion touches exactly one body, and every FS handler already threads
+/// its result.
+#[inline]
+fn current_ns() -> NsId {
+    ROOT_NS
 }
 
 // ── Init / mount ──────────────────────────────────────────────────────────────
@@ -534,16 +551,18 @@ pub fn init() -> bool {
     // passphrase): only reached here after a successful mount of either kind.
     ROOT_ENCRYPTED.store(encrypted, core::sync::atomic::Ordering::Relaxed);
 
-    let mut table = MountTable::new();
+    let mut namespaces = Namespaces::new();
     let mut backends = BackendStore::new();
-    let root_id = match table.mount("/", backend, &mut backends) {
+    // `/` is mounted into the pinned root namespace; every other namespace is
+    // derived from it later. Boot behaviour is unchanged — one table, one view.
+    let root_id = match namespaces.root_table_mut().mount("/", backend, &mut backends) {
         Ok(id) => id,
-        Err(_) => return false, // impossible: empty table accepts "/"
+        Err(_) => return false, // impossible: empty root namespace accepts "/"
     };
     unsafe {
         *STATE.0.get() = Some(Vfs {
             backends,
-            table,
+            namespaces,
             root_id,
             fds: [const { None }; MAX_FDS],
             guards: BTreeMap::new(),
@@ -613,11 +632,11 @@ fn mount_encrypted_root(blocks: u64, header: &rfs2::StaticHeader) -> Option<Box<
 /// store key into the (already-mounted) encrypted root. `false` on any error.
 fn write_root_file(path: &str, data: &[u8]) -> bool {
     let Some(v) = state() else { return false };
-    let target = match resolve_parent(v, path) {
+    let target = match resolve_parent(v, ROOT_NS, path) {
         Ok(t) => t,
         Err(_) => return false,
     };
-    let (mount, rel) = match v.table.resolve(&target) {
+    let (mount, rel) = match v.namespaces.resolve(ROOT_NS, &target) {
         Ok(t) => t,
         Err(_) => return false,
     };
@@ -751,9 +770,10 @@ pub fn mount(at: &str, source: u64, flags: u64) -> i64 {
         return EINVAL;
     }
     let store = flags & MOUNT_STORE != 0;
+    let ns = current_ns();
 
     // Reject early (cheaply) before building the backend.
-    if v.table.is_mounted_at(at) {
+    if v.namespaces.is_mounted_at(ns, at) {
         return EMOUNTED;
     }
 
@@ -814,7 +834,7 @@ pub fn mount(at: &str, source: u64, flags: u64) -> i64 {
         _ => return EINVAL,
     };
 
-    match v.table.mount(at, backend, &mut v.backends) {
+    match v.namespaces.mount(ns, at, backend, &mut v.backends) {
         Ok(id) => {
             if store {
                 // Reconstruct the realize-seal set from the persisted store
@@ -865,25 +885,33 @@ pub fn mount(at: &str, source: u64, flags: u64) -> i64 {
 /// afterwards (their `BackendStore::get` returns `None` → `EBADF`/no-op), the
 /// same "backend unmounted underneath the fd" path `close`/`read` already take.
 ///
-/// Not yet wired to a syscall (there is no `SYS_UNMOUNT`); it is the teardown
-/// primitive the namespace reaper calls. `#[allow(dead_code)]` (module-wide)
-/// covers the currently-unreferenced entry.
+/// Wired to `SYS_UNMOUNT` (cap-gated on the syscall boundary exactly like
+/// `SYS_MOUNT`); it is also the teardown primitive the namespace reaper will
+/// call once per-task namespaces tear down on exit (§4).
 pub fn unmount(at: &str) -> i64 {
     let v = match state() {
         Some(v) => v,
         None => return ENOMNT,
     };
+    let ns = current_ns();
     // Root is pinned — the whole system routes through it (§4 root-namespace
-    // pinning); refuse to strand every path with no `/`.
-    if v.table.resolve(at).map(|(id, rel)| id == v.root_id && rel == "/").unwrap_or(false) {
+    // pinning); refuse to strand every path with no `/`. The root backend is
+    // pinned regardless of the namespace the unmount runs in.
+    if v.namespaces
+        .resolve(ns, at)
+        .map(|(id, rel)| id == v.root_id && rel == "/")
+        .unwrap_or(false)
+    {
         return EINVAL;
     }
-    let freed = match v.table.unmount(at) {
+    let freed = match v.namespaces.unmount(ns, at) {
         Ok(id) => id,
         Err(e) => return errno_mount(e),
     };
-    // Free the backend + its guard only when the last route to it is gone.
-    if !v.table.routes_to(freed) {
+    // Free the backend + its guard only when the last route to it is gone
+    // across ALL namespaces — a backend shared into another namespace's routing
+    // table must outlive the removal of this one route (§5.1 teardown invariant).
+    if !v.namespaces.any_routes_to(freed) {
         v.guards.remove(&freed);
         v.backends.remove(freed);
     }
@@ -897,7 +925,7 @@ pub fn unmount(at: &str) -> i64 {
 /// the covering backend — including a symlink target that crosses a mount
 /// boundary. Returns a full (mount-side) path whose components are fully
 /// resolved.
-fn resolve(v: &mut Vfs, path: &str, hops: usize) -> Result<String, i64> {
+fn resolve(v: &mut Vfs, ns: NsId, path: &str, hops: usize) -> Result<String, i64> {
     if hops > MAX_SYMLINK_HOPS {
         return Err(EINVAL);
     }
@@ -910,12 +938,13 @@ fn resolve(v: &mut Vfs, path: &str, hops: usize) -> Result<String, i64> {
         let mut cand = resolved.clone();
         cand.push('/');
         cand.push_str(comp);
-        // Route → Copy BackendId (routing borrow ends), then borrow that one
-        // backend for this hop's stat. `meta`/`target` are owned, so the
-        // backend borrow is released before the tail-recursive `resolve` below
-        // re-borrows the table — the reentrancy safety is now structural, not a
-        // matter of the old `&mut`-into-the-table borrow ending "just in time".
-        let (bid, rel) = v.table.resolve(&cand).map_err(errno_mount)?;
+        // Route in the caller's namespace → Copy BackendId (routing borrow
+        // ends), then borrow that one backend for this hop's stat. `meta`/
+        // `target` are owned, so the backend borrow is released before the
+        // tail-recursive `resolve` below re-borrows the namespace — the
+        // reentrancy safety is structural, not a matter of a borrow ending
+        // "just in time".
+        let (bid, rel) = v.namespaces.resolve(ns, &cand).map_err(errno_mount)?;
         let be = v.backends.get(bid).ok_or(ENOMNT)?;
         let meta = be.stat(&rel).map_err(errno_fs)?;
         if meta.is_symlink {
@@ -932,7 +961,7 @@ fn resolve(v: &mut Vfs, path: &str, hops: usize) -> Result<String, i64> {
                 next.push('/');
                 next.push_str(rest);
             }
-            return resolve(v, &next, hops + 1);
+            return resolve(v, ns, &next, hops + 1);
         }
         resolved = cand;
     }
@@ -945,7 +974,7 @@ fn resolve(v: &mut Vfs, path: &str, hops: usize) -> Result<String, i64> {
 /// Resolve the parent directory (following symlinks) and re-attach the final
 /// component unresolved — for create/mkdir/unlink/rename, where the final
 /// component must not be followed.
-fn resolve_parent(v: &mut Vfs, path: &str) -> Result<String, i64> {
+fn resolve_parent(v: &mut Vfs, ns: NsId, path: &str) -> Result<String, i64> {
     if !path.starts_with('/') || path.ends_with('/') {
         return Err(EINVAL);
     }
@@ -954,7 +983,7 @@ fn resolve_parent(v: &mut Vfs, path: &str) -> Result<String, i64> {
     if name.is_empty() {
         return Err(EINVAL);
     }
-    let mut base = resolve(v, if parent.is_empty() { "/" } else { parent }, 0)?;
+    let mut base = resolve(v, ns, if parent.is_empty() { "/" } else { parent }, 0)?;
     if !base.ends_with('/') {
         base.push('/');
     }
@@ -978,11 +1007,12 @@ pub fn open(path: &[u8]) -> i64 {
         Some(s) => s,
         None => return EINVAL,
     };
-    let resolved = match resolve(v, p, 0) {
+    let ns = current_ns();
+    let resolved = match resolve(v, ns, p, 0) {
         Ok(r) => r,
         Err(e) => return e,
     };
-    let (mount, rel) = match v.table.resolve(&resolved) {
+    let (mount, rel) = match v.namespaces.resolve(ns, &resolved) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
@@ -1118,11 +1148,11 @@ pub fn create(path: &[u8], _uid: u32, _gid: u32) -> i64 {
         Some(s) => s,
         None => return EINVAL,
     };
-    let target = match resolve_parent(v, p) {
+    let target = match resolve_parent(v, current_ns(), p) {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let (mount, rel) = match v.table.resolve(&target) {
+    let (mount, rel) = match v.namespaces.resolve(current_ns(), &target) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
@@ -1166,11 +1196,11 @@ pub fn mkdir(path: &[u8], _uid: u32, _gid: u32) -> i64 {
         Some(s) => s,
         None => return EINVAL,
     };
-    let target = match resolve_parent(v, p) {
+    let target = match resolve_parent(v, current_ns(), p) {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let (mount, rel) = match v.table.resolve(&target) {
+    let (mount, rel) = match v.namespaces.resolve(current_ns(), &target) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
@@ -1210,11 +1240,11 @@ pub fn unlink(path: &[u8]) -> i64 {
         Some(s) => s,
         None => return EINVAL,
     };
-    let target = match resolve_parent(v, p) {
+    let target = match resolve_parent(v, current_ns(), p) {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let (mount, rel) = match v.table.resolve(&target) {
+    let (mount, rel) = match v.namespaces.resolve(current_ns(), &target) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
@@ -1308,7 +1338,7 @@ pub fn store_remove_tree(path: &[u8]) -> i64 {
         Some(s) => s,
         None => return EINVAL,
     };
-    let (mount, rel) = match v.table.resolve(p) {
+    let (mount, rel) = match v.namespaces.resolve(current_ns(), p) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
@@ -1374,11 +1404,11 @@ pub fn symlink(target: &[u8], link_path: &[u8]) -> i64 {
     if t.is_empty() {
         return EINVAL;
     }
-    let link_r = match resolve_parent(v, p) {
+    let link_r = match resolve_parent(v, current_ns(), p) {
         Ok(r) => r,
         Err(e) => return e,
     };
-    let (mount, rel) = match v.table.resolve(&link_r) {
+    let (mount, rel) = match v.namespaces.resolve(current_ns(), &link_r) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
@@ -1412,11 +1442,11 @@ pub fn readlink(path: &[u8], out: &mut [u8]) -> i64 {
         Some(s) => s,
         None => return EINVAL,
     };
-    let target = match resolve_parent(v, p) {
+    let target = match resolve_parent(v, current_ns(), p) {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let (mount, rel) = match v.table.resolve(&target) {
+    let (mount, rel) = match v.namespaces.resolve(current_ns(), &target) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
@@ -1444,19 +1474,20 @@ pub fn rename(old_path: &[u8], new_path: &[u8]) -> i64 {
         (Some(a), Some(b)) => (a, b),
         _ => return EINVAL,
     };
-    let old_r = match resolve_parent(v, op) {
+    let ns = current_ns();
+    let old_r = match resolve_parent(v, ns, op) {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let new_r = match resolve_parent(v, np) {
+    let new_r = match resolve_parent(v, ns, np) {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let (old_mount, old_rel) = match v.table.resolve(&old_r) {
+    let (old_mount, old_rel) = match v.namespaces.resolve(ns, &old_r) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
-    let (new_mount, new_rel) = match v.table.resolve(&new_r) {
+    let (new_mount, new_rel) = match v.namespaces.resolve(ns, &new_r) {
         Ok(t) => t,
         Err(e) => return errno_mount(e),
     };
@@ -1541,8 +1572,9 @@ pub fn stat_path(path: &[u8], out: &mut Stat) -> bool {
         None => return false,
     };
     let Some(p) = path_str(path) else { return false };
-    let Ok(resolved) = resolve(v, p, 0) else { return false };
-    let Ok((mount, rel)) = v.table.resolve(&resolved) else { return false };
+    let ns = current_ns();
+    let Ok(resolved) = resolve(v, ns, p, 0) else { return false };
+    let Ok((mount, rel)) = v.namespaces.resolve(ns, &resolved) else { return false };
     let Some(be) = v.backends.get(mount) else { return false };
     match be.stat(&rel) {
         Ok(meta) => {
@@ -1557,8 +1589,9 @@ pub fn stat_path(path: &[u8], out: &mut Stat) -> bool {
 pub fn readdir_path(path: &[u8]) -> Option<Vec<DirEntry>> {
     let v = state()?;
     let p = path_str(path)?;
-    let resolved = resolve(v, p, 0).ok()?;
-    let (mount, rel) = v.table.resolve(&resolved).ok()?;
+    let ns = current_ns();
+    let resolved = resolve(v, ns, p, 0).ok()?;
+    let (mount, rel) = v.namespaces.resolve(ns, &resolved).ok()?;
     let be = v.backends.get(mount)?;
     let entries = be.readdir(&rel).ok()?;
     Some(
@@ -1572,8 +1605,9 @@ pub fn readdir_path(path: &[u8]) -> Option<Vec<DirEntry>> {
 /// Read a whole file into a `Vec<u8>` (exec path). Capped at 32 MiB.
 pub fn load_file(path: &str) -> Option<Vec<u8>> {
     let v = state()?;
-    let resolved = resolve(v, path, 0).ok()?;
-    let (mount, rel) = v.table.resolve(&resolved).ok()?;
+    let ns = current_ns();
+    let resolved = resolve(v, ns, path, 0).ok()?;
+    let (mount, rel) = v.namespaces.resolve(ns, &resolved).ok()?;
     let be = v.backends.get(mount)?;
     let meta = be.stat(&rel).ok()?;
     if meta.is_dir {
@@ -1601,14 +1635,14 @@ pub fn generation() -> Option<u64> {
 /// mounted volume is a distinct backend instance from root).
 pub fn generation_at(path: &str) -> Option<u64> {
     let v = state()?;
-    let (mount, _) = v.table.resolve(path).ok()?;
+    let (mount, _) = v.namespaces.resolve(ROOT_NS, path).ok()?;
     Some(v.backends.get(mount)?.generation())
 }
 
 /// Whether a mount is installed at exactly `at` (boot probes).
 pub fn is_mounted_at(at: &str) -> bool {
     match state() {
-        Some(v) => v.table.is_mounted_at(at),
+        Some(v) => v.namespaces.is_mounted_at(ROOT_NS, at),
         None => false,
     }
 }

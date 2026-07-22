@@ -26,6 +26,7 @@ extern crate alloc;
 
 pub mod backend;
 pub mod mount;
+pub mod namespace;
 pub mod realize;
 
 #[cfg(test)]
@@ -33,4 +34,5 @@ mod testutil;
 
 pub use backend::{DirEntry, FsBackend, FsError, InodeMeta};
 pub use mount::{BackendId, BackendStore, MountError, MountId, MountTable};
+pub use namespace::{Namespaces, NsId, ROOT_NS};
 pub use realize::{RealizeGuard, RenameOutcome};
