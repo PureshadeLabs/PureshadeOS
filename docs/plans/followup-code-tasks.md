@@ -310,11 +310,15 @@ provably reaches the device before `flush()` returns. Confirmed on boot via the
 guarantees write-through durability, so the no-op path is correct.
 
 **TODO(open) surfaced during wiring:**
-- **create/mkdir ownership**: `Rfs2::create`/`mkdir` (doc 07 §3, doc 06 §1)
-  take no uid/gid and stamp 0/0 mode 0644/0755. The V1 driver recorded the
-  caller's uid/gid. `vfs::create`/`mkdir` accept `uid`/`gid` for ABI
-  compatibility but ignore them. Needs a spec-defined set-ownership operation
-  (chown-equivalent) before multi-user DAC on V2 files is meaningful.
+- ~~**create/mkdir ownership**~~ RESOLVED (spec) 2026-07-21: formalized as
+  intended behavior rather than a code fix. `Rfs2::create`/`mkdir` stamp
+  0/0 mode 0644/0755; `vfs::create`/`mkdir` accept `uid`/`gid` for ABI
+  stability and MUST ignore them. Documented in
+  [`docs/rfs-v2/07 §3`](../rfs-v2/07-directories.md) ("Ownership at create") and
+  under `SYS_CREATE`/`SYS_MKDIR` in `docs/spec/syscalls.md`: the kernel path
+  keeps carrying the caller's uid/gid so a chown-equivalent can land later
+  without an ABI break. No kernel change — the ignore is correct. (V1 driver
+  retirement below stays open.)
 - ~~**ENOTEMPTY**~~ RESOLVED 2026-07-13 with item 10: sentinel `-16` in both
   errno tables; `vfs::errno_fs` no longer folds `NotEmpty` into `EINVAL`.
 - ~~**EIO sentinel**~~ RESOLVED 2026-07-13 with item 10: sentinel `-17` in

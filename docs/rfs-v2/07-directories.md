@@ -96,6 +96,20 @@ the target inode number. Cost O(entries); see [§4](#4-large-directory-behavior)
 4. Write the new dirent; rewrite the affected directory block COW.
 5. Commit.
 
+**Ownership at create.** `create` and `mkdir` set the new inode's `uid`/`gid`
+to **0/0** and `mode` to `0644` (files) / `0755` (directories), independent of
+the calling task's identity. rfs2 exposes no owner/mode argument at create: the
+`uid`/`gid` carried by the `SYS_CREATE`/`SYS_MKDIR` kernel path are **reserved
+for ABI stability and MUST be ignored** by a conforming implementation.
+Changing ownership or mode after create (a `chown`/`chmod` equivalent) is
+**deferred** until a multi-user ownership model exists; until then rfs2 volumes
+are effectively single-owner (root). The inode `uid`/`gid` fields
+([`06 §1`](06-inodes.md)) remain in the format so the operation can be added
+without an on-disk change. The `SYS_CREATE`/`SYS_MKDIR` kernel path likewise
+**continues to carry** the caller's uid/gid even though rfs2 ignores them, so
+an ownership model can be added later without an ABI break — mirroring the
+retained inode uid/gid fields.
+
 ### unlink / rmdir(dir, name)
 
 1. `lookup`; `ENOENT` if absent. For `rmdir`, verify the target directory
